@@ -1,170 +1,380 @@
 /**
- * Engine Core — 工作流引擎核心类型和状态机类
+ * Engine Core — 确定性状态机引擎核心
  *
- * 被以下文件引用：
- *   - plugin/workflow-engine.ts（插件入口）
- *   - workflow/workflow-definitions.ts（工作流定义）
- *   - workflow/batch-orchestrator.ts（批量编排器）
+ * 单流水线架构：7 个阶段 + 1 个条件分支阶段（fix），一个 runId。
+ * 无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。
+ *
+ * 设计决策索引：
+ *   D1: advance condition 判定
+ *   D2: fix 循环双层 exhausted 策略
+ *   D3: fix 增量重做
+ *   D4: confirm 时序（B 方案）
+ *   D6: 持久化（run.json）
+ *   D7: fix transition 动态路由
+ *   D8: advance 流程 result 校验
+ *   D9: 跨 Schema 校验
+ *   D12: FixArtifact 包名校验
  */
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+
+// ── 常量 ──────────────────────────────────────────────────────────────────────
+
+/** D2: fix 循环双层 exhausted 上限 */
+export const FIX_LIMITS = {
+  globalMax: 3,   // 全局 fix 上限（宽松）
+  phaseMax: 2,    // 单阶段 fix 上限（严格）
+} as const
+
+/** 完成哨兵 */
+export const DONE_SENTINEL = "__done__" as const
+
+// ── 核心类型 ──────────────────────────────────────────────────────────────────
 
 /** 单阶段配置 */
 export interface PhaseConfig {
   name: string
-  agent: string
-  description: string
+  agentFile: string                             // 对应的 agent .md 文件路径
   temperature: number
   maxRetries: number
-  failureBranch?: string
-  requireApproval?: boolean
+  requiresConfirmation?: boolean                // 为 true 时 advance 后暂停等待确认
+  isFixPhase?: boolean                          // 标记 fix 阶段，引擎特殊处理
+  tools: string[]                               // 允许的工具列表
 }
 
-/** 条件转移：根据上一阶段产物的字段值路由到不同下一阶段 */
-interface ConditionalTransition {
-  _condition: string
-  [outcome: string]: any
+/** 条件转移规则 */
+export interface TransitionRule {
+  from: string
+  condition: "always" | "passed" | "failed"
+  to: string                                    // 目标阶段名，DONE_SENTINEL 表示完成
 }
-
-/** 转移表值：字符串数组（无条件）或 ConditionalTransition（条件） */
-type TransitionTarget = string[] | ConditionalTransition
 
 /** 工作流定义 */
 export interface WorkflowDefinition {
   id: string
-  description?: string
   phases: PhaseConfig[]
-  transitions: Record<string, TransitionTarget>
-}
-
-/** 单次执行中一个阶段的历史记录 */
-interface PhaseHistoryEntry {
-  phase: string
-  status: "running" | "completed" | "failed"
-  startedAt: number
-  completedAt?: number
-  artifact?: any
-  artifactPath?: string
-  failureCount: number
+  transitions: TransitionRule[]
 }
 
 /** 一次工作流运行 */
 export interface WorkflowRun {
   runId: string
-  definition: WorkflowDefinition
-  currentPhase: string
+  definitionId: string
+  currentPhase: string | null
+  status: "running" | "paused" | "completed" | "completed_with_issues" | "aborted"
   phaseHistory: PhaseHistoryEntry[]
-  artifacts: Map<string, any>
-  status: "running" | "completed" | "failed" | "aborted"
-  startedAt: number
-  completedAt?: number
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
 }
 
-// ---------------------------------------------------------------------------
-// Engine
-// ---------------------------------------------------------------------------
+/** 单次执行中一个阶段的历史记录 */
+export interface PhaseHistoryEntry {
+  phase: string
+  status: "pending" | "in_progress" | "completed" | "failed" | "completed_with_issues"
+  artifactPath?: string
+  startedAt: string
+  completedAt?: string
+  retryCount: number                            // 每次 retry 递增，与 PhaseConfig.maxRetries 比较
+  branchedFrom?: string                         // fix 记录触发阶段；fix 回来的 entry 记录 "fix"
+  incrementalContext?: {
+    targetPackages: string[]                    // 增量模式：只处理这些包
+  }
+}
+
+/** advance 返回结构 */
+export interface AdvanceResult {
+  run: WorkflowRun
+  nextPhase: PhaseConfig | null
+  finished: boolean
+  waitingForConfirmation: boolean               // D4: true 时不激活 agent
+  rejected: boolean                             // 校验被拒绝时为 true
+  rejectionReason?: string                      // 拒绝原因
+}
+
+/** retry 返回结构 */
+export interface RetryResult {
+  run: WorkflowRun
+  retryCount: number
+  exhausted: boolean
+  terminalState?: "completed_with_issues"       // fix 阶段 retry exhausted 时的终止状态
+}
+
+// ── 引擎 ──────────────────────────────────────────────────────────────────────
 
 export class WorkflowEngine {
+  private definitions = new Map<string, WorkflowDefinition>()
   private runs = new Map<string, WorkflowRun>()
+  private artifactsRoot = ".workflow-artifacts"
 
-  start(def: WorkflowDefinition, runId: string, metadata?: Record<string, any>): WorkflowRun {
+  // ── 注册 ──
+
+  registerDefinition(def: WorkflowDefinition): void {
+    this.definitions.set(def.id, def)
+  }
+
+  // ── 生命周期 ──
+
+  start(defId: string, runId: string, metadata?: Record<string, unknown>): WorkflowRun {
+    const def = this.definitions.get(defId)
+    if (!def) throw new Error(`Workflow definition "${defId}" not found`)
     const firstPhase = def.phases[0]
-    if (!firstPhase) throw new Error(`Workflow "${def.id}" has no phases`)
+    if (!firstPhase) throw new Error(`Workflow "${defId}" has no phases`)
 
+    const now = new Date().toISOString()
     const run: WorkflowRun = {
       runId,
-      definition: def,
+      definitionId: defId,
       currentPhase: firstPhase.name,
-      phaseHistory: [
-        {
-          phase: firstPhase.name,
-          status: "running",
-          startedAt: Date.now(),
-          failureCount: 0,
-        },
-      ],
-      artifacts: new Map(),
       status: "running",
-      startedAt: Date.now(),
+      phaseHistory: [{
+        phase: firstPhase.name,
+        status: "in_progress",
+        startedAt: now,
+        retryCount: 0,
+      }],
       metadata: metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
     }
     this.runs.set(runId, run)
+    this.persist(run)
+    this.appendEvent(runId, "START", "", "workflow started")
     return run
   }
 
-  advance(runId: string, artifact?: any): { run: WorkflowRun; nextPhase: PhaseConfig | null; finished: boolean } {
+  advance(runId: string, input: { result?: "passed" | "failed" } = {}): AdvanceResult {
     const run = this.getRun(runId)
-    const entry = this.findRunningEntry(run)
-    if (entry) {
-      entry.status = "completed"
-      entry.completedAt = Date.now()
-      if (artifact !== undefined) {
-        entry.artifact = artifact
-        run.artifacts.set(run.currentPhase, artifact)
+    const def = this.getDefinition(run.definitionId)
+    const now = new Date().toISOString()
+
+    // ── Step 1: 验证 status === "running" ──
+    if (run.status !== "running") {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: `Cannot advance: run status is "${run.status}", expected "running"`,
       }
     }
 
-    const nextPhaseName = this.resolveTransition(run, artifact)
-    if (!nextPhaseName) {
-      run.status = "completed"
-      run.completedAt = Date.now()
-      return { run, nextPhase: null, finished: true }
+    const currentEntry = this.findCurrentEntry(run)
+    if (!currentEntry) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "No current in_progress phase entry found",
+      }
     }
 
-    run.currentPhase = nextPhaseName
-    const nextPhase = run.definition.phases.find((p) => p.name === nextPhaseName) ?? null
-    run.phaseHistory.push({
-      phase: nextPhaseName,
-      status: "running",
-      startedAt: Date.now(),
-      failureCount: 0,
-    })
+    // ── Step 4: fix 阶段特殊处理 ──
+    const currentPhaseConfig = def.phases.find(p => p.name === run.currentPhase)
+    if (currentPhaseConfig?.isFixPhase) {
+      return this.handleFixAdvance(run, def, currentEntry, input, now)
+    }
 
-    return { run, nextPhase, finished: false }
+    // ── Step 5: review / verify 阶段 → 从 summary.allPassed 推导 result (D8) ──
+    if (run.currentPhase === "review" || run.currentPhase === "verify") {
+      const derivedResult = this.deriveReviewResult(run, input.result)
+      if (derivedResult.rejected) {
+        return {
+          run,
+          nextPhase: null,
+          finished: false,
+          waitingForConfirmation: false,
+          rejected: true,
+          rejectionReason: derivedResult.rejectionReason,
+        }
+      }
+      input.result = derivedResult.effectiveResult
+    }
+
+    // ── Step 6: 完成当前 phaseHistory entry ──
+    currentEntry.status = "completed"
+    currentEntry.completedAt = now
+    run.updatedAt = now
+
+    // ── Step 7: condition: "always" 阶段 → 忽略 result ──
+
+    // ── Step 8: 匹配 TransitionRule (D1) ──
+    const effectiveResult = input.result ?? "passed"
+    const matchedRule = this.matchTransitionRule(def, run.currentPhase!, effectiveResult)
+
+    if (!matchedRule) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: `No transition rule found for phase "${run.currentPhase}" with result "${effectiveResult}"`,
+      }
+    }
+
+    // ── Step 9: to === DONE_SENTINEL → 完成 ──
+    if (matchedRule.to === DONE_SENTINEL) {
+      run.status = "completed"
+      run.currentPhase = null
+      run.updatedAt = now
+      this.persist(run)
+      this.appendEvent(runId, "COMPLETE", run.currentPhase ?? "", "workflow completed")
+      return {
+        run,
+        nextPhase: null,
+        finished: true,
+        waitingForConfirmation: false,
+        rejected: false,
+      }
+    }
+
+    // ── Step 10: 目标是 fix phase？检查 exhausted ──
+    const targetPhaseConfig = def.phases.find(p => p.name === matchedRule.to)
+    if (targetPhaseConfig?.isFixPhase) {
+      if (this.isFixExhausted(run, run.currentPhase!, true)) {
+        run.status = "completed_with_issues"
+        run.currentPhase = null
+        run.updatedAt = now
+        this.persist(run)
+        this.appendEvent(runId, "COMPLETE", "", "completed_with_issues (fix exhausted)")
+        return {
+          run,
+          nextPhase: null,
+          finished: true,
+          waitingForConfirmation: false,
+          rejected: false,
+        }
+      }
+    }
+
+    // ── Step 11: 目标 phase requiresConfirmation？(D4) ──
+    if (targetPhaseConfig?.requiresConfirmation) {
+      const newEntry: PhaseHistoryEntry = {
+        phase: matchedRule.to,
+        status: "pending",
+        startedAt: now,
+        retryCount: 0,
+      }
+      run.phaseHistory.push(newEntry)
+      run.currentPhase = matchedRule.to
+      run.status = "paused"
+      run.updatedAt = now
+      this.persist(run)
+      this.appendEvent(runId, "ADVANCE", matchedRule.to, "waiting for confirmation")
+      return {
+        run,
+        nextPhase: targetPhaseConfig,
+        finished: false,
+        waitingForConfirmation: true,
+        rejected: false,
+      }
+    }
+
+    // ── Step 12: 正常前进 ──
+    const newEntry: PhaseHistoryEntry = {
+      phase: matchedRule.to,
+      status: "in_progress",
+      startedAt: now,
+      retryCount: 0,
+      branchedFrom: targetPhaseConfig?.isFixPhase ? run.currentPhase! : undefined,
+    }
+    run.phaseHistory.push(newEntry)
+    const prevPhase = run.currentPhase
+    run.currentPhase = matchedRule.to
+    run.updatedAt = now
+    this.persist(run)
+    this.appendEvent(runId, "ADVANCE", matchedRule.to, `${prevPhase} → ${matchedRule.to}`)
+
+    return {
+      run,
+      nextPhase: targetPhaseConfig ?? null,
+      finished: false,
+      waitingForConfirmation: false,
+      rejected: false,
+    }
   }
 
-  retry(runId: string): { run: WorkflowRun; retryCount: number; branchedTo?: string; exhausted: boolean } {
+  confirm(runId: string): WorkflowRun {
     const run = this.getRun(runId)
-    const entry = this.findRunningEntry(run)
-    if (!entry) throw new Error("No running phase to retry")
+    if (run.status !== "paused") {
+      throw new Error(`Cannot confirm: run status is "${run.status}", expected "paused"`)
+    }
+    const currentEntry = this.findCurrentEntry(run)
+    if (!currentEntry) {
+      throw new Error("No current phase entry found")
+    }
+    const now = new Date().toISOString()
+    currentEntry.status = "in_progress"
+    run.status = "running"
+    run.updatedAt = now
+    this.persist(run)
+    this.appendEvent(runId, "CONFIRM", run.currentPhase!, "confirmed by user")
+    return run
+  }
 
-    const phaseConfig = this.getPhaseConfig(run, run.currentPhase)
-    entry.failureCount++
+  retry(runId: string): RetryResult {
+    const run = this.getRun(runId)
+    const def = this.getDefinition(run.definitionId)
+    const currentEntry = this.findCurrentEntry(run)
+    if (!currentEntry) throw new Error("No current in_progress phase to retry")
 
+    const phaseConfig = def.phases.find(p => p.name === run.currentPhase)
+    currentEntry.retryCount++
     const maxRetries = phaseConfig?.maxRetries ?? 2
-    if (entry.failureCount >= maxRetries) {
-      if (phaseConfig?.failureBranch) {
-        entry.status = "failed"
-        entry.completedAt = Date.now()
-        run.currentPhase = phaseConfig.failureBranch
-        run.phaseHistory.push({
-          phase: phaseConfig.failureBranch,
-          status: "running",
-          startedAt: Date.now(),
-          failureCount: 0,
-        })
-        return { run, retryCount: entry.failureCount, branchedTo: phaseConfig.failureBranch, exhausted: true }
+
+    if (currentEntry.retryCount >= maxRetries) {
+      // fix 阶段 retry exhausted → completed_with_issues
+      if (phaseConfig?.isFixPhase) {
+        run.status = "completed_with_issues"
+        currentEntry.status = "failed"
+        currentEntry.completedAt = new Date().toISOString()
+        run.updatedAt = new Date().toISOString()
+        this.persist(run)
+        this.appendEvent(runId, "FAIL", run.currentPhase!, "fix retry exhausted → completed_with_issues")
+        return {
+          run,
+          retryCount: currentEntry.retryCount,
+          exhausted: true,
+          terminalState: "completed_with_issues",
+        }
       }
-      run.status = "failed"
-      run.completedAt = Date.now()
-      return { run, retryCount: entry.failureCount, exhausted: true }
+      // 非 fix 阶段 exhausted
+      this.persist(run)
+      this.appendEvent(runId, "FAIL", run.currentPhase!, "retry exhausted")
+      return {
+        run,
+        retryCount: currentEntry.retryCount,
+        exhausted: true,
+      }
     }
 
-    return { run, retryCount: entry.failureCount, exhausted: false }
+    run.updatedAt = new Date().toISOString()
+    this.persist(run)
+    this.appendEvent(runId, "RETRY", run.currentPhase!, `retry #${currentEntry.retryCount}`)
+    return {
+      run,
+      retryCount: currentEntry.retryCount,
+      exhausted: false,
+    }
   }
 
   abort(runId: string): WorkflowRun {
     const run = this.getRun(runId)
-    run.status = "aborted"
-    run.completedAt = Date.now()
-    const entry = this.findRunningEntry(run)
-    if (entry) {
-      entry.status = "failed"
-      entry.completedAt = Date.now()
+    const now = new Date().toISOString()
+    const currentEntry = this.findCurrentEntry(run)
+    if (currentEntry) {
+      currentEntry.status = "failed"
+      currentEntry.completedAt = now
     }
+    run.status = "aborted"
+    run.updatedAt = now
+    this.persist(run)
+    this.appendEvent(runId, "ABORT", run.currentPhase ?? "", "workflow aborted")
     return run
   }
 
@@ -176,7 +386,96 @@ export class WorkflowEngine {
     return Array.from(this.runs.values())
   }
 
-  // --- private ---
+  // ── 持久化 (D6) ──
+
+  loadFromDisk(runId: string): WorkflowRun {
+    const filePath = join(this.artifactsRoot, runId, "run.json")
+    if (!existsSync(filePath)) {
+      throw new Error(`Run file not found: ${filePath}`)
+    }
+    const raw = readFileSync(filePath, "utf-8")
+    const run = JSON.parse(raw) as WorkflowRun
+    this.runs.set(runId, run)
+    return run
+  }
+
+  // ── 跨 Schema 校验 (D9) ──
+  // 返回 warnings 数组（不阻塞流程）
+
+  validateCrossSchema(run: WorkflowRun, completedPhase: string): string[] {
+    const warnings: string[] = []
+    const artifactsDir = join(this.artifactsRoot, run.runId)
+
+    const inventory = this.loadArtifactJson(artifactsDir, "inventory")
+    const analysis = this.loadArtifactJson(artifactsDir, "analysis")
+
+    if (!inventory || !analysis) {
+      warnings.push(
+        `跨 Schema 校验跳过：缺少必要的 artifact（inventory: ${!!inventory}, analysis: ${!!analysis}）`
+      )
+      return warnings
+    }
+
+    // inventory 包名 ↔ analysis 包名（双向）
+    const invNames = new Set(
+      (inventory.packages as Array<{ name: string }>).map((p) => p.name)
+    )
+    const anaNames = new Set(
+      (analysis.packages as Array<{ name: string }>).map((p) => p.name)
+    )
+    for (const name of invNames) {
+      if (!anaNames.has(name)) warnings.push(`analysis 缺少包: ${name}`)
+    }
+    for (const name of anaNames) {
+      if (!invNames.has(name)) warnings.push(`inventory 缺少包: ${name}（analysis 中存在但 inventory 中不存在）`)
+    }
+
+    // translationOrder 覆盖校验
+    const orderedNames = new Set(
+      ((analysis.translationOrder as string[][]) ?? []).flat()
+    )
+    for (const name of anaNames) {
+      if (!orderedNames.has(name)) warnings.push(`translationOrder 缺少包: ${name}`)
+    }
+
+    // plan 映射覆盖（仅 plan 完成后校验）
+    if (completedPhase === "plan") {
+      const plan = this.loadArtifactJson(artifactsDir, "plan")
+      if (!plan) {
+        warnings.push("plan 映射校验跳过：plan artifact 不存在")
+        return warnings
+      }
+      const mappedNames = new Set(
+        (plan.packageMappings as Array<{ oraclePackage: string }>).map((m) => m.oraclePackage)
+      )
+      for (const name of invNames) {
+        if (!mappedNames.has(name)) warnings.push(`plan 未映射包: ${name}`)
+      }
+    }
+
+    return warnings
+  }
+
+  // ── D2: isFixExhausted 双层判定 ──
+
+  isFixExhausted(run: WorkflowRun, triggerPhase: string, preCreate: boolean): boolean {
+    const fixEntries = run.phaseHistory.filter(e => e.phase === "fix")
+    const globalCount = fixEntries.length
+    const phaseCount = fixEntries.filter(e => e.branchedFrom === triggerPhase).length
+
+    if (preCreate) {
+      // 创建前检查：当前数量 + 1 超过上限时阻止创建
+      if (globalCount + 1 > FIX_LIMITS.globalMax) return true
+      if (phaseCount + 1 > FIX_LIMITS.phaseMax) return true
+    } else {
+      // 创建后检查：当前数量已达上限时触发 exhausted
+      if (globalCount >= FIX_LIMITS.globalMax) return true
+      if (phaseCount >= FIX_LIMITS.phaseMax) return true
+    }
+    return false
+  }
+
+  // ── 私有方法 ──
 
   private getRun(runId: string): WorkflowRun {
     const run = this.runs.get(runId)
@@ -184,50 +483,298 @@ export class WorkflowEngine {
     return run
   }
 
-  private findRunningEntry(run: WorkflowRun): PhaseHistoryEntry | undefined {
-    return run.phaseHistory.find(
-      (h) => h.phase === run.currentPhase && h.status === "running",
+  private getDefinition(defId: string): WorkflowDefinition {
+    const def = this.definitions.get(defId)
+    if (!def) throw new Error(`Workflow definition "${defId}" not found`)
+    return def
+  }
+
+  private findCurrentEntry(run: WorkflowRun): PhaseHistoryEntry | undefined {
+    // 找最后一个当前 phase 的 entry
+    for (let i = run.phaseHistory.length - 1; i >= 0; i--) {
+      const entry = run.phaseHistory[i]
+      if (entry.phase === run.currentPhase && (entry.status === "in_progress" || entry.status === "pending")) {
+        return entry
+      }
+    }
+    return undefined
+  }
+
+  /** 匹配 TransitionRule (D1: 根据 result 匹配 condition) */
+  private matchTransitionRule(
+    def: WorkflowDefinition,
+    fromPhase: string,
+    result: "passed" | "failed",
+  ): TransitionRule | null {
+    // 先匹配 condition 为 result 的规则，再匹配 always
+    const exact = def.transitions.find(
+      t => t.from === fromPhase && t.condition === result
     )
+    if (exact) return exact
+    const always = def.transitions.find(
+      t => t.from === fromPhase && t.condition === "always"
+    )
+    return always ?? null
   }
 
-  private getPhaseConfig(run: WorkflowRun, phase: string): PhaseConfig | undefined {
-    return run.definition.phases.find((p) => p.name === phase)
+  /** D8: review/verify result 推导 */
+  private deriveReviewResult(
+    run: WorkflowRun,
+    explicitResult?: "passed" | "failed",
+  ): { rejected: boolean; effectiveResult: "passed" | "failed"; rejectionReason?: string } {
+    const artifactsDir = join(this.artifactsRoot, run.runId)
+    const summaryFileName = run.currentPhase === "review"
+      ? "review-summary.json"
+      : "verify-summary.json"
+    const summary = this.loadArtifactJson(artifactsDir, summaryFileName.replace(".json", ""))
+
+    if (!summary) {
+      // summary 不存在，依赖 LLM 传入的 result
+      if (!explicitResult) {
+        return {
+          rejected: true,
+          effectiveResult: "passed",
+          rejectionReason: `${summaryFileName} not found. Please provide result explicitly.`,
+        }
+      }
+      return { rejected: false, effectiveResult: explicitResult }
+    }
+
+    const allPassed = (summary as { allPassed?: boolean }).allPassed ?? false
+
+    if (explicitResult !== undefined) {
+      // 防御性校验：与 allPassed 不一致时拒绝
+      if (explicitResult === "passed" && !allPassed) {
+        return {
+          rejected: true,
+          effectiveResult: "passed",
+          rejectionReason: `result="passed" but allPassed=false in ${summaryFileName}. Fix the failing packages or add mustFix items.`,
+        }
+      }
+      if (explicitResult === "failed" && allPassed) {
+        return {
+          rejected: true,
+          effectiveResult: "failed",
+          rejectionReason: `result="failed" but allPassed=true in ${summaryFileName}. No issues found — please set result="passed".`,
+        }
+      }
+      return { rejected: false, effectiveResult: explicitResult }
+    }
+
+    // 自动推导
+    return { rejected: false, effectiveResult: allPassed ? "passed" : "failed" }
   }
 
-  private resolveTransition(run: WorkflowRun, artifact?: any): string | null {
-    const transDef = run.definition.transitions[run.currentPhase]
-    if (!transDef) return null
-
-    if (Array.isArray(transDef)) {
-      return transDef[0] ?? null
+  /** D3/D7/D12: fix 阶段 advance 处理 */
+  private handleFixAdvance(
+    run: WorkflowRun,
+    def: WorkflowDefinition,
+    currentEntry: PhaseHistoryEntry,
+    input: { result?: "passed" | "failed" },
+    now: string,
+  ): AdvanceResult {
+    // fix 阶段 result 必填 (D1/D3)
+    if (input.result === undefined) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "fix 阶段 result 必填（D1/D3）。请传入 result: 'passed' 或 'failed'。",
+      }
     }
 
-    if (transDef._condition) {
-      const value = this.evaluateCondition(transDef._condition, artifact, run)
-      const key = String(value)
-      const targets = transDef[key]
-      if (Array.isArray(targets)) return targets[0] ?? null
-      return null
+    // fix failed：修不完
+    if (input.result === "failed") {
+      currentEntry.status = "failed"
+      currentEntry.completedAt = now
+      run.updatedAt = now
+
+      if (this.isFixExhausted(run, currentEntry.branchedFrom ?? "", false)) {
+        run.status = "completed_with_issues"
+        run.currentPhase = null
+        this.persist(run)
+        this.appendEvent(run.runId, "COMPLETE", "", "completed_with_issues (fix failed + exhausted)")
+        return {
+          run,
+          nextPhase: null,
+          finished: true,
+          waitingForConfirmation: false,
+          rejected: false,
+        }
+      }
+
+      // 未 exhausted → rejected，提示 LLM 调用 retry
+      this.persist(run)
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "fix failed but not exhausted. Please call retry() to try again.",
+      }
     }
 
+    // fix passed → advanceFromFix (D3/D7)
+    const triggerPhase = currentEntry.branchedFrom
+    if (!triggerPhase) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "fix entry missing branchedFrom. Cannot determine trigger phase.",
+      }
+    }
+
+    // D12: 校验 fixedPackages
+    const artifactsDir = join(this.artifactsRoot, run.runId)
+    const fixArtifact = this.loadArtifactJson(artifactsDir, "fix")
+    if (!fixArtifact) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "fix.json not found. Agent must write fix.json before advancing.",
+      }
+    }
+
+    const fixedPackages = (fixArtifact as { fixedPackages?: string[] }).fixedPackages ?? []
+    if (fixedPackages.length === 0) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "fix.json: fixedPackages is empty. Must fix at least one package.",
+      }
+    }
+
+    // D12: 校验包名存在于 inventory
+    const inventory = this.loadArtifactJson(artifactsDir, "inventory")
+    if (inventory) {
+      const invPackageNames = new Set(
+        (inventory.packages as Array<{ name: string }>).map(p => p.name.toUpperCase())
+      )
+      const invalidPackages = fixedPackages.filter(
+        p => !invPackageNames.has(p.toUpperCase())
+      )
+      if (invalidPackages.length > 0) {
+        return {
+          run,
+          nextPhase: null,
+          finished: false,
+          waitingForConfirmation: false,
+          rejected: true,
+          rejectionReason: `fix.json: invalid package names not in inventory: ${invalidPackages.join(", ")}`,
+        }
+      }
+    }
+
+    // D12: 校验 fixedPackages 包含触发阶段所有失败包
+    const summaryFileName = triggerPhase === "review"
+      ? "review-summary.json"
+      : "verify-summary.json"
+    const summary = this.loadArtifactJson(artifactsDir, summaryFileName.replace(".json", ""))
+    if (summary) {
+      const pkgResults = (summary as { packageResults?: Array<{ packageName: string; passed: boolean }> }).packageResults ?? []
+      const failedPackages = new Set(
+        pkgResults.filter(p => !p.passed).map(p => p.packageName.toUpperCase())
+      )
+      const fixedUpper = new Set(fixedPackages.map(p => p.toUpperCase()))
+      const missingPackages = Array.from(failedPackages).filter(p => !fixedUpper.has(p))
+      if (missingPackages.length > 0) {
+        return {
+          run,
+          nextPhase: null,
+          finished: false,
+          waitingForConfirmation: false,
+          rejected: true,
+          rejectionReason: `fix.json: missing failed packages: ${missingPackages.join(", ")}. fixedPackages must cover all failed packages.`,
+        }
+      }
+    }
+
+    // 校验通过 → 完成当前 fix entry
+    currentEntry.status = "completed"
+    currentEntry.completedAt = now
+
+    // 创建触发阶段新 entry（增量模式）
+    const newEntry: PhaseHistoryEntry = {
+      phase: triggerPhase,
+      status: "in_progress",
+      startedAt: now,
+      retryCount: 0,
+      branchedFrom: "fix",
+      incrementalContext: {
+        targetPackages: fixedPackages,
+      },
+    }
+    run.phaseHistory.push(newEntry)
+    const prevPhase = run.currentPhase
+    run.currentPhase = triggerPhase
+    run.updatedAt = now
+
+    const triggerPhaseConfig = def.phases.find(p => p.name === triggerPhase) ?? null
+    this.persist(run)
+    this.appendEvent(
+      run.runId, "ADVANCE", triggerPhase,
+      `fix → ${triggerPhase} (incremental, packages: ${fixedPackages.join(",")})`
+    )
+
+    return {
+      run,
+      nextPhase: triggerPhaseConfig,
+      finished: false,
+      waitingForConfirmation: false,
+      rejected: false,
+    }
+  }
+
+  /** 从磁盘加载 artifact JSON（防御性，不存在返回 null） */
+  private loadArtifactJson(artifactsDir: string, name: string): Record<string, unknown> | null {
+    // 尝试多个路径
+    const candidates = [
+      join(artifactsDir, `${name}.json`),
+      join(artifactsDir, "translations", name, "translation.json"),
+    ]
+    for (const filePath of candidates) {
+      if (existsSync(filePath)) {
+        try {
+          return JSON.parse(readFileSync(filePath, "utf-8"))
+        } catch {
+          return null
+        }
+      }
+    }
     return null
   }
 
-  private evaluateCondition(path: string, artifact: any, run: WorkflowRun): any {
-    const parts = path.split(".")
-    let root: any
-    if (parts[0] === "artifact") {
-      root = artifact
-      parts.shift()
-    } else {
-      root = run
+  /** D6: 持久化 run.json */
+  private persist(run: WorkflowRun): void {
+    const dir = join(this.artifactsRoot, run.runId)
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
     }
+    const filePath = join(dir, "run.json")
+    writeFileSync(filePath, JSON.stringify(run, null, 2), "utf-8")
+  }
 
-    let current = root
-    for (const part of parts) {
-      if (current == null) return undefined
-      current = current[part]
+  /** 追加事件日志 */
+  private appendEvent(runId: string, eventType: string, phase: string, message: string): void {
+    const dir = join(this.artifactsRoot, runId)
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
     }
-    return current
+    const logPath = join(dir, "_events.log")
+    const now = new Date().toISOString()
+    const line = `[${now}] [${eventType}] [${runId}] [${phase}] ${message}\n`
+    appendFileSync(logPath, line, "utf-8")
   }
 }

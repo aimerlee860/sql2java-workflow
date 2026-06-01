@@ -3,307 +3,536 @@
  *
  * 确定性多阶段状态机插件，驱动 Oracle PL/SQL → Spring Boot + MyBatis 翻译工作流。
  * 核心引擎位于 workflow/engine-core.ts。
+ *
+ * 设计决策：
+ *   D4:  confirm 时序（advance 返回 waitingForConfirmation=true 时不激活 agent）
+ *   D5:  agent 写 artifact，advance 时从磁盘做 Zod 校验
+ *   D8:  advance 流程 result 自动推导
+ *   D11: system prompt 精确注入（只注入当前 Phase section）
  */
 
 import { tool } from "@opencode-ai/plugin"
 import { z } from "zod"
-import { WorkflowEngine, type WorkflowDefinition, type PhaseConfig, type WorkflowRun } from "../workflow/engine-core"
+import { WorkflowEngine, type PhaseConfig, type WorkflowRun } from "../workflow/engine-core"
+import { SQL2JAVA_WORKFLOW, UPSTREAM_ARTIFACTS } from "../workflow/workflow-definitions"
+import { getSchemaForPhase, getPerPackageSchema, getSummarySchema } from "../workflow/artifact-schemas"
+import { readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs"
+import { join } from "node:path"
 
 // ---------------------------------------------------------------------------
-// Artifact 存储辅助
+// Constants
 // ---------------------------------------------------------------------------
 
 const ARTIFACT_DIR = ".workflow-artifacts"
 
-/** 将阶段产物写入文件系统，返回相对路径 */
-async function storeArtifact(
-  $: any,
-  runId: string,
-  phase: string,
-  data: any,
-): Promise<string> {
-  const dir = `${ARTIFACT_DIR}/${runId}`
-  await $`mkdir -p ${dir}`.quiet()
+// ---------------------------------------------------------------------------
+// Engine Singleton
+// ---------------------------------------------------------------------------
 
-  const filename = `${dir}/${phase}.json`
-  const json = typeof data === "string" ? data : JSON.stringify(data, null, 2)
-
-  // 用 Bun.write 或 Node fs — 这里用 shell
-  await $`cat > ${filename} << '___ARTIFACT_EOF___'
-${json}
-___ARTIFACT_EOF___`
-
-  return filename
-}
-
-/** 从文件系统读取产物 */
-async function loadArtifact($: any, runId: string, phase: string): Promise<any> {
-  const path = `${ARTIFACT_DIR}/${runId}/${phase}.json`
-  try {
-    const content = await $`cat ${path}`.quiet()
-    return JSON.parse(content.toString())
-  } catch {
-    return null
-  }
-}
-
-/** 生成摘要（用于 schema 收敛，避免大产物占满上下文） */
-function summarizeArtifact(phase: string, artifact: any): Record<string, any> {
-  if (!artifact) return { phase, status: "empty" }
-
-  switch (phase) {
-    case "inventory":
-      return {
-        phase,
-        packageCount: artifact.packages?.length ?? 0,
-        tableCount: artifact.tables?.length ?? 0,
-        standaloneCount: artifact.standaloneProcedures?.length ?? 0,
-      }
-
-    case "analyze":
-      return {
-        phase,
-        packageOrder: artifact.translationOrder ?? [],
-        highRiskCount: Object.values(artifact.complexity ?? {})
-          .filter((c: any) => c.riskLevel === "high" || c.riskLevel === "manual-required")
-          .length,
-      }
-
-    case "plan":
-      return {
-        phase,
-        totalBatches: artifact.packageMappings?.length ?? 0,
-        rules: artifact.rules ?? {},
-        manualReviewCount: artifact.manualReviewList?.length ?? 0,
-      }
-
-    case "scaffold":
-      return {
-        phase,
-        generatedFiles: artifact.files?.length ?? 0,
-      }
-
-    case "parse":
-      return {
-        phase,
-        packageName: artifact.package?.name,
-        routineCount: artifact.routines?.length ?? 0,
-        typeCount: artifact.typeDefinitions?.length ?? 0,
-        unknownCount: artifact.routines?.reduce(
-          (sum: number, r: any) => sum + (r.summary?.unknownCount ?? 0), 0,
-        ) ?? 0,
-      }
-
-    case "translate":
-      return {
-        phase,
-        packageName: artifact.packageName,
-        fileCount: artifact.files?.length ?? 0,
-        todoCount: artifact.todos?.length ?? 0,
-        manualRequiredCount: artifact.manualRequired?.length ?? 0,
-      }
-
-    case "review":
-      return {
-        phase,
-        passed: artifact.passed,
-        score: artifact.overallScore,
-        mustFixCount: artifact.mustFix?.length ?? 0,
-      }
-
-    case "verify":
-      return {
-        phase,
-        passed: artifact.passed,
-        compileSuccess: artifact.compilation?.success,
-        mybatisValid: artifact.mybatisValidation?.mapperXmlValid,
-      }
-
-    default:
-      return { phase, keys: Object.keys(artifact) }
-  }
-}
+const engine = new WorkflowEngine()
+engine.registerDefinition(SQL2JAVA_WORKFLOW)
 
 // ---------------------------------------------------------------------------
 // Workflow Context — 用于 hooks 中确定当前运行状态
 // ---------------------------------------------------------------------------
 
-let currentWorkflowContext: { runId: string; phase: string; agent: string; temperature: number } | null = null
+interface WorkflowContext {
+  runId: string
+  phase: string
+  agentFile: string
+  temperature: number
+  tools: string[]
+}
 
-/** 设置当前工作流上下文（由 start / advance 自动调用） */
+let currentWorkflowContext: WorkflowContext | null = null
+
 function setWorkflowContext(run: WorkflowRun): void {
-  const phaseConfig = run.definition.phases.find((p) => p.name === run.currentPhase)
+  const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(p => p.name === run.currentPhase)
+  if (!phaseConfig || !run.currentPhase) {
+    currentWorkflowContext = null
+    return
+  }
   currentWorkflowContext = {
     runId: run.runId,
     phase: run.currentPhase,
-    agent: phaseConfig?.agent ?? "unknown",
-    temperature: phaseConfig?.temperature ?? 0.1,
+    agentFile: phaseConfig.agentFile,
+    temperature: phaseConfig.temperature,
+    tools: phaseConfig.tools,
   }
 }
 
-/** 获取当前工作流上下文 */
-export function getWorkflowContext(): typeof currentWorkflowContext {
+export function getWorkflowContext(): WorkflowContext | null {
   return currentWorkflowContext
+}
+
+// ---------------------------------------------------------------------------
+// Artifact Validation (D5)
+// ---------------------------------------------------------------------------
+
+interface ValidationResult {
+  valid: boolean
+  errors?: string[]
+}
+
+function validateArtifactOnDisk(artifactsDir: string, phase: string): ValidationResult {
+  // Per-package phases: check each package directory
+  if (phase === "translate" || phase === "review" || phase === "verify") {
+    return validatePerPackageArtifacts(artifactsDir, phase)
+  }
+
+  // Fix phase: validate fix.json
+  if (phase === "fix") {
+    return validateSingleArtifact(artifactsDir, "fix", "fix.json")
+  }
+
+  // Top-level artifact phases
+  return validateSingleArtifact(artifactsDir, phase, `${phase}.json`)
+}
+
+function validateSingleArtifact(
+  artifactsDir: string,
+  phase: string,
+  fileName: string,
+): ValidationResult {
+  const filePath = join(artifactsDir, fileName)
+  if (!existsSync(filePath)) {
+    return { valid: false, errors: [`Artifact file not found: ${fileName}`] }
+  }
+
+  // For summary phases, try summary schema
+  const summarySchema = getSummarySchema(phase)
+  if (summarySchema) {
+    return parseAndValidate(filePath, summarySchema)
+  }
+
+  // For regular phases
+  const schema = getSchemaForPhase(phase)
+  if (schema) {
+    return parseAndValidate(filePath, schema)
+  }
+
+  // No schema defined for this phase — skip validation
+  return { valid: true }
+}
+
+function validatePerPackageArtifacts(
+  artifactsDir: string,
+  phase: string,
+): ValidationResult {
+  const schema = getPerPackageSchema(phase)
+  if (!schema) return { valid: true }
+
+  const translationsDir = join(artifactsDir, "translations")
+  if (!existsSync(translationsDir)) {
+    return { valid: false, errors: ["translations directory not found"] }
+  }
+
+  // For review/verify, also check summary
+  if (phase === "review" || phase === "verify") {
+    const summaryFileName = `${phase}-summary.json`
+    const summaryPath = join(artifactsDir, summaryFileName)
+    if (!existsSync(summaryPath)) {
+      return { valid: false, errors: [`Summary file not found: ${summaryFileName}`] }
+    }
+    const summarySchema = getSummarySchema(phase)
+    if (summarySchema) {
+      const result = parseAndValidate(summaryPath, summarySchema)
+      if (!result.valid) return result
+    }
+  }
+
+  return { valid: true }
+}
+
+function parseAndValidate(filePath: string, schema: z.ZodTypeAny): ValidationResult {
+  try {
+    const content = readFileSync(filePath, "utf-8")
+    const data = JSON.parse(content)
+    const result = schema.safeParse(data)
+    if (!result.success) {
+      const errors = result.error.issues.map(
+        i => `${i.path.join(".")}: ${i.message}`
+      )
+      return { valid: false, errors }
+    }
+    return { valid: true }
+  } catch (err: any) {
+    return { valid: false, errors: [`Failed to read/parse ${filePath}: ${err.message}`] }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// System Prompt Construction (D11)
+// ---------------------------------------------------------------------------
+
+function buildSystemPrompt(phase: string, run: WorkflowRun): string | null {
+  const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(p => p.name === phase)
+  if (!phaseConfig) return null
+
+  const agentPath = phaseConfig.agentFile
+  if (!existsSync(agentPath)) {
+    // Try relative to project root
+    const altPath = join(process.cwd(), agentPath)
+    if (!existsSync(altPath)) return null
+  }
+
+  try {
+    const fullPath = existsSync(agentPath) ? agentPath : join(process.cwd(), agentPath)
+    let agentContent = readFileSync(fullPath, "utf-8")
+
+    // Strip YAML frontmatter
+    agentContent = agentContent.replace(/^---[\s\S]*?---\n*/, "")
+
+    // Parse ## Phase: xxx section boundaries
+    const sections = parsePhaseSections(agentContent)
+
+    // Extract common portion (file header to first ## Phase:)
+    const commonPart = sections.commonPart
+
+    // Extract current phase's section
+    const phaseSection = sections.phaseSections.get(phase) ?? ""
+
+    // Build Runtime Context block
+    const artifactsDir = join(ARTIFACT_DIR, run.runId)
+    const upstream = UPSTREAM_ARTIFACTS[phase] ?? []
+    const runtimeCtx = buildRuntimeContextBlock(run, artifactsDir, upstream)
+
+    return `${commonPart}\n\n---\n\n${phaseSection}\n\n${runtimeCtx}`
+  } catch {
+    return null
+  }
+}
+
+function parsePhaseSections(content: string): {
+  commonPart: string
+  phaseSections: Map<string, string>
+} {
+  const phaseSections = new Map<string, string>()
+  const lines = content.split("\n")
+
+  let commonEndIndex = lines.length
+  const phaseStarts: { name: string; lineIndex: number }[] = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^## Phase:\s*(\S+)/)
+    if (match) {
+      if (phaseStarts.length === 0) {
+        commonEndIndex = i
+      }
+      phaseStarts.push({ name: match[1], lineIndex: i })
+    }
+  }
+
+  const commonPart = lines.slice(0, commonEndIndex).join("\n").trim()
+
+  for (let idx = 0; idx < phaseStarts.length; idx++) {
+    const start = phaseStarts[idx].lineIndex
+    const end = idx + 1 < phaseStarts.length ? phaseStarts[idx + 1].lineIndex : lines.length
+    const section = lines.slice(start, end).join("\n").trim()
+    phaseSections.set(phaseStarts[idx].name, section)
+  }
+
+  return { commonPart, phaseSections }
+}
+
+function buildRuntimeContextBlock(
+  run: WorkflowRun,
+  artifactsDir: string,
+  upstreamArtifacts: string[],
+): string {
+  const currentEntry = run.phaseHistory[run.phaseHistory.length - 1]
+  const incremental = currentEntry?.incrementalContext
+
+  const lines = [
+    "## Runtime Context",
+    "",
+    "| 字段 | 值 |",
+    "|------|-----|",
+    `| currentPhase | ${run.currentPhase} |`,
+    `| runId | ${run.runId} |`,
+    `| artifactsDir | ${artifactsDir} |`,
+  ]
+
+  if (run.metadata?.sourcePath) {
+    lines.push(`| sourcePath | ${run.metadata.sourcePath} |`)
+  }
+
+  if (incremental) {
+    lines.push(`| incrementalContext.targetPackages | ${JSON.stringify(incremental.targetPackages)} |`)
+  }
+
+  lines.push("")
+  lines.push("### Upstream Artifacts")
+  lines.push("")
+
+  for (const artifact of upstreamArtifacts) {
+    lines.push(`- \`${artifactsDir}/${artifact}\``)
+  }
+
+  return lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Event Logging
+// ---------------------------------------------------------------------------
+
+function appendEvent(runId: string, eventType: string, phase: string, message: string): void {
+  const dir = join(ARTIFACT_DIR, runId)
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  const logPath = join(dir, "_events.log")
+  const now = new Date().toISOString()
+  const line = `[${now}] [${eventType}] [${runId}] [${phase}] ${message}\n`
+  appendFileSync(logPath, line, "utf-8")
 }
 
 // ---------------------------------------------------------------------------
 // Plugin Export
 // ---------------------------------------------------------------------------
 
-const engine = new WorkflowEngine()
-
-export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
+export const WorkflowEnginePlugin = async ({ $ }: { $?: any }) => {
   return {
     tool: {
       /** 主工作流工具：LLM 调用此工具操作状态机 */
       workflow: tool({
         description:
-          "Deterministic multi-phase workflow engine. " +
-          "Use 'start' to create a run, 'advance' to move to the next phase, " +
-          "'retry' on failure, 'status' to inspect, 'abort' to cancel.",
+          "Deterministic single-pipeline workflow engine for PL/SQL → Java translation. " +
+          "Actions: 'start' to create a run, 'advance' to move to the next phase, " +
+          "'confirm' to approve a paused phase, 'retry' on failure, " +
+          "'status' to inspect, 'abort' to cancel, 'list' to see all runs.",
         args: {
-          action: z.enum(["start", "advance", "retry", "status", "abort", "list"]),
+          action: z.enum(["start", "advance", "confirm", "retry", "status", "abort", "list"]),
           runId: z.string().optional(),
-          workflowId: z.string().optional(),
-          phase: z.string().optional(),
-          artifact: z.any().optional(),
-          definition: z.any().optional(),
+          result: z.enum(["passed", "failed"]).optional(),
           metadata: z.any().optional(),
         },
-        execute: async (args: any, ctx: any) => {
+        execute: async (args: any) => {
           switch (args.action) {
+            // ── start ──────────────────────────────────────────
             case "start": {
-              if (!args.definition) throw new Error("definition is required for 'start'")
-              const def = args.definition as WorkflowDefinition
-              const runId = args.runId ?? `${def.id}-${Date.now()}`
-              const run = engine.start(def, runId, args.metadata)
+              const runId = args.runId ?? `run-${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15)}`
+              const metadata = args.metadata ?? {}
+
+              // Create artifacts directory
+              const dir = join(ARTIFACT_DIR, runId)
+              if (!existsSync(dir)) {
+                mkdirSync(dir, { recursive: true })
+              }
+
+              const run = engine.start("sql2java", runId, metadata)
               setWorkflowContext(run)
 
-              const phaseConfig = run.definition.phases[0]
+              const phaseConfig = SQL2JAVA_WORKFLOW.phases[0]
               return {
-                title: `Workflow "${def.id}" started`,
+                title: `Workflow "sql2java" started`,
                 output: [
                   `Run ID: ${runId}`,
                   `Phase: ${run.currentPhase}`,
-                  `Agent: ${phaseConfig?.agent}`,
+                  `Agent: ${phaseConfig?.agentFile}`,
                   `Temperature: ${phaseConfig?.temperature}`,
+                  `Artifacts Dir: ${dir}`,
                 ].join("\n"),
-                metadata: { runId, phase: run.currentPhase, agent: phaseConfig?.agent },
+                metadata: { runId, phase: run.currentPhase, agentFile: phaseConfig?.agentFile },
               }
             }
 
+            // ── advance ──────────────────────────────────────
             case "advance": {
               if (!args.runId) throw new Error("runId is required for 'advance'")
-              const { run, nextPhase, finished } = engine.advance(args.runId, args.artifact)
+              const runId = args.runId
+              const run = engine.status(runId)
+              if (!run) throw new Error(`Run "${runId}" not found`)
 
-              // 将完整产物写入文件，返回摘要
-              if (args.artifact) {
-                const prevPhase = run.phaseHistory[run.phaseHistory.length - 2]?.phase
-                if (prevPhase) {
-                  const path = await storeArtifact($, args.runId, prevPhase, args.artifact)
-                  const entry = run.phaseHistory.find((h) => h.phase === prevPhase)
-                  if (entry) entry.artifactPath = path
+              const artifactsDir = join(ARTIFACT_DIR, runId)
+              const currentPhase = run.currentPhase
+
+              // D5: Artifact disk validation before advance
+              const validation = validateArtifactOnDisk(artifactsDir, currentPhase ?? "")
+              if (!validation.valid) {
+                return {
+                  title: `Artifact validation failed for phase: ${currentPhase}`,
+                  output: [
+                    `Phase: ${currentPhase}`,
+                    `Rejected: artifact validation failed`,
+                    ``,
+                    `Errors:`,
+                    ...(validation.errors ?? []).map(e => `  - ${e}`),
+                    ``,
+                    `Please fix the artifact and retry advance.`,
+                  ].join("\n"),
+                  metadata: {
+                    runId,
+                    phase: currentPhase,
+                    rejected: true,
+                    rejectionReason: validation.errors?.join("; "),
+                  },
+                }
+              }
+
+              // D9: Cross-schema validation (analyze/plan completion)
+              if (currentPhase === "analyze" || currentPhase === "plan") {
+                const warnings = engine.validateCrossSchema(run, currentPhase)
+                if (warnings.length > 0) {
+                  appendEvent(runId, "WARN", currentPhase, warnings.join("; "))
+                }
+              }
+
+              // Execute advance
+              const result = engine.advance(runId, { result: args.result })
+              const { run: updatedRun, nextPhase, finished, waitingForConfirmation, rejected, rejectionReason } = result
+
+              if (rejected) {
+                return {
+                  title: `Advance rejected for phase: ${currentPhase}`,
+                  output: [
+                    `Phase: ${currentPhase}`,
+                    `Rejected: ${rejectionReason}`,
+                    ``,
+                    `Please correct and retry advance.`,
+                  ].join("\n"),
+                  metadata: { runId, phase: currentPhase, rejected: true, rejectionReason },
                 }
               }
 
               if (finished) {
                 currentWorkflowContext = null
                 return {
-                  title: `Workflow "${run.definition.id}" completed`,
+                  title: `Workflow completed: ${updatedRun.status}`,
                   output: [
-                    `Run ID: ${args.runId}`,
-                    `Status: completed`,
-                    `Phases: ${run.phaseHistory.length}`,
-                    `Duration: ${Date.now() - run.startedAt}ms`,
+                    `Run ID: ${runId}`,
+                    `Status: ${updatedRun.status}`,
+                    `Phases completed: ${updatedRun.phaseHistory.filter(h => h.status === "completed").length}`,
                   ].join("\n"),
-                  metadata: { runId: args.runId, status: "completed" },
+                  metadata: { runId, status: updatedRun.status },
                 }
               }
 
-              setWorkflowContext(run)
-              const summary = summarizeArtifact(run.currentPhase, args.artifact)
+              // D4: waitingForConfirmation → do NOT activate agent
+              if (waitingForConfirmation) {
+                currentWorkflowContext = null
+                return {
+                  title: `Paused for confirmation: ${updatedRun.currentPhase}`,
+                  output: [
+                    `Phase: ${updatedRun.currentPhase}`,
+                    `Status: waiting for user confirmation`,
+                    ``,
+                    `User must call: workflow({ action: "confirm", runId: "${runId}" })`,
+                  ].join("\n"),
+                  metadata: { runId, phase: updatedRun.currentPhase, waitingForConfirmation: true },
+                }
+              }
+
+              // Normal advance → activate agent
+              setWorkflowContext(updatedRun)
+
               return {
-                title: `Advanced to phase: ${run.currentPhase}`,
+                title: `Advanced to phase: ${updatedRun.currentPhase}`,
                 output: [
-                  `Phase: ${run.currentPhase}`,
-                  `Agent: ${nextPhase?.agent}`,
-                  `Description: ${nextPhase?.description}`,
+                  `Phase: ${updatedRun.currentPhase}`,
+                  `Agent: ${nextPhase?.agentFile}`,
                   `Temperature: ${nextPhase?.temperature}`,
-                  nextPhase?.requireApproval ? "⚠ Requires human approval" : "",
-                ].filter(Boolean).join("\n"),
+                  `Tools: ${nextPhase?.tools.join(", ")}`,
+                ].join("\n"),
                 metadata: {
-                  runId: args.runId,
-                  phase: run.currentPhase,
-                  agent: nextPhase?.agent,
-                  previousArtifactSummary: summary,
+                  runId,
+                  phase: updatedRun.currentPhase,
+                  agentFile: nextPhase?.agentFile,
                 },
               }
             }
 
+            // ── confirm ──────────────────────────────────────
+            case "confirm": {
+              if (!args.runId) throw new Error("runId is required for 'confirm'")
+              const run = engine.confirm(args.runId)
+              setWorkflowContext(run)
+
+              const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(p => p.name === run.currentPhase)
+              return {
+                title: `Confirmed: ${run.currentPhase}`,
+                output: [
+                  `Phase: ${run.currentPhase}`,
+                  `Status: running`,
+                  `Agent: ${phaseConfig?.agentFile}`,
+                  `Temperature: ${phaseConfig?.temperature}`,
+                ].join("\n"),
+                metadata: { runId: args.runId, phase: run.currentPhase, status: "running" },
+              }
+            }
+
+            // ── retry ────────────────────────────────────────
             case "retry": {
               if (!args.runId) throw new Error("runId is required for 'retry'")
-              const { run, retryCount, branchedTo, exhausted } = engine.retry(args.runId)
+              const { run, retryCount, exhausted, terminalState } = engine.retry(args.runId)
 
-              if (exhausted && !branchedTo) {
+              if (exhausted && terminalState) {
+                currentWorkflowContext = null
                 return {
-                  title: `Workflow failed: max retries exceeded`,
+                  title: `Retry exhausted: ${terminalState}`,
                   output: [
                     `Run ID: ${args.runId}`,
                     `Phase: ${run.currentPhase}`,
                     `Retries: ${retryCount}`,
-                    `Status: failed`,
+                    `Terminal state: ${terminalState}`,
                   ].join("\n"),
-                  metadata: { runId: args.runId, status: "failed" },
+                  metadata: { runId: args.runId, status: terminalState, retryCount },
                 }
               }
 
-              if (branchedTo) {
+              if (exhausted) {
                 return {
-                  title: `Max retries exceeded. Branched to: ${branchedTo}`,
+                  title: `Max retries exceeded`,
                   output: [
                     `Run ID: ${args.runId}`,
-                    `Previous phase: ${run.phaseHistory[run.phaseHistory.length - 2]?.phase}`,
-                    `Branched to: ${branchedTo}`,
+                    `Phase: ${run.currentPhase}`,
+                    `Retries: ${retryCount}`,
+                    `Consider calling abort() to terminate the workflow.`,
                   ].join("\n"),
-                  metadata: { runId: args.runId, phase: branchedTo, branched: true },
+                  metadata: { runId: args.runId, phase: run.currentPhase, exhausted: true, retryCount },
                 }
               }
 
               return {
                 title: `Retrying phase: ${run.currentPhase}`,
-                output: `Retry ${retryCount} for phase "${run.currentPhase}"`,
+                output: `Retry #${retryCount} for phase "${run.currentPhase}"`,
                 metadata: { runId: args.runId, phase: run.currentPhase, retryCount },
               }
             }
 
+            // ── status ───────────────────────────────────────
             case "status": {
               if (!args.runId) throw new Error("runId is required for 'status'")
               const run = engine.status(args.runId)
-              if (!run) return { title: "Not found", output: `No workflow run with ID "${args.runId}"`, metadata: {} }
+              if (!run) {
+                return { title: "Not found", output: `No workflow run with ID "${args.runId}"`, metadata: {} }
+              }
 
               return {
                 title: `Workflow status: ${run.status}`,
                 output: JSON.stringify({
                   runId: run.runId,
-                  workflowId: run.definition.id,
+                  definitionId: run.definitionId,
                   status: run.status,
                   currentPhase: run.currentPhase,
-                  startedAt: new Date(run.startedAt).toISOString(),
-                  durationMs: run.completedAt ? run.completedAt - run.startedAt : Date.now() - run.startedAt,
-                  phases: run.phaseHistory.map((h) => ({
+                  createdAt: run.createdAt,
+                  updatedAt: run.updatedAt,
+                  phases: run.phaseHistory.map(h => ({
                     phase: h.phase,
                     status: h.status,
-                    durationMs: h.completedAt ? h.completedAt - h.startedAt : null,
-                    retries: h.failureCount,
-                    hasArtifact: !!h.artifact,
+                    retryCount: h.retryCount,
+                    branchedFrom: h.branchedFrom,
+                    incrementalContext: h.incrementalContext,
                   })),
                 }, null, 2),
               }
             }
 
+            // ── abort ────────────────────────────────────────
             case "abort": {
               if (!args.runId) throw new Error("runId is required for 'abort'")
               const run = engine.abort(args.runId)
+              currentWorkflowContext = null
               return {
                 title: `Workflow aborted: ${args.runId}`,
                 output: `Status: ${run.status}`,
@@ -311,12 +540,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
+            // ── list ─────────────────────────────────────────
             case "list": {
               const runs = engine.listRuns()
               return {
                 title: `${runs.length} workflow run(s)`,
-                output: runs.map((r) =>
-                  `${r.runId} | ${r.definition.id} | ${r.status} | phase: ${r.currentPhase}`
+                output: runs.map(r =>
+                  `${r.runId} | ${r.definitionId} | ${r.status} | phase: ${r.currentPhase}`
                 ).join("\n"),
                 metadata: { count: runs.length },
               }
@@ -328,77 +558,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
         },
       }),
-
-      /** 可观测性工具 */
-      "workflow-metrics": tool({
-        description: "Get observability metrics for workflow runs",
-        args: {
-          runId: z.string().optional(),
-        },
-        execute: async (args: any) => {
-          if (args.runId) {
-            const run = engine.status(args.runId)
-            if (!run) return { title: "Not found", output: "No run with this ID", metadata: {} }
-
-            return {
-              title: `Metrics for ${args.runId}`,
-              output: JSON.stringify({
-                runId: run.runId,
-                workflowId: run.definition.id,
-                status: run.status,
-                totalDurationMs: run.completedAt ? run.completedAt - run.startedAt : null,
-                phaseCount: run.phaseHistory.length,
-                completedPhases: run.phaseHistory.filter((h) => h.status === "completed").length,
-                failedPhases: run.phaseHistory.filter((h) => h.status === "failed").length,
-                totalRetries: run.phaseHistory.reduce((sum, h) => sum + h.failureCount, 0),
-                phases: run.phaseHistory.map((h) => ({
-                  phase: h.phase,
-                  status: h.status,
-                  durationMs: h.completedAt ? h.completedAt - h.startedAt : null,
-                  retries: h.failureCount,
-                  hasArtifact: !!h.artifact,
-                })),
-              }, null, 2),
-              metadata: { runId: args.runId },
-            }
-          }
-
-          // 全局概览
-          const allRuns = engine.listRuns()
-          return {
-            title: "All workflow metrics",
-            output: JSON.stringify({
-              totalRuns: allRuns.length,
-              running: allRuns.filter((r) => r.status === "running").length,
-              completed: allRuns.filter((r) => r.status === "completed").length,
-              failed: allRuns.filter((r) => r.status === "failed").length,
-              runs: allRuns.map((r) => ({
-                runId: r.runId,
-                workflowId: r.definition.id,
-                status: r.status,
-                currentPhase: r.currentPhase,
-              })),
-            }, null, 2),
-            metadata: { count: allRuns.length },
-          }
-        },
-      }),
     },
 
-    /** 上下文隔离：拦截子 agent 输出，schema 收敛 */
-    "tool.execute.after": async (input: any, output: any) => {
-      if (!currentWorkflowContext) return
-      if (input.tool === "Agent" || input.tool === "Task") {
-        const json = JSON.stringify(output)
-        if (json && json.length > 50000) {
-          // 大体积输出只保留摘要
-          output.__summary = `Output truncated (${json.length} bytes). Full result stored in artifact.`
-        }
-      }
-    },
+    // ── Hooks ──────────────────────────────────────────────────
 
-    /** 按阶段调整 LLM 参数 — 从 workflow context 读取温度 */
-    "chat.params": async (input: any, _output: any) => {
+    /** beforeLlmCall: 温度控制 + 工具过滤 */
+    "chat.params": async (input: any) => {
       if (!currentWorkflowContext) return input
       return {
         ...input,
@@ -406,46 +571,34 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       }
     },
 
-    /** 按阶段切换 system prompt — 从 agent 文件读取提示词，剥离 YAML frontmatter */
-    "experimental.chat.system.transform": async (input: any, _output: any) => {
+    /** phaseChange: system prompt 构建 (D11) */
+    "experimental.chat.system.transform": async (input: any) => {
       if (!currentWorkflowContext) return input
-      const agentName = currentWorkflowContext.agent
-      if (!agentName || agentName === "unknown") return input
+      const run = engine.status(currentWorkflowContext.runId)
+      if (!run || !run.currentPhase) return input
 
-      try {
-        const fs = await import("fs")
-        const agentPath = `${process.cwd()}/.opencode/agent/${agentName}.md`
-        if (fs.existsSync(agentPath)) {
-          let agentContent = fs.readFileSync(agentPath, "utf-8")
-          // 剥离 YAML frontmatter (--- ... ---)
-          agentContent = agentContent.replace(/^---[\s\S]*?---\n*/, "")
-          return {
-            ...input,
-            system: `[Workflow Phase: ${currentWorkflowContext.phase}]\n` +
-                    `[Agent: ${agentName}]\n\n${agentContent.trim()}`,
-          }
-        }
-      } catch {
-        // 静默失败，使用默认 system prompt
+      const systemPrompt = buildSystemPrompt(run.currentPhase, run)
+      if (!systemPrompt) return input
+
+      return {
+        ...input,
+        system: systemPrompt,
       }
-      return input
     },
 
-    /** 事件追踪 */
-    event: async ({ event }: any) => {
-      if (event.type === "workflow.phase.complete") {
-        const ctx = getWorkflowContext()
-        if (ctx) {
-          const now = new Date().toISOString()
-          const logLine = `[${now}] ${ctx.runId} | ${ctx.phase} | ${event.result ?? "done"}\n`
-          try {
-            const fs = await import("fs")
-            fs.appendFileSync(".workflow-artifacts/_events.log", logLine, "utf-8")
-          } catch {
-            // 静默
-          }
+    /** 工具权限过滤 */
+    "tool.call.before": async (input: any) => {
+      if (!currentWorkflowContext) return input
+      const allowedTools = currentWorkflowContext.tools
+      const toolName = input?.tool
+      if (toolName && !allowedTools.includes(toolName)) {
+        return {
+          ...input,
+          __blocked: true,
+          __reason: `Tool "${toolName}" is not allowed in phase "${currentWorkflowContext.phase}". Allowed: ${allowedTools.join(", ")}`,
         }
       }
+      return input
     },
   }
 }
