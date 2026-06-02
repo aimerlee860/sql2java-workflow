@@ -14,6 +14,14 @@
 └──────────────────┬───────────────────────────────┘
                    │
                    ▼
+┌──────────────────────────────────────────────────┐
+│  预扫描（确定性，不占 LLM 上下文）                   │
+│  @griffithswaite/ts-plsql-parser (AST)            │
+│  安装失败 → regex 降级                             │
+│  产出：inventory-index.json                       │
+└──────────────────┬───────────────────────────────┘
+                   │
+                   ▼
   inventory → analyze → plan（人工确认）→ scaffold → translate → review → verify → 完成
                                                                │            │
                                                                ↓ (failed)   ↓ (failed)
@@ -39,6 +47,7 @@ sql2java-workflow/
 │   ├── engine-core.ts              # 状态机核心
 │   ├── workflow-definitions.ts     # 工作流定义 + TransitionRule
 │   ├── artifact-schemas.ts         # Artifact Zod Schemas
+│   ├── plsql-scanner.ts            # PL/SQL AST/regex 预扫描器
 │   └── type-mappings.ts            # Oracle → Java 类型映射表
 ├── plugin/
 │   └── workflow-engine.ts          # 插件入口（workflow 工具 + hooks）
@@ -49,7 +58,7 @@ sql2java-workflow/
 
 | Agent | Phase | 温度 | 核心职责 |
 |-------|-------|------|---------|
-| sql-analyst | inventory | 0.1 | 扫描编目（Package、Table、Trigger、View、Sequence） |
+| sql-analyst | inventory | 0.1 | 基于 inventory-index.json 分批补充语义细节，产出 per-package 文件 |
 | sql-analyst | analyze | 0.1 | 依赖图 + 拓扑排序 + 子程序结构解析 + FSD 生成 |
 | java-architect | plan | 0.2 | 架构规划（需人工确认） |
 | java-architect | scaffold | 0.2 | 项目骨架 + Entity + Mapper/Service 壳 |
@@ -64,7 +73,7 @@ sql2java-workflow/
 
 | 阶段 | Agent | 最大重试 | 说明 |
 |------|-------|---------|------|
-| inventory | sql-analyst | 2 | 扫描编目 |
+| inventory | sql-analyst | 2 | 基于预扫描索引分批编目，per-package 拆分 |
 | analyze | sql-analyst | 2 | 依赖分析 + 拓扑排序 + 子程序结构 + FSD |
 | plan | java-architect | 1 | 架构规划（需人工确认） |
 | scaffold | java-architect | 1 | 项目骨架生成 |
@@ -91,7 +100,7 @@ sql2java-workflow/
 | D6 | 持久化 | run.json 全量单文件存储 |
 | D7 | fix 动态路由 | 从 branchedFrom 动态取目标阶段 |
 | D8 | result 自动推导 | review/verify 阶段引擎从 allPassed 自动推导 result |
-| D9 | 跨 Schema 校验 | analyze/plan 完成后校验包名/映射一致性 |
+| D9 | 跨 Schema 校验 | analyze/plan 完成后校验包名/映射一致性（双格式兼容） |
 | D10 | SCC 处理 | 循环依赖组归为同层数组，各包保持独立 |
 | D11 | prompt 注入 | 只注入当前 Phase section + 通用规则 |
 | D12 | FixArtifact 校验 | 包名必须在 inventory 中存在，且覆盖所有失败包 |
@@ -110,13 +119,20 @@ sql2java-workflow/
 
 ```
 .workflow-artifacts/{runId}/
-├── run.json                # WorkflowRun 持久化
-├── inventory.json
-├── analysis.json
+├── run.json                             # WorkflowRun 持久化
+├── inventory-index.json                 # 预扫描索引（machine-generated，start 时生成）
+├── inventory-packages/                  # 逐包 inventory（LLM enriched）
+│   ├── PKG_ORDER.json
+│   └── PKG_UTIL.json
+├── inventory.json                       # 索引 + DDL 数据（tables/triggers/views/sequences）
+├── analysis-packages/                   # 逐包子程序结构
+│   ├── exc_pkg.json
+│   └── util_pkg.json
+├── analysis.json                        # 全局元数据（callGraph + topology + complexity）
 ├── plan.json
 ├── scaffold.json
-├── fix.json
-├── fsd/{package}/{subprogram}.md
+├── fix.json                             # fix 阶段产出（每次 fix 覆盖）
+├── fsd/{package}/{subprogram}.md        # FSD 文档（analyze 阶段副产物）
 ├── translations/{package}/
 │   ├── translation.json
 │   ├── review.json
@@ -126,9 +142,25 @@ sql2java-workflow/
 └── _events.log
 ```
 
+## PL/SQL 预扫描器
+
+`plsql-scanner.ts` 在 workflow start 时执行确定性扫描，不依赖 LLM，不占用上下文窗口。
+
+| 模式 | 实现 | 触发条件 |
+|------|------|---------|
+| **AST** | `@griffithswaite/ts-plsql-parser`（ANTLR4） | parser 安装成功 |
+| **Regex 降级** | Node.js fs + 正则 + 行号追踪 | parser 安装失败 |
+
+**提取内容**：Package spec/body 结构、procedure/function 签名、DDL 对象（table/trigger/view/sequence）、调用关系图（PKG.PROC 模式）。
+
+**Regex 模式已知处理**：
+- BEGIN/END 深度追踪排除 `END IF` / `END LOOP` / `END CASE`
+- 支持无参过程检测（`PROCEDURE init IS`）
+
 ## 技术栈
 
 - **Workflow Engine**：TypeScript 确定性状态机
+- **SQL 解析**：AST 预扫描 + regex 降级 + LLM 语义补充
 - **Schema 校验**：Zod
 - **Agent 定义**：Markdown（按 `## Phase: xxx` 分节）
 - **LLM**：Claude API
