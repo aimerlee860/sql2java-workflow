@@ -128,6 +128,7 @@ LLM 传入 `result: "passed" | "failed"`（可选，见 D8 自动推导）。引
 - analyze 完成后：校验 inventory ↔ analysis 包名一致
 - plan 完成后：校验 inventory ↔ analysis ↔ plan 映射完整
 - 校验失败记录 warning 到 `_events.log`，不阻塞流程
+- **双格式兼容**：inventory 侧从 `packageNames`（新格式）或 `packages[].name`（旧格式回退）取包名；analysis 侧同样 `packageNames` 优先、`packages[].name` 回退。确保新旧格式的 artifact 都能正确校验
 
 ### D10: SCC 循环依赖处理
 
@@ -144,7 +145,7 @@ LLM 传入 `result: "passed" | "failed"`（可选，见 D8 自动推导）。引
 ### D12: FixArtifact 包名校验
 
 - fix 阶段产出的 `fixedPackages` 值必须使用 inventory 中的 Oracle 包名（如 `INVENTORY_PKG`）
-- 引擎在 advanceFromFix 时校验每个值是否存在于 `inventory-index.packages[].name`
+- 引擎在 advanceFromFix 时校验每个值是否存在于 `inventory.packageNames`（新格式优先，旧格式回退 `inventory.packages[].name`）
 - **校验失败直接拒绝 advance**（视为 fix failed，走 retry 路径），不使用 filter+warn 策略——若 fix agent 连包名都搞不对，说明 prompt 不够清晰或 fix 工作本身有问题，应暴露出来让 agent 重试
 - **校验 fixedPackages 为触发阶段失败包的超集**：从触发阶段的 summary 中提取 `passed=false` 的包名集合，`fixedPackages` 必须包含该集合（允许修复额外包，但不能遗漏失败包）；校验失败同样拒绝 advance
 - 防止 fix agent 使用 Java 风格包名或遗漏失败包导致增量审查跳过实际有问题的包
@@ -1068,7 +1069,10 @@ function validateCrossSchema(run: WorkflowRun, completedPhase: string): string[]
 
   // inventory-index ↔ inventory.packageNames（双向）
   const indexNames = new Set(inventoryIndex.packages.map(p => p.name))
-  const invNames = new Set(inventory.packageNames)
+  // 新格式优先：inventory.packageNames（string[]）；旧格式回退：inventory.packages[].name
+  const invNames = inventory.packageNames
+    ? new Set(inventory.packageNames)
+    : new Set((inventory.packages ?? []).map(p => p.name))
   for (const name of indexNames) {
     if (!invNames.has(name)) warnings.push(`inventory.packageNames 缺少包: ${name}（index 中存在）`)
   }
@@ -1077,7 +1081,10 @@ function validateCrossSchema(run: WorkflowRun, completedPhase: string): string[]
   }
 
   // inventory ↔ analysis 包名（双向）
-  const anaNames = new Set(analysis.packageNames)
+  // 新格式优先：analysis.packageNames；旧格式回退：analysis.packages[].name
+  const anaNames = analysis.packageNames
+    ? new Set(analysis.packageNames)
+    : new Set((analysis.packages ?? []).map(p => p.name))
   for (const name of invNames) {
     if (!anaNames.has(name)) warnings.push(`analysis 缺少包: ${name}`)
   }
@@ -1587,6 +1594,8 @@ analyze 阶段的"内部分步"扩展为三轮：
 
 ### Step 3: plsql-scanner.ts + artifact-schemas.ts + type-mappings.ts
 - 实现 PL/SQL 预扫描器（AST + regex 双模式，自动检测/安装 `@griffithswaite/ts-plsql-parser`）
+  - regex 降级模式：BEGIN/END 深度追踪排除 `END IF` / `END LOOP` / `END CASE` 等非块结束关键字
+  - regex 降级模式：过程检测支持无参过程（`PROCEDURE init IS`，无括号）
 - 定义所有 Zod Schema（InventoryIndexSchema + InventoryPackageSchema + InventorySchema + AnalysisMetaSchema + AnalysisPackageSchema + PlanSchema + ScaffoldSchema + TranslationSchema + ReviewSchema + ReviewSummarySchema + VerifySchema + VerifySummarySchema + FixArtifactSchema + refine 约束）
 - 定义类型映射表（ORACLE_TO_JAVA / ORACLE_TO_JDBC）
 - 实现 validateCrossSchema()
@@ -1641,3 +1650,5 @@ analyze 阶段的"内部分步"扩展为三轮：
 8. **fix 循环验证**：review(failed) → fix → review(增量) 验证只重审修改过的包
 9. **exhausted 验证**：fix 超限后正确标记 completed_with_issues
 10. **parser 降级验证**：模拟 parser 安装失败，确认 regex 降级正常工作
+11. **regex 精度验证**：含 `END IF` / `END LOOP` 的包体行号范围正确；无参过程（`PROCEDURE init IS`）被正确检测
+12. **跨 Schema 兼容验证**：旧格式（`inventory.packages[].name`）和新格式（`inventory.packageNames`）的 artifact 都能通过 validateCrossSchema 校验
