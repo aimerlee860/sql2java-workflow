@@ -10,14 +10,16 @@
  */
 import { tool } from "@opencode-ai/plugin"
 import { z } from "zod"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { WorkflowEngine, type WorkflowRun } from "../workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
 import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-definitions"
 import {
   getSchemaForPhase, getPerPackageSchema, getSummarySchema,
+  getAnalysisPackageSchema, getInventoryPackageSchema,
 } from "../workflow/artifact-schemas"
+import { scanSource } from "../workflow/plsql-scanner"
 
 const engine = new WorkflowEngine()
 engine.registerDefinition(SQL2JAVA_WORKFLOW)
@@ -84,6 +86,14 @@ function buildRuntimeContext(run: WorkflowRun): string {
     }
   }
 
+  // inventory 阶段额外注入预扫描索引（不论 UPSTREAM_ARTIFACTS 配置）
+  if (run.currentPhase === "inventory") {
+    const idxPath = `${ARTIFACT_DIR}/${run.runId}/inventory-index.json`
+    if (!upstream || !upstream.includes("inventory-index.json")) {
+      lines.push(`  - ${idxPath}`)
+    }
+  }
+
   // incrementalContext
   const currentEntry = findCurrentEntry(run)
   if (currentEntry?.incrementalContext) {
@@ -106,6 +116,152 @@ function findCurrentEntry(run: WorkflowRun) {
     }
   }
   return undefined
+}
+
+/**
+ * 校验 inventory 拆分后的 inventory-packages/ 目录
+ * - 从 inventory-index.json 获取期望包名
+ * - 逐个校验 per-package 文件存在且通过 Zod 校验
+ * - 校验 inventory.json 的 packageNames 与 index 一致
+ */
+function validateInventoryPackages(
+  artifactsDir: string,
+): string | null {
+  // 1. 检查 inventory-index.json 存在
+  const indexPath = join(artifactsDir, "inventory-index.json")
+  if (!existsSync(indexPath)) {
+    return "inventory-index.json not found. Pre-scan may have failed."
+  }
+
+  let expectedPackages: string[]
+  try {
+    const raw = readFileSync(indexPath, "utf-8")
+    const indexParsed = JSON.parse(raw)
+    expectedPackages = (indexParsed.packages as Array<{ name: string }>).map((p) => p.name)
+  } catch (e: any) {
+    return `Failed to read/parse inventory-index.json: ${e.message}`
+  }
+
+  // 2. 检查 inventory-packages/ 目录
+  const pkgDir = join(artifactsDir, "inventory-packages")
+  if (!existsSync(pkgDir)) {
+    return "inventory-packages/ directory not found. Agent must write per-package files before advancing."
+  }
+
+  // 3. 逐包校验
+  const pkgSchema = getInventoryPackageSchema()
+  for (const pkgName of expectedPackages) {
+    const pkgFile = join(pkgDir, `${pkgName}.json`)
+    if (!existsSync(pkgFile)) {
+      return `Missing inventory package file: inventory-packages/${pkgName}.json`
+    }
+    try {
+      const raw = readFileSync(pkgFile, "utf-8")
+      const parsed = JSON.parse(raw)
+      const result = pkgSchema.safeParse(parsed)
+      if (!result.success) {
+        const errors = result.error.issues
+          .map((i: any) => `  - ${i.path.join(".")}: ${i.message}`)
+          .join("\n")
+        return `Zod validation failed for inventory-packages/${pkgName}.json:\n${errors}`
+      }
+      if (parsed.packageName !== pkgName) {
+        return `inventory-packages/${pkgName}.json: packageName "${parsed.packageName}" does not match filename "${pkgName}"`
+      }
+    } catch (e: any) {
+      return `Failed to read/parse inventory-packages/${pkgName}.json: ${e.message}`
+    }
+  }
+
+  // 4. 校验 inventory.json 的 packageNames 与 index 一致
+  const inventoryPath = join(artifactsDir, "inventory.json")
+  if (!existsSync(inventoryPath)) {
+    return "inventory.json not found. Agent must write inventory.json before advancing."
+  }
+  try {
+    const raw = readFileSync(inventoryPath, "utf-8")
+    const parsed = JSON.parse(raw)
+    const invNames = new Set((parsed.packageNames as string[]) ?? [])
+    const idxNames = new Set(expectedPackages)
+    for (const n of idxNames) {
+      if (!invNames.has(n)) return `inventory.json packageNames missing: ${n}`
+    }
+    for (const n of invNames) {
+      if (!idxNames.has(n)) return `inventory.json packageNames has extra: ${n}`
+    }
+  } catch (e: any) {
+    return `Failed to read/parse inventory.json: ${e.message}`
+  }
+
+  return null // 校验通过
+}
+
+/**
+ * 校验 analyze 拆分后的 analysis-packages/ 目录
+ * - 检查目录存在
+ * - 从 inventory.json 获取期望包名
+ * - 逐个校验 per-package 文件存在且通过 Zod 校验
+ * - 校验 packageNames 与 inventory 一致
+ */
+function validateAnalysisPackages(
+  artifactsDir: string,
+  metaParsed: Record<string, unknown>,
+): string | null {
+  const analysisPackagesDir = join(artifactsDir, "analysis-packages")
+  if (!existsSync(analysisPackagesDir)) {
+    return "analysis-packages/ directory not found. Agent must write per-package files before advancing."
+  }
+
+  // 从 inventory.json 获取期望包名
+  const inventoryPath = join(artifactsDir, "inventory.json")
+  if (!existsSync(inventoryPath)) {
+    return "inventory.json not found — cannot verify analysis package coverage"
+  }
+  let expectedPackages: string[]
+  try {
+    const invRaw = readFileSync(inventoryPath, "utf-8")
+    const invParsed = JSON.parse(invRaw)
+    expectedPackages = (invParsed.packages as Array<{ name: string }>).map((p) => p.name)
+  } catch (e: any) {
+    return `Failed to read/parse inventory.json: ${e.message}`
+  }
+
+  // 逐包校验
+  const pkgSchema = getAnalysisPackageSchema()
+  for (const pkgName of expectedPackages) {
+    const pkgFile = join(analysisPackagesDir, `${pkgName}.json`)
+    if (!existsSync(pkgFile)) {
+      return `Missing analysis package file: analysis-packages/${pkgName}.json`
+    }
+    try {
+      const raw = readFileSync(pkgFile, "utf-8")
+      const parsed = JSON.parse(raw)
+      const result = pkgSchema.safeParse(parsed)
+      if (!result.success) {
+        const errors = result.error.issues
+          .map((i: any) => `  - ${i.path.join(".")}: ${i.message}`)
+          .join("\n")
+        return `Zod validation failed for analysis-packages/${pkgName}.json:\n${errors}`
+      }
+      if (parsed.packageName !== pkgName) {
+        return `analysis-packages/${pkgName}.json: packageName "${parsed.packageName}" does not match filename "${pkgName}"`
+      }
+    } catch (e: any) {
+      return `Failed to read/parse analysis-packages/${pkgName}.json: ${e.message}`
+    }
+  }
+
+  // 校验 meta 文件 packageNames 与 inventory 一致
+  const metaNames = new Set((metaParsed.packageNames as string[]) ?? [])
+  const invSet = new Set(expectedPackages)
+  for (const n of invSet) {
+    if (!metaNames.has(n)) return `analysis.json packageNames missing: ${n}`
+  }
+  for (const n of metaNames) {
+    if (!invSet.has(n)) return `analysis.json packageNames has extra: ${n}`
+  }
+
+  return null // 校验通过
 }
 
 /**
@@ -134,6 +290,18 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
           .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
           .join("\n")
         return `Zod validation failed for ${phase}.json:\n${errors}`
+      }
+
+      // analyze 阶段：额外校验 analysis-packages/ 目录下的逐包文件
+      if (phase === "analyze") {
+        const pkgError = validateAnalysisPackages(artifactsDir, parsed)
+        if (pkgError) return pkgError
+      }
+
+      // inventory 阶段：校验 inventory-packages/ + inventory-index.json
+      if (phase === "inventory") {
+        const pkgError = validateInventoryPackages(artifactsDir)
+        if (pkgError) return pkgError
       }
     } catch (e: any) {
       return `Failed to read/parse ${filePath}: ${e.message}`
@@ -217,12 +385,32 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => ({
               }
             } catch {}
 
+            // 预扫描：在 engine.start 之前扫描源码生成 inventory-index.json
+            let scanStatus = "skipped"
+            if (args.sourcePath) {
+              try {
+                const index = await scanSource(args.sourcePath as string)
+                const artifactsDir = join(ARTIFACT_DIR, runId)
+                if (!existsSync(artifactsDir)) {
+                  mkdirSync(artifactsDir, { recursive: true })
+                }
+                writeFileSync(
+                  join(artifactsDir, "inventory-index.json"),
+                  JSON.stringify(index, null, 2),
+                  "utf-8",
+                )
+                scanStatus = `${index.scannerUsed} | ${index.packages.length} pkgs | ${index.tables.length} tables | ${index.triggers.length} triggers`
+              } catch (e: any) {
+                scanStatus = `failed: ${e.message}`
+              }
+            }
+
             const run = engine.start("sql2java", runId, metadata)
             setWorkflowContext(run)
             return {
               title: "Started",
-              output: `${runId} | ${run.currentPhase}`,
-              metadata: { runId, phase: run.currentPhase },
+              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}`,
+              metadata: { runId, phase: run.currentPhase, scanStatus },
             }
           }
 

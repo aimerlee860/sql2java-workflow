@@ -108,81 +108,158 @@ workflow({ action: "advance", runId: "${runId}", result: "passed" })
 
 ### 目标
 
-扫描 `${sourcePath}` 目录，编目所有 PL/SQL 代码元素（Package、Type、Table、Trigger、View、Sequence、独立子程序），产出结构化的 `inventory.json`。
+基于预扫描索引 `inventory-index.json`（machine-generated），逐包读取源码并补充完整细节（参数类型、默认值、type 定义等），产出 `inventory-packages/{PKG}.json`（逐包）+ `inventory.json`（索引）。
 
 ### 输入
 
-- `sourcePath`：PL/SQL 源码目录（从 Runtime Context 获取）
-- 无上游 artifact
+- `inventory-index.json`：预扫描索引（由引擎在 start 时生成，轻量，直接读取不占上下文）
+- `sourcePath`：PL/SQL 源码目录
 
 ### 输出
 
-- **artifact 路径**：`${artifactsDir}/inventory.json`
-- **格式**：符合 InventorySchema（引擎 advance 时做 Zod 校验）
+- **逐包 artifact**：`${artifactsDir}/inventory-packages/{PKG_NAME}.json`
+- **索引 artifact**：`${artifactsDir}/inventory.json`（只含 sourcePath + packageNames）
+- **格式**：逐包文件符合 InventoryPackageSchema，索引符合 InventorySchema
+
+### ⛔ 关键约束：分批处理
+
+**禁止一次性读取所有源码文件。** 必须按批次处理，每批 2-3 个包，处理完立即写入磁盘。inventory-index.json 已包含所有包的结构骨架，你的任务是逐包补充 AST 无法提取的语义细节。
 
 ### 工作步骤
 
-#### Step 1: 扫描源码目录结构
+#### Step 0：读取预扫描索引，确定处理顺序
 
-用 bash 命令扫描目录，建立完整文件清单：
+1. 读取 `${artifactsDir}/inventory-index.json`，提取所有包名和结构骨架
+2. 创建目录：
+   ```bash
+   mkdir -p ${artifactsDir}/inventory-packages
+   ```
+3. 确定批次计划：将包按 2-3 个一组分批（无子程序的包合并到相邻批次）
 
-```bash
-# 列出所有 SQL 相关文件（含行数）
-find "${sourcePath}" -type f \( -name "*.sql" -o -name "*.pks" -o -name "*.pkb" \) -exec wc -l {} +
+#### Step 1：分批逐包处理（核心循环）
 
-# 列出目录结构
-find "${sourcePath}" -type d | sort
-```
+对每个批次（2-3 个包），执行以下循环：
 
-#### Step 2: 逐文件解析
+**1a. 读取该批次的源码文件**
 
-对每个文件按类型处理：
+- 只读取当前批次包的 spec（`.pks`）+ body（`.pkb`）文件
+- 禁止读取后续批次的文件
+- 如果 index 中标记了 `specFile` 或 `bodyFile`，直接按路径读取
 
-| 文件类型 | 处理方式 |
-|---------|---------|
-| `*.pks` | Package spec — 提取过程/函数签名、类型定义、常量、变量 |
-| `*.pkb` | Package body — 关联到对应 spec，提取实现体行号范围 |
-| `schema/*.sql` | DDL — 提取表定义、索引、约束 |
-| `trigger/*.sql` | 触发器 — 提取触发时机、事件、目标表 |
-| `view/*.sql` | 视图 — 提取列定义、底层表 |
-| 其他 `*.sql` | 可能包含独立过程/函数/sequence DDL |
+**1b. 逐包补充完整细节**
 
-#### Step 3: 提取包结构
+对当前批次的每个包，从源码中提取预扫描无法覆盖的信息：
 
-对每个 Package，提取：
-- **spec 文件** 和 **body 文件** 路径
-- 过程和函数：名称、类型（procedure/function）、参数（name, oracleType, direction: IN/OUT/IN OUT）、返回类型、行号范围、行数
-- 类型定义：名称、kind、定义文本
-- 变量：名称、类型、默认值
-- 常量：名称、类型、值
+| 字段 | 提取方式 | 预扫描已有 |
+|------|---------|-----------|
+| procedures[].params | 解析参数列表：name, oracleType, direction | ✗ 需要补充 |
+| procedures[].returnType | FUNCTION 的返回类型 | ✗ 需要补充 |
+| procedures[].loc | 过程/函数的行数 | ✗ 需要补充 |
+| types[] | 类型定义：name, kind, definition | ✗ 需要补充 |
+| variables[] | 变量：name, type, defaultValue | ✗ 需要补充 |
+| constants[] | 常量：name, type, value | ✗ 需要补充 |
+| procedures[].name | 已有 | ✓ |
+| procedures[].type | 已有 | ✓ |
+| procedures[].lineRange | 已有 | ✓ |
 
 **注意**：`direction` 使用 PL/SQL 实际写法 `"IN"`, `"OUT"`, `"IN OUT"`（两个词用空格分隔）。
 
-#### Step 4: 提取表结构
+**1c. 用 write 工具写入逐包文件**
 
-从 DDL 文件解析表定义：
-- 表名、DDL 文件路径
-- 列：名称、Oracle 类型、是否可空、是否主键、默认值
+每完成一个包的补充，用 `write` 工具写入 `${artifactsDir}/inventory-packages/{PKG_NAME}.json`：
 
-#### Step 5: 提取其他对象
+```json
+{
+  "packageName": "PKG_ORDER",
+  "specFile": "pkg/pkg_order.pks",
+  "bodyFile": "pkg/pkg_order.pkb",
+  "procedures": [
+    {
+      "name": "create_order",
+      "type": "procedure",
+      "params": [
+        { "name": "p_id", "oracleType": "NUMBER", "direction": "IN" },
+        { "name": "p_name", "oracleType": "VARCHAR2", "direction": "IN" }
+      ],
+      "lineRange": [2, 7],
+      "loc": 6
+    }
+  ],
+  "types": [],
+  "variables": [{ "name": "v_status", "type": "VARCHAR2(50)" }],
+  "constants": [{ "name": "c_max", "type": "NUMBER", "value": "100" }]
+}
+```
 
-- **触发器**：名称、时机（before/after/instead-of/compound）、级别（statement/row）、目标表、事件（insert/update/delete）、源文件、行号范围、WHEN 条件
-- **视图**：名称、DDL 文件、列列表、底层表
-- **序列**：名称、DDL 文件、起始值、增量、最小/最大值、是否循环
-- **独立子程序**：名称、类型、参数、返回类型、源文件、行号范围
+包名使用 inventory-index 中的 Oracle 包名（大写）。
 
-#### Step 6: 写入 inventory.json
+**1d. 处理 DDL 对象（tables/triggers/views/sequences）**
 
-将所有编目数据组装为符合 InventorySchema 的 JSON，写入 `${artifactsDir}/inventory.json`。
+DDL 对象通常较小，可以在第一个批次或最后一个批次统一处理：
+
+- **表**：从 DDL 文件解析列定义（name, oracleType, nullable, isPrimaryKey, defaultValue）
+- **触发器**：提取 timing, level, targetTable, events, lineRange, condition
+- **视图**：提取 columns, underlyingTables
+- **序列**：提取 startWith, incrementBy, minValue, maxValue, cycle
+- **独立子程序**：提取参数、返回类型、行号范围
+
+DDL 数据写入各 per-package 文件中不需要（DDL 属于全局），但需要被下游阶段使用。如果 DDL 数据量不大，在最后一个批次中用 bash 辅助解析后直接附加到各包文件中，或单独写入。
+
+**1e. 批次完成后继续下一批**
+
+当前批次所有包都处理完毕后，进入下一个批次，重复 1a-1d。
+
+#### Step 2：写入索引文件（含 DDL 数据）
+
+所有包处理完毕后，用 write 工具写入 `${artifactsDir}/inventory.json`：
+
+```json
+{
+  "sourcePath": "/path/to/source",
+  "packageNames": ["PKG_ORDER", "PKG_UTIL", "..."],
+  "tables": [ ... ],
+  "triggers": [ ... ],
+  "views": [ ... ],
+  "sequences": [ ... ],
+  "standaloneProcedures": [ ... ]
+}
+```
+
+- `packageNames` 必须覆盖 inventory-index 中所有包的名称
+- tables/triggers/views/sequences/standaloneProcedures 保留在此文件中（DDL 数据通常比 packages 小，不需要拆分）
+- DDL 数据的详细字段要求与旧版 InventorySchema 一致（表的 columns 需标注 isPrimaryKey 和 nullable，触发器需标注 timing/level/events 等）
+
+#### Step 3：调用 advance
+
+```bash
+# 验证完整性
+echo "Per-package files:" && ls ${artifactsDir}/inventory-packages/*.json | wc -l
+```
+
+确认文件数与 inventory-index 包数一致后，调用：
+```
+workflow({ action: "advance", runId: "${runId}", result: "passed" })
+```
+
+### 增量恢复
+
+如果 inventory 阶段被中断后恢复（retry）：
+- `inventory-index.json` 始终存在（引擎生成，不会丢失）
+- 用 bash 检查已完成的包文件：
+  ```bash
+  ls ${artifactsDir}/inventory-packages/*.json 2>/dev/null | xargs -I{} basename {} .json
+  ```
+- 与 inventory-index 包名对比，跳过已有的 per-package 文件
+- 从第一个未完成的包继续分批处理
 
 ### 质量检查
 
-- [ ] 所有 `.pks` / `.pkb` 文件都被处理
-- [ ] 每个 Package 的 procedures 都有正确的 lineRange
+- [ ] 所有 inventory-index 中的包都有对应的 `inventory-packages/{PKG}.json`
+- [ ] 每个 per-package 文件的 packageName 与文件名一致
 - [ ] 有 procedures 的包 bodyFile 非空
 - [ ] 表的 columns 都标注了 isPrimaryKey 和 nullable
 - [ ] direction 只使用 "IN", "OUT", "IN OUT" 三种值
-- [ ] 无遗漏的对象类型（检查 trigger/view/sequence 目录）
+- [ ] `inventory.json` 的 packageNames 覆盖 inventory-index 中所有包
 
 ---
 
@@ -190,57 +267,110 @@ find "${sourcePath}" -type d | sort
 
 ### 目标
 
-基于 inventory.json 构建调用依赖图，执行拓扑排序，逐包解析子程序内部结构，并逐子程序生成 FSD 文档。产出 `analysis.json` + `fsd/{package}/{subprogram}.md`。
+基于 inventory.json 构建调用依赖图，执行拓扑排序，逐包解析子程序内部结构，并逐子程序生成 FSD 文档。产出 `analysis.json`（全局元数据）+ `analysis-packages/{pkg}.json`（逐包数据）+ `fsd/{package}/{subprogram}.md`。
 
 ### 输入
 
-- **上游 artifact**：`${artifactsDir}/inventory.json`
+- **预扫描索引**：`${artifactsDir}/inventory-index.json`（轻量，含包名 + 文件路径 + 行号范围）
+- **逐包 inventory**：`${artifactsDir}/inventory-packages/{PKG}.json`（子程序列表 + 参数类型）
+- **索引文件**：`${artifactsDir}/inventory.json`（sourcePath + packageNames）
 - **源码文件**：需要读取源码进行子程序结构解析
 
 ### 输出
 
-- **主 artifact**：`${artifactsDir}/analysis.json`
-- **副产物（逐子程序）**：`${artifactsDir}/fsd/{package}/{subprogram}.md`
+- **全局元数据**：`${artifactsDir}/analysis.json`（callGraph, translationOrder 等）
+- **逐包数据**：`${artifactsDir}/analysis-packages/{package_name}.json`（子程序结构）
+- **FSD 文档**：`${artifactsDir}/fsd/{package}/{subprogram}.md`
+
+### ⛔ 关键约束：分批处理
+
+**禁止一次性读取所有源码文件。** 必须按批次处理，每批 2-3 个包，处理完立即写入磁盘，再进入下一批。当项目子程序较多时，单次 LLM 调用的上下文无法容纳全部数据。
 
 ### 工作步骤
 
-analyze 阶段内部分三轮执行：
+#### Step 0：读取索引，确定处理顺序
 
-#### 第一轮：全局依赖图 + 拓扑排序
+1. 读取 `${artifactsDir}/inventory-index.json`（轻量索引），获取所有包名、文件路径和子程序列表
+2. 如需补充信息（参数类型等），读取对应的 `${artifactsDir}/inventory-packages/{PKG}.json`
+3. 创建目录结构：
+   ```bash
+   mkdir -p ${artifactsDir}/analysis-packages
+   mkdir -p ${artifactsDir}/fsd
+   ```
+4. 确定批次计划：将包按 2-3 个一组分批（无子程序的包合并到相邻批次）
 
-1. **构建调用图（callGraph）**：基于 inventory 中的过程/函数签名，从源码中提取跨包调用关系。callGraph 的 key 为限定名（`PKG_NAME.PROC_NAME`），值为被调用的限定名数组。
+#### Step 1：构建全局依赖图 + 拓扑排序
 
-2. **构建包级依赖（packageDependency）**：从 callGraph 推导包级别依赖关系。
+通过 grep 快速提取跨包调用关系（不读取源码全文）：
 
+```bash
+grep -rn '\w\+_\w\+\.\w\+' ${sourcePath}/pkg/ --include="*.sql" | grep -v "^.*--"
+```
+
+基于 grep 结果构建：
+
+1. **调用图（callGraph）**：key 为限定名（`PKG_NAME.PROC_NAME`），值为被调用的限定名数组
+2. **包级依赖（packageDependency）**：从 callGraph 推导
 3. **拓扑排序 + SCC 检测**：
-   - 使用 packageDependency 做拓扑排序
    - SCC 循环依赖组归为同层数组（如 `["order_proc", "order_util"]`）
    - 非 SCC 包为单元素数组（如 `["pkg_utils"]`）
-   - 结果存入 `translationOrder`（`z.array(z.array(z.string()))`）
+   - 结果存入 `translationOrder`
+4. **复杂度评估**：为每个包评估复杂度（1-10 分）、识别的模式、风险等级（low/medium/high）
+5. **SCC 组记录**：存入 `sccGroups`
 
-4. **复杂度评估**：为每个包评估复杂度（1-10 分）、识别的模式、风险等级（low/medium/high）。
+#### Step 2：写入 analysis.json 元数据
 
-5. **记录 SCC 组**：存入 `sccGroups`。
+用 `write` 工具写入 `${artifactsDir}/analysis.json`，包含全局元数据和包名列表（不含子程序数据）：
 
-#### 第二轮：逐包子程序结构解析
+```json
+{
+  "callGraph": { ... },
+  "packageDependency": { ... },
+  "translationOrder": [ ... ],
+  "sccGroups": [ ... ],
+  "complexity": { ... },
+  "packageNames": ["const_pkg", "exc_pkg", "util_pkg", ...]
+}
+```
 
-对每个包的每个子程序，解析内部结构：
+`packageNames` 必须包含 inventory 中所有包的名称。
 
-1. **语句块（blocks）**：识别 loop、cursor、if-else、exception-block、sql-statement、assignment、call 类型，标注 oracleLine、description、dependencies。
+#### Step 3：分批逐包处理（核心循环）
 
-2. **变量（variables）**：名称、类型、作用域。
+对每个批次（2-3 个包），执行以下循环：
 
-3. **游标（cursors）**：名称、查询文本、fetchMode（BULK/ONE_BY_ONE/FOR_UPDATE/OTHER）。
+**3a. 读取该批次的源码文件**
+- 只读取当前批次包的 spec + body 文件
+- 禁止读取后续批次的文件
 
-4. **异常处理器（exceptionHandlers）**：名称、actions。
+**3b. 逐包解析子程序内部结构**
 
-5. **翻译注意事项（translationNotes）**：需要特别关注的翻译问题。
+对当前批次的每个包的每个子程序，解析：
 
-**逐包写入策略**：每完成一个子程序的解析，立即写入 analysis.json 对应的 packages[] 元素。采用先写入框架再逐个填充的策略：先写入顶层字段和空的 packages 数组，然后逐包追加子程序数据。
+1. **语句块（blocks）**：识别 loop、cursor、if-else、exception-block、sql-statement、assignment、call 类型，标注 oracleLine、description、dependencies
+2. **变量（variables）**：名称、类型、作用域
+3. **游标（cursors）**：名称、查询文本、fetchMode（BULK/ONE_BY_ONE/FOR_UPDATE/OTHER）
+4. **异常处理器（exceptionHandlers）**：名称、actions
+5. **翻译注意事项（translationNotes）**：需要特别关注的翻译问题
 
-#### 第三轮：逐子程序 FSD 文档生成
+**3c. 用 write 工具写入逐包文件**
 
-对每个子程序生成 FSD（Functional Specification Document），6 板块结构：
+每完成一个包的解析，用 `write` 工具写入 `${artifactsDir}/analysis-packages/{package_name}.json`：
+
+```json
+{
+  "packageName": "exc_pkg",
+  "subprograms": [
+    { "name": "...", "blocks": [...], "variables": [...], ... }
+  ]
+}
+```
+
+每个文件只含一个包的数据，大小可控，`write` 工具直接能写。
+
+**3d. 逐子程序生成 FSD 文档**
+
+对当前批次的每个子程序生成 FSD（Functional Specification Document），6 板块结构：
 
 1. **概览**：子程序名、签名、功能摘要、参数清单 + Java 类型映射、转换策略
 2. **表结构映射**：涉及的表 + 操作类型、特殊列处理（不逐列重复 inventory 已有数据）
@@ -249,15 +379,39 @@ analyze 阶段内部分三轮执行：
 5. **控制流与异常**：分支逻辑、循环结构、异常处理路径（复杂子程序建议 Mermaid 流程图）
 6. **特殊语法转化规约**：Oracle 专有构造 → Java/MyBatis 等价写法、事务边界、TODO 清单
 
-**逐子程序写入策略**：每完成一个子程序的 FSD，立即写入 `${artifactsDir}/fsd/{package}/{subprogram}.md`。包名使用 inventory 中的 Oracle 包名，子程序名使用小写 snake_case。
+每完成一个子程序的 FSD，用 `write` 工具写入 `${artifactsDir}/fsd/{package}/{subprogram}.md`。包名使用 inventory 中的 Oracle 包名，子程序名使用小写 snake_case。
 
-**FSD 消解规则**：FSD 内容与 `analysis.json` / `inventory.json` 不一致时，以 JSON artifact 为准。
+**3e. 批次完成后继续下一批**
+
+当前批次所有包都处理完毕后，进入下一个批次，重复 3a-3d。
+
+#### Step 4：全部完成后调用 advance
+
+所有包处理完毕后，验证完整性：
+
+```bash
+echo "Per-package files:" && ls ${artifactsDir}/analysis-packages/*.json | wc -l
+echo "FSD files:" && find ${artifactsDir}/fsd -name "*.md" | wc -l
+```
+
+确认文件数与 inventory 包数一致后，调用：
+```
+workflow({ action: "advance", runId: "${runId}", result: "passed" })
+```
+
+**FSD 消解规则**：FSD 内容与 `analysis-packages/{pkg}.json` / `inventory.json` 不一致时，以 JSON artifact 为准。
 
 ### 增量恢复
 
 如果 analyze 阶段被中断后恢复（retry）：
-- 检查已存在的 `analysis.json`，跳过已解析的包
+- 检查 `analysis.json` 是否存在，不存在则从头开始
+- 用 bash 检查已完成的包文件：
+  ```bash
+  ls ${artifactsDir}/analysis-packages/*.json 2>/dev/null | xargs -I{} basename {} .json
+  ```
+- 与 inventory 包名对比，跳过已有 per-package 文件的包
 - 检查已存在的 `fsd/` 目录，跳过已生成的 FSD 文件
+- 从第一个未完成的包继续分批处理
 
 ### 质量检查
 
@@ -268,3 +422,5 @@ analyze 阶段内部分三轮执行：
 - [ ] 每个 FSD 文件都包含 6 个板块
 - [ ] FSD 的 {package} 使用 inventory 中的 Oracle 包名
 - [ ] 风险等级只使用 low/medium/high 三种值
+- [ ] analysis.json 的 packageNames 覆盖 inventory 中所有包
+- [ ] analysis-packages/ 下每个文件的 packageName 与文件名一致

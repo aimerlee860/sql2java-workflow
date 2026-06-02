@@ -97,14 +97,14 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
 
 /** 每个 phase 需要读取的上游 artifact 路径模板 */
 export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
-  inventory: [],
-  analyze: ["inventory.json"],
-  plan: ["inventory.json", "analysis.json", "fsd/*/*.md"],
-  scaffold: ["plan.json", "inventory.json"],
-  translate: ["inventory.json", "plan.json", "analysis.json", "scaffold.json", "fsd/*/*.md"],
-  review: ["plan.json", "scaffold.json", "analysis.json", "translations/*/translation.json"],
+  inventory: ["inventory-index.json"],
+  analyze: ["inventory-index.json", "inventory.json", "inventory-packages/*.json"],
+  plan: ["inventory-index.json", "inventory.json", "inventory-packages/*.json", "analysis.json", "analysis-packages/*.json", "fsd/*/*.md"],
+  scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages/*.json"],
+  translate: ["inventory-index.json", "inventory.json", "inventory-packages/*.json", "plan.json", "analysis.json", "analysis-packages/*.json", "scaffold.json", "fsd/*/*.md"],
+  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages/*.json", "translations/*/translation.json"],
   verify: ["plan.json", "scaffold.json", "translations/*/translation.json"],
-  fix: ["analysis.json", "plan.json", "scaffold.json"],
+  fix: ["analysis.json", "analysis-packages/*.json", "plan.json", "scaffold.json"],
 }
 
 // ============================================================================
@@ -113,11 +113,11 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
 
 /** 目标阶段 → 必须存在的 artifact 文件名 */
 export const PHASE_PREREQUISITES: Record<string, string[]> = {
-  analyze: ["inventory.json"],
-  plan: ["inventory.json", "analysis.json"],
-  scaffold: ["plan.json", "inventory.json"],
-  translate: ["inventory.json", "analysis.json", "plan.json", "scaffold.json"],
-  review: ["plan.json", "scaffold.json", "analysis.json"],
+  analyze: ["inventory-index.json", "inventory.json", "inventory-packages"],
+  plan: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages"],
+  scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages"],
+  translate: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages", "plan.json", "scaffold.json"],
+  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages"],
   verify: ["plan.json", "scaffold.json"],
-  fix: ["analysis.json", "plan.json", "scaffold.json"],
+  fix: ["analysis.json", "analysis-packages", "plan.json", "scaffold.json"],
 }

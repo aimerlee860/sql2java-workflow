@@ -104,9 +104,12 @@ permission:
 ### 输入
 
 - **上游 artifact**：
-  - `${artifactsDir}/inventory.json` — 包和表结构
+  - `${artifactsDir}/inventory-index.json` — 包名 + 文件路径（轻量索引）
+  - `${artifactsDir}/inventory.json` — 表、触发器、视图、序列编目
+  - `${artifactsDir}/inventory-packages/{PKG}.json` — 当前翻译包的完整细节（procedures, types, variables, constants）
   - `${artifactsDir}/plan.json` — 映射规则和编码约定
-  - `${artifactsDir}/analysis.json` — 子程序结构和翻译顺序
+  - `${artifactsDir}/analysis.json` — 全局元数据（translationOrder、complexity）
+  - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构（逐包读取）
   - `${artifactsDir}/scaffold.json` — 已生成的项目骨架
   - `${artifactsDir}/fsd/*/*.md` — FSD 文档（可选参考）
 - **源码文件**：原始 PL/SQL 文件
@@ -120,7 +123,7 @@ permission:
 
 #### Step 1: 读取配置和依赖
 
-读取 plan.json（映射规则、conventions）和 analysis.json（translationOrder、子程序结构）。
+读取 plan.json（映射规则、conventions）和 analysis.json（translationOrder）。
 
 #### Step 2: 按拓扑序逐包翻译
 
@@ -129,7 +132,8 @@ permission:
 对每个包：
 
 1. **读取 Oracle 源码**：读取 `.pks` 和 `.pkb` 文件
-2. **逐子程序翻译**：对 analysis.json 中该包的每个子程序：
+2. **读取子程序结构**：读取 `analysis-packages/{pkg}.json` 获取该包的子程序详情
+3. **逐子程序翻译**：对该包的每个子程序：
    - 参考子程序的 blocks、variables、cursors、exceptionHandlers
    - 参考翻译注意事项 translationNotes
    - 可选参考 FSD 文档
@@ -184,7 +188,8 @@ translation.json 包含：
 ### 输入
 
 - **上游 artifact**：
-  - `${artifactsDir}/analysis.json` — 子程序结构参考
+  - `${artifactsDir}/analysis.json` — 全局元数据
+  - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构参考
   - `${artifactsDir}/plan.json` — 映射规则
   - `${artifactsDir}/scaffold.json` — 项目结构
   - 触发阶段的 summary（`review-summary.json` 或 `verify-summary.json`）
@@ -210,7 +215,7 @@ translation.json 包含：
 
 对每个 mustFix 项：
 1. 定位到具体 Java 文件和行号
-2. 对照 analysis.json 的子程序结构和源码理解问题
+2. 对照 `analysis-packages/{pkg}.json` 的子程序结构和源码理解问题
 3. 按五原则修复
 4. 更新对应的 translation.json
 

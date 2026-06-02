@@ -116,12 +116,12 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
    | 目标阶段 | 必须存在的 artifact |
    |---------|-------------------|
    | analyze | inventory.json |
-   | plan | inventory.json + analysis.json |
+   | plan | inventory.json + analysis.json + analysis-packages/ |
    | scaffold | plan.json + inventory.json |
-   | translate | inventory.json + analysis.json + plan.json + scaffold.json |
-   | review | plan.json + scaffold.json + analysis.json |
+   | translate | inventory.json + analysis.json + analysis-packages/ + plan.json + scaffold.json |
+   | review | plan.json + scaffold.json + analysis.json + analysis-packages/ |
    | verify | plan.json + scaffold.json |
-   | fix | analysis.json + plan.json + scaffold.json |
+   | fix | analysis.json + analysis-packages/ + plan.json + scaffold.json |
 
    使用 bash 检查文件存在性：
    ```bash
@@ -185,9 +185,9 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
 |------|---------|
 | inventory | 无 |
 | analyze | inventory.json |
-| plan | inventory.json + analysis.json |
+| plan | inventory.json + analysis.json + analysis-packages/ |
 | scaffold | plan.json + inventory.json |
-| translate | inventory.json + analysis.json + plan.json + scaffold.json |
-| review | plan.json + scaffold.json + analysis.json |
+| translate | inventory.json + analysis.json + analysis-packages/ + plan.json + scaffold.json |
+| review | plan.json + scaffold.json + analysis.json + analysis-packages/ |
 | verify | plan.json + scaffold.json |
-| fix | analysis.json + plan.json + scaffold.json |
+| fix | analysis.json + analysis-packages/ + plan.json + scaffold.json |

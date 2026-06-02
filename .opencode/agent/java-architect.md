@@ -81,14 +81,16 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
 
 ### 目标
 
-根据 inventory.json 和 analysis.json，规划 Java 目标项目的完整架构，产出 `plan.json`。plan.json 是后续所有阶段的蓝图——scaffold 用它生成骨架，translator 用它指导翻译，reviewer 用它校验一致性。
+根据 inventory 数据和 analysis.json，规划 Java 目标项目的完整架构，产出 `plan.json`。plan.json 是后续所有阶段的蓝图——scaffold 用它生成骨架，translator 用它指导翻译，reviewer 用它校验一致性。
 
 ### 输入
 
-- **上游 artifact**：
-  - `${artifactsDir}/inventory.json` — 包、表、类型、触发器、视图、序列编目
-  - `${artifactsDir}/analysis.json` — 依赖图、拓扑排序、复杂度、子程序结构
-  - `${artifactsDir}/fsd/*/*.md` — FSD 文档（可选参考）
+- **预扫描索引**：`${artifactsDir}/inventory-index.json` — 包名 + 文件路径 + 子程序骨架（轻量）
+- **逐包 inventory**：`${artifactsDir}/inventory-packages/{PKG}.json` — 按需读取当前关心的包的完整细节
+- **DDL 数据**：`${artifactsDir}/inventory.json` — 表、触发器、视图、序列编目
+- **分析数据**：`${artifactsDir}/analysis.json` — 依赖图、拓扑排序、复杂度
+- **子程序结构**：`${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构（按需读取）
+- **FSD 文档**：`${artifactsDir}/fsd/*/*.md` — FSD 文档（可选参考）
 - **源码文件**：必要时可读取源码确认细节
 
 ### 输出
@@ -100,10 +102,13 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
 
 #### Step 1: 读取上游 artifact
 
-读取 inventory.json 和 analysis.json，理解：
-- 有多少个 Oracle Package，各自有多少子程序
+读取 inventory-index.json（轻量）和 analysis.json（全局元数据），理解全局视图：
+- 有多少个 Oracle Package（从 inventory-index 或 analysis.packageNames 获取）
+- 各自有多少子程序（从 inventory-index 的 procedures 数组长度获取）
 - 拓扑排序结果和 SCC 组
 - 各包复杂度和风险等级
+
+如需某包的完整细节（参数类型、type 定义等），读取对应的 `inventory-packages/{PKG}.json`。
 
 #### Step 2: 确定 Java 项目配置
 
@@ -134,11 +139,11 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
 
 #### Step 5: 生成类型映射
 
-从 inventory 中的 Oracle 类型推导 Java 类型映射，存入 `typeMappings`（Record<string, string>）。
+从 inventory-packages 和 inventory.json 中的 Oracle 类型推导 Java 类型映射，存入 `typeMappings`（Record<string, string>）。
 
 #### Step 6: 标记需人工审查的子程序
 
-从 analysis 的 translationNotes 中提取高风险项，填入 `manualReviewList`。
+从 `analysis-packages/{pkg}.json` 中逐包读取 `translationNotes`，提取高风险项，填入 `manualReviewList`。按需读取，不需要一次性读取所有包文件。
 
 #### Step 7: 编写编码约定
 
@@ -155,10 +160,10 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
 
 ### 质量检查
 
-- [ ] packageMappings 覆盖 inventory 中的所有包
-- [ ] 每个映射的 oraclePackage 使用 inventory 中的原始包名
+- [ ] packageMappings 覆盖 inventory-index 中的所有包
+- [ ] 每个映射的 oraclePackage 使用 inventory-index 中的原始包名
 - [ ] conventions 非空且包含实际编码指导
-- [ ] typeMappings 覆盖 inventory 中出现的所有 Oracle 类型
+- [ ] typeMappings 覆盖 inventory-packages 和 inventory.json 中出现的所有 Oracle 类型
 
 ---
 
@@ -172,7 +177,8 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
 
 - **上游 artifact**：
   - `${artifactsDir}/plan.json` — 架构规划
-  - `${artifactsDir}/inventory.json` — 表结构和类型信息
+  - `${artifactsDir}/inventory.json` — 表、触发器、视图、序列编目
+  - `${artifactsDir}/inventory-packages/{PKG}.json` — 包结构和类型信息（按需读取）
 
 ### 输出
 

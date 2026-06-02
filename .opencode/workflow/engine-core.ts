@@ -429,9 +429,17 @@ export class WorkflowEngine {
     const invNames = new Set(
       (inventory.packages as Array<{ name: string }>).map((p) => p.name)
     )
-    const anaNames = new Set(
-      (analysis.packages as Array<{ name: string }>).map((p) => p.name)
-    )
+    // 新格式：analysis.packageNames；旧格式兼容：analysis.packages[].name
+    let anaNames: Set<string>
+    if (analysis.packageNames) {
+      anaNames = new Set(analysis.packageNames as string[])
+    } else if (analysis.packages) {
+      anaNames = new Set(
+        (analysis.packages as Array<{ name: string }>).map((p) => p.name)
+      )
+    } else {
+      anaNames = new Set()
+    }
     for (const name of invNames) {
       if (!anaNames.has(name)) warnings.push(`analysis 缺少包: ${name}`)
     }

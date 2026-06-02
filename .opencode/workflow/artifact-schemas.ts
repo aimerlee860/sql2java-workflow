@@ -10,11 +10,13 @@
 import { z } from "zod"
 
 // ============================================================================
-// Inventory Schema
+// Inventory Index Schema（预扫描索引，machine-generated）
 // ============================================================================
 
-export const InventorySchema = z.object({
+export const InventoryIndexSchema = z.object({
   sourcePath: z.string(),
+  scannedAt: z.string(),
+  scannerUsed: z.enum(["ast", "regex"]),
 
   packages: z.array(z.object({
     name: z.string(),
@@ -23,34 +25,90 @@ export const InventorySchema = z.object({
     procedures: z.array(z.object({
       name: z.string(),
       type: z.enum(["procedure", "function"]),
-      params: z.array(z.object({
-        name: z.string(),
-        oracleType: z.string(),
-        direction: z.enum(["IN", "OUT", "IN OUT"]),
-      })),
-      returnType: z.string().optional(),
-      lineRange: z.tuple([z.number(), z.number()]),
-      loc: z.number(),
+      lineRange: z.tuple([z.number(), z.number()]).optional(),
     })),
-    types: z.array(z.object({
-      name: z.string(),
-      kind: z.string(),
-      definition: z.string(),
-    })),
-    variables: z.array(z.object({
-      name: z.string(),
-      type: z.string(),
-      defaultValue: z.string().optional(),
-    })),
-    constants: z.array(z.object({
-      name: z.string(),
-      type: z.string(),
-      value: z.string(),
-    })),
-  }).refine(
-    pkg => pkg.procedures.length === 0 || (pkg.bodyFile !== undefined && pkg.bodyFile.length > 0),
-    { message: "有 procedures 的包必须有非空的 bodyFile（procedure 实现体在 body 中）" }
-  )),
+    estimatedLoc: z.number(),
+  })),
+
+  tables: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().optional(),
+  })),
+
+  triggers: z.array(z.object({
+    name: z.string(),
+    sourceFile: z.string(),
+  })),
+
+  views: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().optional(),
+  })),
+
+  sequences: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().optional(),
+  })),
+
+  standaloneProcedures: z.array(z.object({
+    name: z.string(),
+    type: z.enum(["procedure", "function"]),
+    sourceFile: z.string(),
+  })),
+
+  callGraph: z.record(z.array(z.string())).optional(),
+})
+
+// ============================================================================
+// Inventory Package Schema（逐包 inventory，LLM enriched）
+// ============================================================================
+
+/** 逐包 inventory 的 procedure 结构 — 与 InventorySchema 旧格式兼容 */
+const InventoryProcedureSchema = z.object({
+  name: z.string(),
+  type: z.enum(["procedure", "function"]),
+  params: z.array(z.object({
+    name: z.string(),
+    oracleType: z.string(),
+    direction: z.enum(["IN", "OUT", "IN OUT"]),
+  })),
+  returnType: z.string().optional(),
+  lineRange: z.tuple([z.number(), z.number()]),
+  loc: z.number(),
+})
+
+export const InventoryPackageSchema = z.object({
+  packageName: z.string(),
+  specFile: z.string().optional(),
+  bodyFile: z.string().optional(),
+  procedures: z.array(InventoryProcedureSchema),
+  types: z.array(z.object({
+    name: z.string(),
+    kind: z.string(),
+    definition: z.string(),
+  })),
+  variables: z.array(z.object({
+    name: z.string(),
+    type: z.string(),
+    defaultValue: z.string().optional(),
+  })),
+  constants: z.array(z.object({
+    name: z.string(),
+    type: z.string(),
+    value: z.string(),
+  })),
+}).refine(
+  pkg => pkg.procedures.length === 0 || (pkg.bodyFile !== undefined && pkg.bodyFile.length > 0),
+  { message: "有 procedures 的包必须有非空的 bodyFile（procedure 实现体在 body 中）" }
+)
+
+// ============================================================================
+// Inventory Schema（索引模式：packages 拆分为 per-package 文件，DDL 保留在此）
+// ============================================================================
+
+export const InventorySchema = z.object({
+  sourcePath: z.string(),
+  packageNames: z.array(z.string()),
 
   tables: z.array(z.object({
     name: z.string(),
@@ -108,9 +166,59 @@ export const InventorySchema = z.object({
 })
 
 // ============================================================================
-// Analysis Schema
+// Analysis Schema（拆分为 Meta + Per-Package）
 // ============================================================================
 
+/** 子程序结构 — analyze 和 downstream agents 共用 */
+const SubprogramSchema = z.object({
+  name: z.string(),
+  blocks: z.array(z.object({
+    type: z.enum([
+      "loop", "cursor", "if-else", "exception-block",
+      "sql-statement", "assignment", "call",
+    ]),
+    oracleLine: z.number(),
+    description: z.string(),
+    dependencies: z.array(z.string()),
+  })),
+  variables: z.array(z.object({
+    name: z.string(),
+    type: z.string(),
+    scope: z.string(),
+  })),
+  cursors: z.array(z.object({
+    name: z.string(),
+    query: z.string(),
+    fetchMode: z.enum(["BULK", "ONE_BY_ONE", "FOR_UPDATE", "OTHER"]),
+  })),
+  exceptionHandlers: z.array(z.object({
+    name: z.string(),
+    actions: z.array(z.string()),
+  })),
+  translationNotes: z.string(),
+})
+
+/** analysis.json — 全局元数据（不含逐包子程序数据） */
+export const AnalysisMetaSchema = z.object({
+  callGraph: z.record(z.array(z.string())),
+  packageDependency: z.record(z.array(z.string())),
+  translationOrder: z.array(z.array(z.string())),
+  complexity: z.record(z.object({
+    score: z.number().min(1).max(10),
+    patterns: z.array(z.string()),
+    riskLevel: z.enum(["low", "medium", "high"]),
+  })),
+  sccGroups: z.array(z.array(z.string())),
+  packageNames: z.array(z.string()),
+})
+
+/** analysis-packages/{pkg}.json — 逐包子程序结构 */
+export const AnalysisPackageSchema = z.object({
+  packageName: z.string(),
+  subprograms: z.array(SubprogramSchema),
+})
+
+/** @deprecated 旧格式兼容，仅用于跨 Schema 校验的 fallback */
 export const AnalysisSchema = z.object({
   callGraph: z.record(z.array(z.string())),
   packageDependency: z.record(z.array(z.string())),
@@ -121,37 +229,11 @@ export const AnalysisSchema = z.object({
     riskLevel: z.enum(["low", "medium", "high"]),
   })),
   sccGroups: z.array(z.array(z.string())),
-
   packages: z.array(z.object({
     name: z.string(),
-    subprograms: z.array(z.object({
-      name: z.string(),
-      blocks: z.array(z.object({
-        type: z.enum([
-          "loop", "cursor", "if-else", "exception-block",
-          "sql-statement", "assignment", "call",
-        ]),
-        oracleLine: z.number(),
-        description: z.string(),
-        dependencies: z.array(z.string()),
-      })),
-      variables: z.array(z.object({
-        name: z.string(),
-        type: z.string(),
-        scope: z.string(),
-      })),
-      cursors: z.array(z.object({
-        name: z.string(),
-        query: z.string(),
-        fetchMode: z.enum(["BULK", "ONE_BY_ONE", "FOR_UPDATE", "OTHER"]),
-      })),
-      exceptionHandlers: z.array(z.object({
-        name: z.string(),
-        actions: z.array(z.string()),
-      })),
-      translationNotes: z.string(),
-    })),
-  })),
+    subprograms: z.array(SubprogramSchema),
+  })).optional(),
+  packageNames: z.array(z.string()).optional(),
 })
 
 // ============================================================================
@@ -389,12 +471,18 @@ import type { ZodTypeAny } from "zod"
 export function getSchemaForPhase(phase: string): ZodTypeAny | null {
   const schemaMap: Record<string, ZodTypeAny> = {
     inventory: InventorySchema,
-    analyze: AnalysisSchema,
+    "inventory-index": InventoryIndexSchema,
+    analyze: AnalysisMetaSchema,
     plan: PlanSchema,
     scaffold: ScaffoldSchema,
     fix: FixArtifactSchema,
   }
   return schemaMap[phase] ?? null
+}
+
+/** 查找 inventory per-package schema（inventory 阶段拆分校验用） */
+export function getInventoryPackageSchema(): ZodTypeAny {
+  return InventoryPackageSchema
 }
 
 /** 根据阶段名查找 per-package schema */
@@ -405,6 +493,11 @@ export function getPerPackageSchema(phase: string): ZodTypeAny | null {
     verify: VerifySchema,
   }
   return schemaMap[phase] ?? null
+}
+
+/** 查找 analysis per-package schema（analyze 阶段拆分校验用） */
+export function getAnalysisPackageSchema(): ZodTypeAny {
+  return AnalysisPackageSchema
 }
 
 /** 根据 summary 文件名查找 summary schema */

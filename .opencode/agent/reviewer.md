@@ -82,14 +82,15 @@ permission:
 
 ### 目标
 
-对照 Oracle PL/SQL 源码和 analysis.json，逐包审查 Java 翻译的等价性。产出 per-package review.json 和顶层 review-summary.json。
+对照 Oracle PL/SQL 源码和 analysis 数据，逐包审查 Java 翻译的等价性。产出 per-package review.json 和顶层 review-summary.json。
 
 ### 输入
 
 - **上游 artifact**：
   - `${artifactsDir}/plan.json` — 映射规则和编码约定
   - `${artifactsDir}/scaffold.json` — 项目结构
-  - `${artifactsDir}/analysis.json` — 子程序结构和翻译注意事项
+  - `${artifactsDir}/analysis.json` — 全局元数据
+  - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构和翻译注意事项
   - `${artifactsDir}/translations/*/translation.json` — 翻译记录
 - **Java 文件**：scaffold 目录下的 Java 代码
 - **源码文件**：原始 PL/SQL 文件（对照审查）
@@ -103,14 +104,14 @@ permission:
 
 #### Step 1: 确定审查范围
 
-- **全量模式**：审查 inventory 中的所有包
+- **全量模式**：审查 inventory-index 中的所有包
 - **增量模式**（`incrementalContext.targetPackages` 存在）：只审查指定包
 
 #### Step 2: 逐包审查
 
 对每个待审查的包：
 
-1. **读取数据**：读取该包的 translation.json、analysis.json 中对应的子程序结构、原始 PL/SQL 源码
+1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
 2. **逐子程序审查**：对每个子程序，按 10 类审查清单逐项检查
 3. **产出 per-package review.json**：每审完一个包立即写入，包含：
    - `packageName`：Oracle 包名
@@ -177,7 +178,7 @@ cd ${projectRoot} && mvn compile 2>&1
 
 #### Step 2: 确定验证范围
 
-- **全量模式**：验证 inventory 中的所有包
+- **全量模式**：验证 inventory-index 中的所有包
 - **增量模式**（`incrementalContext.targetPackages` 存在）：只验证指定包
 
 #### Step 3: 按包校验
