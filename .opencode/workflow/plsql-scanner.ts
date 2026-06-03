@@ -665,14 +665,25 @@ function regexExtractProceduresFromBody(lines: string[], pkg: PackageIndex): voi
   /** 向后搜索最多 maxLines 行，检查是否包含 IS/AS（表示有实现体） */
   function hasBodyKeyword(startIdx: number): boolean {
     const maxLines = 20
+    let inTypeDecl = false  // 跟踪跨行 TYPE 声明
     for (let j = startIdx; j < Math.min(startIdx + maxLines, lines.length); j++) {
       const l = lines[j].trim()
       if (l.startsWith("--")) continue
+      // 跟踪跨行 TYPE 声明（TYPE xxx 开头但 IS/AS 在后续行）
+      if (/^\s*TYPE\s+/i.test(l)) inTypeDecl = true
       // 检测到 IS 或 AS 关键字（排除 TYPE ... IS RECORD 等声明）
       if (/\b(IS|AS)\b/i.test(l)) {
-        // 排除纯 TYPE 声明（TYPE xxx IS RECORD / IS TABLE 等）
+        // 排除：同行有 TYPE 前缀，或处于跨行 TYPE 声明中，或 IS 后跟类型声明关键字
         if (/^\s*TYPE\s+/i.test(l)) continue
+        if (inTypeDecl) { inTypeDecl = false; continue }
+        if (/\bIS\s+(RECORD|TABLE|VARRAY|REF\s+CURSOR)\b/i.test(l)) continue
+        if (/\bAS\s+(RECORD|TABLE|VARRAY|REF\s+CURSOR)\b/i.test(l)) continue
+        inTypeDecl = false
         return true
+      }
+      // 非类型声明行出现其他内容，重置跟踪
+      if (inTypeDecl && !/^\s*$/.test(l) && !/^\s*(IS|AS)\b/i.test(l)) {
+        inTypeDecl = false
       }
       // 如果先遇到下一个 PROCEDURE/FUNCTION/END/CREATE 关键字，说明这不是实现体
       if (/^\s*(PROCEDURE|FUNCTION|END|CREATE)\b/i.test(l) && j > startIdx) return false

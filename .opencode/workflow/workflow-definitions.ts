@@ -124,5 +124,11 @@ export const PHASE_PREREQUISITES: Record<string, string[]> = {
   translate: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages", "plan.json", "scaffold.json"],
   review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages"],
   verify: ["plan.json", "scaffold.json"],
-  fix: ["analysis.json", "analysis-packages", "plan.json", "scaffold.json"],
+  fix: [
+    "analysis.json", "analysis-packages", "plan.json", "scaffold.json",
+    // 触发阶段的 summary（review-summary.json 或 verify-summary.json，至少一个）
+    "review-summary.json", "verify-summary.json",
+    // 相关包的 per-package artifact
+    "translations",
+  ],
 }

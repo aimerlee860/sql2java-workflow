@@ -77,9 +77,25 @@ function buildRuntimeContext(run: WorkflowRun): string {
   lines.push(`sourcePath: ${(run.metadata as Record<string, unknown>).sourcePath ?? "unknown"}`)
   lines.push(`artifactsDir: ${ARTIFACT_DIR}/${run.runId}`)
 
-  // upstreamArtifacts
-  const upstream = UPSTREAM_ARTIFACTS[run.currentPhase ?? ""]
+  // 查找当前 entry（用于 incrementalContext 和 triggerPhase）
+  const currentEntry = findCurrentEntry(run)
+
+  // triggerPhase：fix 阶段从 branchedFrom 获取触发阶段，注入到 context
+  if (run.currentPhase === "fix" && currentEntry?.branchedFrom) {
+    lines.push(`triggerPhase: ${currentEntry.branchedFrom}`)
+  }
+
+  // upstreamArtifacts：fix 阶段根据 triggerPhase 过滤只注入对应的 summary
+  let upstream = UPSTREAM_ARTIFACTS[run.currentPhase ?? ""]
   if (upstream && upstream.length > 0) {
+    if (run.currentPhase === "fix" && currentEntry?.branchedFrom) {
+      const triggerPhase = currentEntry.branchedFrom
+      // 过滤：只保留触发阶段对应的 summary，排除另一个
+      const excludeSummary = triggerPhase === "review"
+        ? "verify-summary.json"
+        : "review-summary.json"
+      upstream = upstream.filter(a => a !== excludeSummary)
+    }
     lines.push(`upstreamArtifacts:`)
     for (const a of upstream) {
       lines.push(`  - ${ARTIFACT_DIR}/${run.runId}/${a}`)
@@ -87,7 +103,6 @@ function buildRuntimeContext(run: WorkflowRun): string {
   }
 
   // incrementalContext
-  const currentEntry = findCurrentEntry(run)
   if (currentEntry?.incrementalContext) {
     lines.push(`incrementalContext:`)
     lines.push(`  targetPackages: ${JSON.stringify(currentEntry.incrementalContext.targetPackages)}`)
@@ -313,8 +328,8 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
       return `Translations directory not found: ${translationsDir}. Agent must write per-package artifacts before advancing.`
     }
 
-    // 逐包 Zod 校验（review/verify 阶段必须有 per-package 文件）
-    if (phase === "review" || phase === "verify") {
+    // 逐包 Zod 校验（translate / review / verify 阶段逐包持久化后必须有合法的 per-package 文件）
+    {
       const pkgDirs = readdirSync(translationsDir, { withFileTypes: true })
         .filter(d => d.isDirectory())
       for (const pkgDir of pkgDirs) {

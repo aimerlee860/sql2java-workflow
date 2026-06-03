@@ -201,11 +201,6 @@ export class WorkflowEngine {
       input.result = derivedResult.effectiveResult
     }
 
-    // ── Step 6: 完成当前 phaseHistory entry ──
-    currentEntry.status = "completed"
-    currentEntry.completedAt = now
-    run.updatedAt = now
-
     // ── Step 7: condition: "always" 阶段 → 显式忽略 result (D1) ──
     // 检查当前 phase 的所有 transition 是否都是 "always"，是则丢弃 result
     const phaseTransitions = def.transitions.filter(t => t.from === run.currentPhase)
@@ -216,6 +211,8 @@ export class WorkflowEngine {
     const matchedRule = this.matchTransitionRule(def, run.currentPhase!, resultForMatching)
 
     if (!matchedRule) {
+      // 注意：Step 6 (标记 entry completed) 尚未执行，entry 保持 in_progress
+      // 确保 rejected 后 LLM 可以重试 advance 而不会因 entry 被篡改为 completed 而卡死
       return {
         run,
         nextPhase: null,
@@ -225,6 +222,11 @@ export class WorkflowEngine {
         rejectionReason: `No transition rule found for phase "${run.currentPhase}" with result "${resultForMatching}"`,
       }
     }
+
+    // ── Step 6: 完成当前 phaseHistory entry（移到 Step 8 成功之后，避免 rejected 时 entry 被篡改）──
+    currentEntry.status = "completed"
+    currentEntry.completedAt = now
+    run.updatedAt = now
 
     // ── Step 9: to === DONE_SENTINEL → 完成 ──
     if (matchedRule.to === DONE_SENTINEL) {
@@ -356,12 +358,14 @@ export class WorkflowEngine {
           terminalState: "completed_with_issues",
         }
       }
-      // 非 fix 阶段 exhausted：标记 entry 为 failed 阻止 advance 绕过
+      // 非 fix 阶段 exhausted：标记 entry 为 failed + run 为 aborted
+      // 避免僵尸状态（run.status="running" 但无 in_progress entry 可操作）
       currentEntry.status = "failed"
       currentEntry.completedAt = new Date().toISOString()
+      run.status = "aborted"
       run.updatedAt = new Date().toISOString()
       this.persist(run)
-      this.appendEvent(runId, "FAIL", run.currentPhase!, "retry exhausted")
+      this.appendEvent(runId, "FAIL", run.currentPhase!, "retry exhausted → aborted")
       return {
         run,
         retryCount: currentEntry.retryCount,
@@ -434,41 +438,24 @@ export class WorkflowEngine {
     }
 
     // inventory-index ↔ inventory.packageNames（双向）
-    if (inventoryIndex) {
+    if (!inventoryIndex) {
+      warnings.push("跨 Schema 校验跳过 inventory-index 检查：inventory-index.json 不存在（预扫描可能失败）")
+    } else {
       const indexNames = new Set(
         ((inventoryIndex.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
       )
-      const invNamesForIndex = inventory.packageNames
-        ? new Set(inventory.packageNames as string[])
-        : new Set(
-            ((inventory.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
-          )
+      const invNames = this.extractPackageNames(inventory)
       for (const name of indexNames) {
-        if (!invNamesForIndex.has(name)) warnings.push(`inventory.packageNames 缺少包: ${name}（index 中存在）`)
+        if (!invNames.has(name)) warnings.push(`inventory.packageNames 缺少包: ${name}（index 中存在）`)
       }
-      for (const name of invNamesForIndex) {
+      for (const name of invNames) {
         if (!indexNames.has(name)) warnings.push(`inventory-index 缺少包: ${name}（inventory.packageNames 中存在）`)
       }
     }
 
     // inventory 包名 ↔ analysis 包名（双向）
-    // 新格式：inventory.packageNames（string[]）；旧格式兼容：inventory.packages[].name
-    const invNames = inventory.packageNames
-      ? new Set(inventory.packageNames as string[])
-      : new Set(
-          ((inventory.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
-        )
-    // 新格式：analysis.packageNames；旧格式兼容：analysis.packages[].name
-    let anaNames: Set<string>
-    if (analysis.packageNames) {
-      anaNames = new Set(analysis.packageNames as string[])
-    } else if (analysis.packages) {
-      anaNames = new Set(
-        (analysis.packages as Array<{ name: string }>).map((p) => p.name)
-      )
-    } else {
-      anaNames = new Set()
-    }
+    const invNames = this.extractPackageNames(inventory)
+    const anaNames = this.extractPackageNames(analysis)
     for (const name of invNames) {
       if (!anaNames.has(name)) warnings.push(`analysis 缺少包: ${name}`)
     }
@@ -544,6 +531,25 @@ export class WorkflowEngine {
       }
     }
     return undefined
+  }
+
+  /** 从 artifact JSON 提取包名集合（兼容 new/old 格式） */
+  private extractPackageNames(
+    artifact: Record<string, unknown>,
+    toUpperCase = false,
+  ): Set<string> {
+    let names: string[]
+    if (artifact.packageNames) {
+      names = (artifact.packageNames as string[])
+    } else if (artifact.packages) {
+      names = ((artifact.packages as Array<{ name: string }>) ?? []).map((p) => p.name)
+    } else {
+      names = []
+    }
+    if (toUpperCase) {
+      names = names.map((n) => n.toUpperCase())
+    }
+    return new Set(names)
   }
 
   /** 匹配 TransitionRule (D1: 根据 result 匹配 condition) */
@@ -706,11 +712,7 @@ export class WorkflowEngine {
     // D12: 校验包名存在于 inventory
     const inventory = this.loadArtifactJson(artifactsDir, "inventory")
     if (inventory) {
-      const invPackageNames = inventory.packageNames
-        ? new Set((inventory.packageNames as string[]).map(n => n.toUpperCase()))
-        : new Set(
-            ((inventory.packages as Array<{ name: string }>) ?? []).map(p => p.name.toUpperCase())
-          )
+      const invPackageNames = this.extractPackageNames(inventory, true)
       const invalidPackages = fixedPackages.filter(
         p => !invPackageNames.has(p.toUpperCase())
       )
@@ -731,22 +733,30 @@ export class WorkflowEngine {
       ? "review-summary.json"
       : "verify-summary.json"
     const summary = this.loadArtifactJson(artifactsDir, summaryFileName.replace(".json", ""))
-    if (summary) {
-      const pkgResults = (summary as { packageResults?: Array<{ packageName: string; passed: boolean }> }).packageResults ?? []
-      const failedPackages = new Set(
-        pkgResults.filter(p => !p.passed).map(p => p.packageName.toUpperCase())
-      )
-      const fixedUpper = new Set(fixedPackages.map(p => p.toUpperCase()))
-      const missingPackages = Array.from(failedPackages).filter(p => !fixedUpper.has(p))
-      if (missingPackages.length > 0) {
-        return {
-          run,
-          nextPhase: null,
-          finished: false,
-          waitingForConfirmation: false,
-          rejected: true,
-          rejectionReason: `fix.json: missing failed packages: ${missingPackages.join(", ")}. fixedPackages must cover all failed packages.`,
-        }
+    if (!summary) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: `${summaryFileName} not found. Cannot validate D12 fixedPackages coverage. Ensure the trigger phase (${triggerPhase}) produced its summary artifact.`,
+      }
+    }
+    const pkgResults = (summary as { packageResults?: Array<{ packageName: string; passed: boolean }> }).packageResults ?? []
+    const failedPackages = new Set(
+      pkgResults.filter(p => !p.passed).map(p => p.packageName.toUpperCase())
+    )
+    const fixedUpper = new Set(fixedPackages.map(p => p.toUpperCase()))
+    const missingPackages = Array.from(failedPackages).filter(p => !fixedUpper.has(p))
+    if (missingPackages.length > 0) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: `fix.json: missing failed packages: ${missingPackages.join(", ")}. fixedPackages must cover all failed packages.`,
       }
     }
 
