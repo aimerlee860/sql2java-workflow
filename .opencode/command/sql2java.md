@@ -74,22 +74,21 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → r
 
 ## 分支 2：--resume（断点续传）
 
-1. 调用 `workflow({ action: "list" })` 找到最近的 run
-2. 如果没有 run → 报错 "No workflow runs found. Start with /sql2java <path>"
-3. 调用 `workflow({ action: "start", runId: "<最新 runId>" })` — 引擎会尝试从 run.json 恢复
-4. 根据 run.status 决定行为：
+1. 调用 `workflow({ action: "resume" })` — 引擎自动从磁盘找到最新 run 并返回恢复策略
+2. 根据 `metadata.resumeStrategy` 决定行为：
 
-### 状态路由
+### 策略路由
 
-| 状态 | 行为 |
+| resumeStrategy | 行为 |
 |------|------|
-| `completed` | 输出 "Workflow already completed"，结束 |
-| `completed_with_issues` | 输出未解决问题（读取 verify-summary.json 的 unresolvedIssues），结束 |
-| `paused`（plan 等待确认）| 提示用户：调用 `workflow({ action: "confirm", runId })` 继续。等待用户确认后继续 |
-| `running` + 最后 entry 是 `in_progress` | 中断恢复：继续当前阶段 |
-| `aborted` | 提示用户确认是否恢复，确认后继续当前阶段 |
+| `no_runs` | 报错 "No workflow runs found. Start with /sql2java \<path\>" |
+| `corrupted` | 提示用户 run 数据损坏，建议新建 run |
+| `already_completed` | 输出完成信息，结束 |
+| `confirm_needed` | 提示用户确认后调用 `workflow({ action: "confirm", runId })` |
+| `continue_phase` | 调用 `workflow({ action: "start", runId })` 激活 run，继续当前阶段。对 translate/review/verify，使用 `metadata.skippedPackages` 跳过已完成的包 |
+| `restart_phase` | 调用 `workflow({ action: "start", runId })` 激活 run，从头执行当前阶段 |
 
-5. 恢复后进入当前阶段，阶段内恢复策略：
+3. 激活 run 后进入当前阶段，阶段内恢复策略：
    - **translate**：检查 `translations/*/translation.json`，跳过 `status=completed` 的包；对 `status=partial` 的包，读取 `completedSubprograms` 跳过已完成的子程序
    - **review / verify**：检查已有的 per-package artifact，跳过已完成包
    - **其他阶段**：直接重新执行

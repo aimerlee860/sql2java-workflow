@@ -16,8 +16,9 @@
  *   D12: FixArtifact 包名校验
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync, renameSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { z } from "zod"
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,32 @@ export interface RetryResult {
   exhausted: boolean
   terminalState?: "completed_with_issues"       // fix 阶段 retry exhausted 时的终止状态
 }
+
+// ── Zod Schema（用于 loadFromDisk 校验）───────────────────────────────────────
+
+const PhaseHistoryEntrySchema = z.object({
+  phase: z.string(),
+  status: z.enum(["pending", "in_progress", "completed", "failed", "completed_with_issues"]),
+  artifactPath: z.string().optional(),
+  startedAt: z.string(),
+  completedAt: z.string().optional(),
+  retryCount: z.number(),
+  branchedFrom: z.string().optional(),
+  incrementalContext: z.object({
+    targetPackages: z.array(z.string()),
+  }).optional(),
+})
+
+export const WorkflowRunSchema = z.object({
+  runId: z.string(),
+  definitionId: z.string(),
+  currentPhase: z.string().nullable(),
+  status: z.enum(["running", "paused", "completed", "completed_with_issues", "aborted"]),
+  phaseHistory: z.array(PhaseHistoryEntrySchema),
+  metadata: z.record(z.unknown()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+})
 
 // ── 引擎 ──────────────────────────────────────────────────────────────────────
 
@@ -427,6 +454,32 @@ export class WorkflowEngine {
   }
 
   listRuns(): WorkflowRun[] {
+    // 内存中有 run 直接返回（避免不必要的磁盘 I/O）
+    if (this.runs.size > 0) {
+      return Array.from(this.runs.values())
+    }
+
+    // 内存为空（新 session）→ 扫描磁盘恢复
+    if (!existsSync(this.artifactsRoot)) {
+      return []
+    }
+
+    try {
+      const entries = readdirSync(this.artifactsRoot, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        const runJsonPath = join(this.artifactsRoot, entry.name, "run.json")
+        if (!existsSync(runJsonPath)) continue
+        try {
+          this.loadFromDisk(entry.name)
+        } catch {
+          // 跳过损坏的 run，不阻塞其他 run 的列举
+        }
+      }
+    } catch {
+      // artifactsRoot 不可读
+    }
+
     return Array.from(this.runs.values())
   }
 
@@ -438,7 +491,20 @@ export class WorkflowEngine {
       throw new Error(`Run file not found: ${filePath}`)
     }
     const raw = readFileSync(filePath, "utf-8")
-    const run = JSON.parse(raw) as WorkflowRun
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch (e: any) {
+      throw new Error(`Run file corrupted (invalid JSON): ${filePath}: ${e.message}`)
+    }
+    const validationResult = WorkflowRunSchema.safeParse(parsed)
+    if (!validationResult.success) {
+      const issues = validationResult.error.issues
+        .map(i => `  - ${i.path.join(".")}: ${i.message}`)
+        .join("\n")
+      throw new Error(`Run file schema validation failed: ${filePath}\n${issues}`)
+    }
+    const run = validationResult.data as WorkflowRun
     this.runs.set(runId, run)
     return run
   }
@@ -865,14 +931,16 @@ export class WorkflowEngine {
     return null
   }
 
-  /** D6: 持久化 run.json */
+  /** D6: 持久化 run.json（原子写入：tmp → rename） */
   private persist(run: WorkflowRun): void {
     const dir = join(this.artifactsRoot, run.runId)
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
     const filePath = join(dir, "run.json")
-    writeFileSync(filePath, JSON.stringify(run, null, 2), "utf-8")
+    const tmpPath = filePath + ".tmp"
+    writeFileSync(tmpPath, JSON.stringify(run, null, 2), "utf-8")
+    renameSync(tmpPath, filePath)
   }
 
   /** 追加事件日志 */

@@ -550,7 +550,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       args: {
         action: zFn.enum([
           "start", "advance", "confirm", "retry", "abort", "status", "list",
-          "prerequisites",
+          "prerequisites", "resume",
         ]),
         runId: zFn.string().optional(),
         sourcePath: zFn.string().optional(),
@@ -813,6 +813,169 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               title: "Prerequisites OK",
               output: `All prerequisites satisfied for phases: ${targetPhases.join(", ")}`,
               metadata: { phases: targetPhases },
+            }
+          }
+
+          // ── resume（确定性断点续传）──
+          case "resume": {
+            // 1. 找到 runs（使用修复后的 listRuns，含磁盘扫描）
+            const allRuns = engine.listRuns()
+            if (allRuns.length === 0) {
+              return {
+                title: "No Runs",
+                output: "No workflow runs found. Start with /sql2java <path>",
+                metadata: { resumeStrategy: "no_runs" },
+              }
+            }
+
+            // 2. 取最新的 run（按 updatedAt 降序）
+            const latestRun = allRuns.sort((a: any, b: any) =>
+              b.updatedAt.localeCompare(a.updatedAt)
+            )[0]
+
+            // 3. 从磁盘加载（含 Zod 校验）
+            let run: WorkflowRun
+            try {
+              run = engine.loadFromDisk(latestRun.runId)
+            } catch (e: any) {
+              return {
+                title: "Corrupted Run",
+                output: `Latest run ${latestRun.runId} is corrupted: ${e.message}\nConsider starting a new run with /sql2java <path>`,
+                metadata: { resumeStrategy: "corrupted", runId: latestRun.runId },
+              }
+            }
+
+            const runId = run.runId
+
+            // 4. 已完成
+            if (run.status === "completed") {
+              return {
+                title: "Already Completed",
+                output: `Workflow ${runId} is already completed. No action needed.`,
+                metadata: {
+                  action: "resume",
+                  runId,
+                  status: run.status,
+                  resumeStrategy: "already_completed",
+                  message: "Workflow already completed",
+                },
+              }
+            }
+
+            // 5. 完成但有未解决问题
+            if (run.status === "completed_with_issues") {
+              const artifactsDir = join(ARTIFACT_DIR, runId)
+              const verifySummary = engine.loadArtifactJson(artifactsDir, "verify-summary")
+              const unresolvedText = verifySummary?.unresolvedIssues
+                ? JSON.stringify(verifySummary.unresolvedIssues, null, 2)
+                : `See ${ARTIFACT_DIR}/${runId}/verify-summary.json`
+              return {
+                title: "Completed with Issues",
+                output: `Workflow ${runId} completed with unresolved issues:\n${unresolvedText}`,
+                metadata: {
+                  action: "resume",
+                  runId,
+                  status: run.status,
+                  resumeStrategy: "already_completed",
+                  message: "Workflow completed with issues",
+                },
+              }
+            }
+
+            // 6. 暂停等待确认
+            if (run.status === "paused") {
+              return {
+                title: "Paused — Confirmation Needed",
+                output: `Workflow ${runId} is paused at phase "${run.currentPhase}". Call:\nworkflow({ action: "confirm", runId: "${runId}" })`,
+                metadata: {
+                  action: "resume",
+                  runId,
+                  status: run.status,
+                  currentPhase: run.currentPhase,
+                  resumeStrategy: "confirm_needed",
+                  message: `Paused at ${run.currentPhase}. Awaiting confirmation.`,
+                },
+              }
+            }
+
+            // 7. 已中止
+            if (run.status === "aborted") {
+              return {
+                title: "Aborted Run",
+                output: `Workflow ${runId} was aborted at phase "${run.currentPhase}". To restart, start a new run with /sql2java <path>`,
+                metadata: {
+                  action: "resume",
+                  runId,
+                  status: run.status,
+                  currentPhase: run.currentPhase,
+                  resumeStrategy: "restart_phase",
+                  message: `Run was aborted at ${run.currentPhase}. Manual decision required.`,
+                },
+              }
+            }
+
+            // 8. 运行中 — 计算跳过的包，确定恢复策略
+            if (run.status === "running" && run.currentPhase) {
+              const artifactsDir = join(ARTIFACT_DIR, runId)
+              let skippedPackages: string[] | undefined
+
+              // translate/review/verify 阶段：检查哪些包已有 artifact
+              if (["translate", "review", "verify"].includes(run.currentPhase)) {
+                const translationsDir = join(artifactsDir, "translations")
+                if (existsSync(translationsDir)) {
+                  const currentEntry = engine.findCurrentEntry(run)
+                  const isIncremental = !!currentEntry?.incrementalContext?.targetPackages?.length
+
+                  if (!isIncremental) {
+                    const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+                    if (inventory) {
+                      const allPackages = Array.from(engine.extractPackageNames(inventory))
+                      const pkgDirs = readdirSync(translationsDir, { withFileTypes: true })
+                        .filter(d => d.isDirectory())
+                        .map(d => d.name)
+                      skippedPackages = allPackages.filter(pkgName => {
+                        if (!pkgDirs.includes(pkgName)) return false
+                        const artifactFile = join(translationsDir, pkgName, `${run.currentPhase}.json`)
+                        return existsSync(artifactFile)
+                      })
+                    }
+                  }
+                }
+              }
+
+              // 校验 artifact 完整性决定策略
+              const validationError = validateArtifactOnDisk(run)
+              const strategy = validationError ? "restart_phase" : "continue_phase"
+
+              return {
+                title: `Resumed — ${run.currentPhase}`,
+                output: [
+                  `Resuming run ${runId} at phase "${run.currentPhase}" (status: running).`,
+                  strategy === "continue_phase"
+                    ? `Phase has valid partial artifacts. Continue from where it left off.`
+                    : `Phase artifacts incomplete or invalid. Restart the phase from the beginning.`,
+                  skippedPackages?.length
+                    ? `Skippable packages (already completed): ${skippedPackages.join(", ")}`
+                    : null,
+                  `Call: workflow({ action: "start", runId: "${runId}" }) to activate.`,
+                ].filter(Boolean).join("\n"),
+                metadata: {
+                  action: "resume",
+                  runId,
+                  status: run.status,
+                  currentPhase: run.currentPhase,
+                  resumeStrategy: strategy,
+                  skippedPackages,
+                  message: `Running at ${run.currentPhase}. ${strategy === "continue_phase" ? "Continue from checkpoint." : "Restart phase."}`,
+                },
+              }
+            }
+
+            // 9. 未知状态兜底
+            return {
+              title: "Unknown State",
+              output: `Run ${runId} is in unexpected state. Status: ${run.status}, Phase: ${run.currentPhase}`,
+              metadata: { runId, status: run.status, resumeStrategy: "corrupted" },
             }
           }
 
