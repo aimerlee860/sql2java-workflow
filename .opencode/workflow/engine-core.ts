@@ -31,6 +31,16 @@ export const FIX_LIMITS = {
 /** 完成哨兵 */
 export const DONE_SENTINEL = "__done__" as const
 
+/** 引擎错误类型，用于区分预期错误（如 not found）和真实错误（如 corrupted JSON） */
+export class WorkflowEngineError extends Error {
+  readonly code: "NOT_FOUND" | "CORRUPTED" | "VALIDATION_FAILED" | "INVALID_STATE"
+  constructor(message: string, code: "NOT_FOUND" | "CORRUPTED" | "VALIDATION_FAILED" | "INVALID_STATE") {
+    super(message)
+    this.name = "WorkflowEngineError"
+    this.code = code
+  }
+}
+
 // ── 核心类型 ──────────────────────────────────────────────────────────────────
 
 /** 单阶段配置 */
@@ -488,21 +498,21 @@ export class WorkflowEngine {
   loadFromDisk(runId: string): WorkflowRun {
     const filePath = join(this.artifactsRoot, runId, "run.json")
     if (!existsSync(filePath)) {
-      throw new Error(`Run file not found: ${filePath}`)
+      throw new WorkflowEngineError(`Run file not found: ${filePath}`, "NOT_FOUND")
     }
     const raw = readFileSync(filePath, "utf-8")
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
     } catch (e: any) {
-      throw new Error(`Run file corrupted (invalid JSON): ${filePath}: ${e.message}`)
+      throw new WorkflowEngineError(`Run file corrupted (invalid JSON): ${filePath}: ${e.message}`, "CORRUPTED")
     }
     const validationResult = WorkflowRunSchema.safeParse(parsed)
     if (!validationResult.success) {
       const issues = validationResult.error.issues
         .map(i => `  - ${i.path.join(".")}: ${i.message}`)
         .join("\n")
-      throw new Error(`Run file schema validation failed: ${filePath}\n${issues}`)
+      throw new WorkflowEngineError(`Run file schema validation failed: ${filePath}\n${issues}`, "VALIDATION_FAILED")
     }
     const run = validationResult.data as WorkflowRun
     this.runs.set(runId, run)
@@ -618,7 +628,7 @@ export class WorkflowEngine {
 
   private getRun(runId: string): WorkflowRun {
     const run = this.runs.get(runId)
-    if (!run) throw new Error(`Workflow run "${runId}" not found`)
+    if (!run) throw new WorkflowEngineError(`Workflow run "${runId}" not found`, "NOT_FOUND")
     return run
   }
 
@@ -687,15 +697,12 @@ export class WorkflowEngine {
     const summary = this.loadArtifactJson(artifactsDir, summaryFileName.replace(".json", ""))
 
     if (!summary) {
-      // summary 不存在，依赖 LLM 传入的 result
-      if (!explicitResult) {
-        return {
-          rejected: true,
-          effectiveResult: "passed",
-          rejectionReason: `${summaryFileName} not found. Please provide result explicitly.`,
-        }
+      // summary 不存在：所有 result 都拒绝（无 summary 进 fix 会导致 handleFixAdvance 死锁）
+      return {
+        rejected: true,
+        effectiveResult: explicitResult ?? "passed",
+        rejectionReason: `${summaryFileName} not found. Agent must write the summary artifact before advancing.`,
       }
-      return { rejected: false, effectiveResult: explicitResult }
     }
 
     const allPassed = (summary as { allPassed?: boolean }).allPassed ?? false

@@ -11,7 +11,7 @@
  */
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { WorkflowEngine, type WorkflowRun } from "../workflow/engine-core"
+import { WorkflowEngine, WorkflowEngineError, type WorkflowRun } from "../workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
 import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-definitions"
 import {
@@ -207,13 +207,15 @@ function validateInventoryPackages(
     return "inventory-packages/ directory not found. Agent must write per-package files before advancing."
   }
 
-  // 3. 逐包校验
+  // 3. 逐包校验（大小写不敏感匹配文件名，缓存目录列表避免 N 次 readdirSync）
   const pkgSchema = getInventoryPackageSchema()
+  const pkgDirEntries = readdirSync(pkgDir)
   for (const pkgName of expectedPackages) {
-    const pkgFile = join(pkgDir, `${pkgName}.json`)
-    if (!existsSync(pkgFile)) {
+    const actualFileName = findFileCaseInsensitive(pkgDir, pkgName, pkgDirEntries)
+    if (!actualFileName) {
       return `Missing inventory package file: inventory-packages/${pkgName}.json`
     }
+    const pkgFile = join(pkgDir, actualFileName)
     try {
       const raw = readFileSync(pkgFile, "utf-8")
       const parsed = JSON.parse(raw)
@@ -222,13 +224,13 @@ function validateInventoryPackages(
         const errors = result.error.issues
           .map((i: any) => `  - ${i.path.join(".")}: ${i.message}`)
           .join("\n")
-        return `Zod validation failed for inventory-packages/${pkgName}.json:\n${errors}`
+        return `Zod validation failed for inventory-packages/${actualFileName}:\n${errors}`
       }
-      if (parsed.packageName !== pkgName) {
-        return `inventory-packages/${pkgName}.json: packageName "${parsed.packageName}" does not match filename "${pkgName}"`
+      if (parsed.packageName.toUpperCase() !== pkgName.toUpperCase()) {
+        return `inventory-packages/${actualFileName}: packageName "${parsed.packageName}" does not match expected "${pkgName}"`
       }
     } catch (e: any) {
-      return `Failed to read/parse inventory-packages/${pkgName}.json: ${e.message}`
+      return `Failed to read/parse inventory-packages/${actualFileName}: ${e.message}`
     }
   }
 
@@ -272,13 +274,15 @@ function validateAnalysisPackages(
   }
   const expectedPackages = Array.from(engine.extractPackageNames(inventory))
 
-  // 逐包校验
+  // 逐包校验（大小写不敏感匹配文件名，缓存目录列表避免 N 次 readdirSync）
   const pkgSchema = getAnalysisPackageSchema()
+  const pkgDirEntries = readdirSync(analysisPackagesDir)
   for (const pkgName of expectedPackages) {
-    const pkgFile = join(analysisPackagesDir, `${pkgName}.json`)
-    if (!existsSync(pkgFile)) {
+    const actualFileName = findFileCaseInsensitive(analysisPackagesDir, pkgName, pkgDirEntries)
+    if (!actualFileName) {
       return `Missing analysis package file: analysis-packages/${pkgName}.json`
     }
+    const pkgFile = join(analysisPackagesDir, actualFileName)
     try {
       const raw = readFileSync(pkgFile, "utf-8")
       const parsed = JSON.parse(raw)
@@ -287,13 +291,13 @@ function validateAnalysisPackages(
         const errors = result.error.issues
           .map((i: any) => `  - ${i.path.join(".")}: ${i.message}`)
           .join("\n")
-        return `Zod validation failed for analysis-packages/${pkgName}.json:\n${errors}`
+        return `Zod validation failed for analysis-packages/${actualFileName}:\n${errors}`
       }
-      if (parsed.packageName !== pkgName) {
-        return `analysis-packages/${pkgName}.json: packageName "${parsed.packageName}" does not match filename "${pkgName}"`
+      if (parsed.packageName.toUpperCase() !== pkgName.toUpperCase()) {
+        return `analysis-packages/${actualFileName}: packageName "${parsed.packageName}" does not match expected "${pkgName}"`
       }
     } catch (e: any) {
-      return `Failed to read/parse analysis-packages/${pkgName}.json: ${e.message}`
+      return `Failed to read/parse analysis-packages/${actualFileName}: ${e.message}`
     }
   }
 
@@ -309,6 +313,9 @@ function validateAnalysisPackages(
 
   return null // 校验通过
 }
+
+// per-package 文件名映射复用 artifact-schemas.ts 的 PHASE_FILENAME_MAP
+// getArtifactFilename("translate") → "translation"，其余 phase 名与文件名一致
 
 /**
  * D5: advance 时从磁盘读取 artifact 并做 Zod 校验
@@ -368,37 +375,59 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
     // 判断是否增量模式：查找当前 entry 的 incrementalContext
     const currentEntry = engine.findCurrentEntry(run)
     const isIncremental = !!currentEntry?.incrementalContext?.targetPackages?.length
+    // per-package 文件名映射（translate → translation.json，其余与 phase 名一致）
+    const pkgFileName = getArtifactFilename(phase)
+
+    // 获取 inventory 期望包名列表（缓存到局部变量供非增量存在性检查 + Zod 校验共用）
+    const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+    const expectedPackages = inventory
+      ? Array.from(engine.extractPackageNames(inventory))
+      : [] as string[]
+
+    // 缓存目录读取结果，避免存在性检查 + Zod 校验循环中重复 readdirSync
+    const cachedDirEntries = readdirSync(translationsDir, { withFileTypes: true })
 
     // 非增量模式：校验所有期望包都有对应的 artifact 文件
     if (!isIncremental) {
-      const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
       if (!inventory) {
         return `inventory.json not found or malformed in ${artifactsDir}. Cannot verify per-package completeness for phase "${phase}".`
       }
-      const expectedPackages = Array.from(engine.extractPackageNames(inventory))
       for (const pkgName of expectedPackages) {
-        const artifactFile = join(translationsDir, pkgName, `${phase}.json`)
+        // 大小写不敏感匹配目录名（scanner 输出大写，LLM 可能用原始大小写）
+        const actualDirName = findDirCaseInsensitive(translationsDir, pkgName, cachedDirEntries)
+        if (!actualDirName) {
+          return `Missing per-package directory: translations/${pkgName}/. All packages must have directories before advancing.`
+        }
+        const artifactFile = join(translationsDir, actualDirName, `${pkgFileName}.json`)
         if (!existsSync(artifactFile)) {
-          return `Missing per-package artifact: translations/${pkgName}/${phase}.json. All packages must have artifacts before advancing.`
+          return `Missing per-package artifact: translations/${actualDirName}/${pkgFileName}.json. All packages must have artifacts before advancing.`
         }
       }
     } else {
       // 增量模式：校验所有 targetPackages 都有对应的 artifact 文件
       const targetPackages = currentEntry?.incrementalContext?.targetPackages ?? []
       for (const pkgName of targetPackages) {
-        const artifactFile = join(translationsDir, pkgName, `${phase}.json`)
+        const actualDirName = findDirCaseInsensitive(translationsDir, pkgName, cachedDirEntries)
+        if (!actualDirName) {
+          return `Missing per-package directory in incremental mode: translations/${pkgName}/`
+        }
+        const artifactFile = join(translationsDir, actualDirName, `${pkgFileName}.json`)
         if (!existsSync(artifactFile)) {
-          return `Missing per-package artifact in incremental mode: translations/${pkgName}/${phase}.json. All targetPackages must have artifacts before advancing.`
+          return `Missing per-package artifact in incremental mode: translations/${actualDirName}/${pkgFileName}.json. All targetPackages must have artifacts before advancing.`
         }
       }
     }
 
-    // Zod 校验：对需要校验的包目录逐个验证 per-package artifact
-    const pkgDirsToValidate = isIncremental
-      ? (currentEntry?.incrementalContext?.targetPackages ?? []).map(name => ({ name, isDirectory: () => true }))
-      : readdirSync(translationsDir, { withFileTypes: true }).filter(d => d.isDirectory())
-    for (const pkgDir of pkgDirsToValidate) {
-      const artifactFile = join(translationsDir, pkgDir.name, `${phase}.json`)
+    // Zod 校验：逐包验证 per-package artifact
+    // 仅校验 inventory 期望的包（增量模式取 targetPackages，非增量取全部）
+    const packagesToValidate = isIncremental
+      ? (currentEntry?.incrementalContext?.targetPackages ?? [])
+      : expectedPackages
+    for (const pkgName of packagesToValidate) {
+      // 大小写不敏感匹配磁盘目录名
+      const actualDirName = findDirCaseInsensitive(translationsDir, pkgName, cachedDirEntries)
+      if (!actualDirName) continue // 目录不存在（增量模式下未修改的包）
+      const artifactFile = join(translationsDir, actualDirName, `${pkgFileName}.json`)
       if (!existsSync(artifactFile)) continue // 跳过无文件的包（增量模式下未修改的包）
       try {
         const raw = readFileSync(artifactFile, "utf-8")
@@ -408,10 +437,10 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
           const errors = result.error.issues
             .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
             .join("\n")
-          return `Zod validation failed for translations/${pkgDir.name}/${phase}.json:\n${errors}`
+          return `Zod validation failed for translations/${actualDirName}/${pkgFileName}.json:\n${errors}`
         }
       } catch (e: any) {
-        return `Failed to read/parse translations/${pkgDir.name}/${phase}.json: ${e.message}`
+        return `Failed to read/parse translations/${actualDirName}/${pkgFileName}.json: ${e.message}`
       }
     }
 
@@ -433,10 +462,10 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
             .join("\n")
           return `Zod validation failed for ${summaryPhase}.json:\n${errors}`
         }
-        // verify-summary: 校验 testFiles[] 中的路径实际存在
+        // verify-summary: 校验 testFiles[] 中的路径实际存在（兼容相对路径）
         if (summaryPhase === "verify-summary" && parsed.testGeneration?.generated) {
           const missing = (parsed.testGeneration.testFiles as string[]).filter(
-            (f) => !existsSync(f)
+            (f) => !existsSync(f) && !existsSync(join(artifactsDir, f)) && !existsSync(join(process.cwd(), f))
           )
           if (missing.length > 0) {
             return `verify-summary declares testFiles that do not exist on disk:\n${missing.map((f) => `  - ${f}`).join("\n")}`
@@ -496,6 +525,71 @@ function validateJsonContent(fullPath: string, name: string): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * 大小写不敏感的文件查找
+ * 在指定目录下查找文件名（不含 .json 后缀）与 targetName 匹配的文件。
+ * 返回磁盘上的实际文件名（含 .json），未找到返回 null。
+ * 可传入预读的 entries 列表以避免重复 readdirSync。
+ */
+function findFileCaseInsensitive(dir: string, targetName: string, cachedEntries?: string[]): string | null {
+  const targetUpper = targetName.toUpperCase()
+  try {
+    const entries = cachedEntries ?? readdirSync(dir)
+    for (const entry of entries) {
+      if (entry.toUpperCase().replace(/(\.json)+$/i, "") === targetUpper) {
+        return entry
+      }
+    }
+  } catch {
+    // 目录不存在或不可读
+  }
+  return null
+}
+
+/**
+ * 大小写不敏感的目录查找
+ * 在父目录下查找与 targetName 匹配的子目录名。
+ * 返回磁盘上的实际目录名，未找到返回 null。
+ * 可传入预读的 entries 列表以避免重复 readdirSync。
+ */
+function findDirCaseInsensitive(parentDir: string, targetName: string, cachedEntries?: import("node:fs").Dirent[]): string | null {
+  const targetUpper = targetName.toUpperCase()
+  try {
+    const entries = cachedEntries ?? readdirSync(parentDir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.toUpperCase() === targetUpper) {
+        return entry.name
+      }
+    }
+  } catch {
+    // 目录不存在或不可读
+  }
+  return null
+}
+
+/** 递归截断对象中所有超过 maxLength 的字符串字段（含嵌套对象/数组） */
+function truncateStringsDeep(obj: unknown, maxLength: number): void {
+  if (!obj || typeof obj !== "object") return
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length; i++) {
+      if (typeof obj[i] === "string" && obj[i].length > maxLength) {
+        obj[i] = obj[i].slice(0, maxLength) + `\n... [truncated, total ${obj[i].length} bytes]`
+      } else if (typeof obj[i] === "object" && obj[i] !== null) {
+        truncateStringsDeep(obj[i], maxLength)
+      }
+    }
+  } else {
+    for (const key of Object.keys(obj as Record<string, unknown>)) {
+      const val = (obj as Record<string, unknown>)[key]
+      if (typeof val === "string" && val.length > maxLength) {
+        (obj as Record<string, unknown>)[key] = val.slice(0, maxLength) + `\n... [truncated, total ${val.length} bytes]`
+      } else if (typeof val === "object" && val !== null) {
+        truncateStringsDeep(val, maxLength)
+      }
+    }
   }
 }
 
@@ -576,7 +670,19 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   metadata: { runId, resumed: true },
                 }
               }
-            } catch {}
+            } catch (e: any) {
+              // "not found" 是预期情况（新 run），继续创建
+              // 其他错误（corrupted JSON、schema 校验失败）需报告
+              if (e instanceof WorkflowEngineError && e.code === "NOT_FOUND") {
+                // 预期：新 run，继续创建
+              } else {
+                return {
+                  title: "Error",
+                  output: `无法加载已有 run ${runId}: ${e.message}`,
+                  metadata: { runId, error: e.message },
+                }
+              }
+            }
 
             // 预扫描：在 engine.start 之前扫描源码生成 inventory-index.json
             let scanStatus = "skipped"
@@ -616,8 +722,24 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             // D5: 从磁盘校验 artifact（在 engine.advance 之前）
             // fix-failed 时跳过校验：agent 可能无法写出有效 fix.json，advance(result="failed")
             // 应直接进入 handleFixAdvance 的 failed 分支处理，不应被 Zod 校验拦截
-            const statusBefore = engine.status(runId)
+            let statusBefore: WorkflowRun | null = engine.status(runId)
             const isFixFailed = statusBefore?.currentPhase === "fix" && args.result === "failed"
+            // statusBefore 为空时（跨 session），从磁盘加载以确保校验不跳过
+            if (!statusBefore) {
+              try {
+                statusBefore = engine.loadFromDisk(runId)
+              } catch (e: any) {
+                // "not found" 交给 engine.advance 处理（会抛 not found）
+                // 其他错误（corrupted JSON 等）需报告
+                if (!(e instanceof WorkflowEngineError && e.code === "NOT_FOUND")) {
+                  return {
+                    title: "Error",
+                    output: `无法加载 run ${runId}: ${e.message}`,
+                    metadata: { runId, error: e.message },
+                  }
+                }
+              }
+            }
             if (statusBefore && statusBefore.status === "running" && !isFixFailed) {
               const validationError = validateArtifactOnDisk(statusBefore)
               if (validationError) {
@@ -795,7 +917,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
             // 找到最近的 run 对应的 artifacts 目录
             const runs = engine.listRuns()
-            const latestRun = runs[runs.length - 1]
+            // 按 updatedAt 降序排序，确保取到最新的 run（readdirSync 不保证顺序）
+            const latestRun = [...runs].sort((a: any, b: any) =>
+              b.updatedAt.localeCompare(a.updatedAt)
+            )[0]
             if (!latestRun) {
               return { title: "Error", output: "No workflow runs found", metadata: {} }
             }
@@ -829,7 +954,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
 
             // 2. 取最新的 run（按 updatedAt 降序）
-            const latestRun = allRuns.sort((a: any, b: any) =>
+            const latestRun = [...allRuns].sort((a: any, b: any) =>
               b.updatedAt.localeCompare(a.updatedAt)
             )[0]
 
@@ -930,12 +1055,14 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                     const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
                     if (inventory) {
                       const allPackages = Array.from(engine.extractPackageNames(inventory))
-                      const pkgDirs = readdirSync(translationsDir, { withFileTypes: true })
-                        .filter(d => d.isDirectory())
-                        .map(d => d.name)
+                      const pkgDirEntries = readdirSync(translationsDir, { withFileTypes: true })
+                        .filter((d: import("node:fs").Dirent) => d.isDirectory())
+                      const pkgFileName = getArtifactFilename(run.currentPhase!)
                       skippedPackages = allPackages.filter(pkgName => {
-                        if (!pkgDirs.includes(pkgName)) return false
-                        const artifactFile = join(translationsDir, pkgName, `${run.currentPhase}.json`)
+                        // 大小写不敏感匹配磁盘目录名
+                        const actualDirName = findDirCaseInsensitive(translationsDir, pkgName, pkgDirEntries)
+                        if (!actualDirName) return false
+                        const artifactFile = join(translationsDir, actualDirName, `${pkgFileName}.json`)
                         return existsSync(artifactFile)
                       })
                     }
@@ -992,20 +1119,29 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       currentWorkflowContext &&
       (input.tool === "Agent" || input.tool === "Task")
     ) {
-      const j = JSON.stringify(output)
-      if (j?.length > 50000)
-        output.__summary = `Truncated (${j.length} bytes)`
+      try {
+        const j = JSON.stringify(output)
+        if (j?.length > 50000) {
+          // 递归截断所有超过阈值的字符串字段（含嵌套对象/数组），保留结构
+          if (output && typeof output === "object") {
+            truncateStringsDeep(output, 10000)
+          }
+        }
+      } catch {
+        // JSON.stringify 可能因循环引用失败，安全忽略
+      }
     }
   },
 
   // ── Hook: chat.params — 温度控制 + 工具过滤 ──
   "chat.params": async (input: any) => {
     if (!currentWorkflowContext) return input
-    const result = { ...input, temperature: currentWorkflowContext.temperature }
+    const ctx = currentWorkflowContext // 局部变量窄化 null check
+    const result = { ...input, temperature: ctx.temperature }
 
     // 工具过滤：根据 PhaseConfig.tools[] 限制可用工具
     const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(
-      (p) => p.name === currentWorkflowContext.phase
+      (p) => p.name === ctx.phase
     )
     if (phaseConfig?.tools) {
       const allowed = new Set(phaseConfig.tools)
