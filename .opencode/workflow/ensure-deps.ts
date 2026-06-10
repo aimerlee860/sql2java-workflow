@@ -58,7 +58,6 @@ function runInstall(opencodeDir: string, pm: "npm" | "bun"): void {
     ? (existsSync(join(opencodeDir, "package-lock.json")) ? "npm ci" : "npm install")
     : "bun install"
 
-  console.error(`[ensure-deps] 使用 ${pm} 安装依赖: ${cmd}`)
   execSync(cmd, {
     cwd: opencodeDir,
     timeout: 120_000,
@@ -103,7 +102,6 @@ export async function ensureDeps(): Promise<void> {
         )
       }
 
-      console.error("[ensure-deps] 依赖安装完成")
     } catch (e) {
       // 失败时清除缓存，允许后续重试（Fix #1）
       ensurePromise = null

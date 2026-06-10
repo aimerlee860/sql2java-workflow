@@ -27,6 +27,7 @@ import {
   formatDuration,
 } from "../workflow/phase-metrics-collector"
 import type { PhaseMetrics } from "../workflow/phase-metrics-collector"
+import { initLogger, getLogger, destroyLogger } from "../workflow/workflow-logger"
 
 const engine = new WorkflowEngine()
 engine.registerDefinition(SQL2JAVA_WORKFLOW)
@@ -122,10 +123,10 @@ function persistCollectorIfActive(runId: string): void {
     const snap = activeCollector.getSnapshot()
     if (snap.apiCallCount > 0 || snap.totalToolCallCount > 0) {
       activeCollector.persistAsIncomplete()
-      console.warn(`[metrics] 非正常终止时持久化了 ${snap.apiCallCount} 次 API 调用 / $${snap.totalCost.toFixed(4)} 数据`)
+      getLogger().warn("[metrics]", `非正常终止时持久化了 ${snap.apiCallCount} 次 API 调用 / $${snap.totalCost.toFixed(4)} 数据`)
     }
   } catch (e: any) {
-    console.warn(`[metrics] 非正常终止 persist 失败: ${e.message}`)
+    getLogger().warn("[metrics]", `非正常终止 persist 失败: ${e.message}`)
   }
 }
 
@@ -137,6 +138,7 @@ function clearWorkflowContext(): void {
   activeCollector = null
   _cachedJavaCodeSpec = null
   _cachedSpecMtime = null
+  destroyLogger()
 }
 
 /** 需要 Java 代码规约的 agent 文件名（正向白名单） */
@@ -160,7 +162,7 @@ function readJavaCodeSpec(): string {
     _cachedSpecMtime = mtime
     return content
   } catch {
-    console.warn("[workflow-engine] Java 代码规约文件未找到或不可读: %s", specPath)
+    getLogger().warn("[workflow-engine]", `Java 代码规约文件未找到或不可读: ${specPath}`)
     return ""
   }
 }
@@ -682,8 +684,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
   try {
     await ensureDeps()
     depsOk = true
-  } catch (e: any) {
-    console.error(`[workflow-engine] 依赖安装失败: ${e.message}`)
+  } catch (_e: any) {
+    // runId 未初始化，日志忽略
   }
 
   // 依赖就绪后才动态 import npm 包（ESM-only 包无法用 require 加载）
@@ -695,8 +697,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       toolFn = opencodePlugin.tool
       const zodMod = await import("zod")
       zFn = zodMod.z
-    } catch (e: any) {
-      console.error(`[workflow-engine] import 失败: ${e.message}`)
+    } catch (_e: any) {
       depsOk = false
     }
   }
@@ -708,10 +709,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         workflow: {
           description: "Workflow engine (依赖未安装)",
           args: { action: { type: "string" } },
-          execute: async () => ({
-            title: "依赖未安装",
-            output: "❌ 工作流引擎依赖未安装。请手动执行：cd .opencode && npm install",
-          }),
+          execute: async () => "❌ 工作流引擎依赖未安装。请手动执行：cd .opencode && npm install",
         },
       },
     }
@@ -734,11 +732,15 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         phases: zFn.string().optional(),        // --phases 用
         dbConf: zFn.string().optional(),        // --db_conf 用
       },
-      execute: async (args: any) => {
+      execute: async (args: any, context: any) => {
+        // opencode 1.4.6: execute 必须返回 string，title/metadata 通过 context.metadata() 设置
+        // 用 IIFE 包裹现有逻辑，后处理转换 { title, output, metadata } → string
+        const _r = await (async () => {
         switch (args.action) {
           // ── start ──
           case "start": {
             const runId = args.runId ?? `run-${Date.now()}`
+            initLogger(runId)
             const metadata = args.sourcePath ? { sourcePath: args.sourcePath } : {}
 
             // 尝试从磁盘恢复已有 run
@@ -937,7 +939,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 }
               }
             } catch (e: any) {
-              console.warn(`[metrics] 阶段报告生成失败: ${e.message}`)
+              getLogger().warn("[metrics]", `阶段报告生成失败: ${e.message}`)
             }
 
             if (adv.finished) {
@@ -953,7 +955,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 mkdirSync(reportsDir, { recursive: true })
                 writeFileSync(join(reportsDir, "final-report.txt"), finalText, "utf-8")
               } catch (e: any) {
-                console.warn(`[metrics] 最终报告生成失败: ${e.message}`)
+                getLogger().warn("[metrics]", `最终报告生成失败: ${e.message}`)
               }
               clearWorkflowContext()
               const isWithIssues = adv.run.status === "completed_with_issues"
@@ -1020,7 +1022,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             try {
               setWorkflowContext(adv.run)
             } catch (e: any) {
-              console.warn(`[metrics] collector 创建失败: ${e.message}`)
+              getLogger().warn("[metrics]", `collector 创建失败: ${e.message}`)
             }
             const prevPhase = statusBefore?.currentPhase ?? ""
             const duration = phaseMetrics?.wallDurationMs != null ? formatDuration(phaseMetrics.wallDurationMs) : undefined
@@ -1099,7 +1101,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               if (activeCollector) {
                 const snap = activeCollector.getSnapshot()
                 if (snap.apiCallCount > 0) {
-                  console.warn(`[metrics] retry 丢弃了 ${snap.apiCallCount} 次 API 调用 / $${snap.totalCost.toFixed(4)} 数据`)
+                  getLogger().warn("[metrics]", `retry 丢弃了 ${snap.apiCallCount} 次 API 调用 / $${snap.totalCost.toFixed(4)} 数据`)
                 }
               }
               const artifactsDir = join(ARTIFACT_DIR, currentWorkflowContext.runId)
@@ -1415,6 +1417,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           default:
             throw new Error(`Unknown action: ${args.action}`)
         }
+        })() // end IIFE
+        // 适配 opencode 1.4.6 API: { title, output, metadata } → string + context.metadata()
+        if (_r && typeof _r === "object" && typeof _r.output === "string") {
+          if (context?.metadata) context.metadata({ title: _r.title, metadata: _r.metadata })
+          return _r.output
+        }
+        return _r
       },
     }),
   },
@@ -1449,32 +1458,18 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
     }
   },
 
-  // ── Hook: chat.params — 温度控制 + 工具过滤 ──
-  "chat.params": async (input: any) => {
-    if (!currentWorkflowContext) return input
-    const ctx = currentWorkflowContext // 局部变量窄化 null check
-    const result = { ...input, temperature: ctx.temperature }
-
-    // 工具过滤：根据 PhaseConfig.tools[] 限制可用工具
-    const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(
-      (p) => p.name === ctx.phase
-    )
-    if (phaseConfig?.tools) {
-      const allowed = new Set(phaseConfig.tools)
-      if (input.tools && Array.isArray(input.tools)) {
-        result.tools = input.tools.filter((t: any) => {
-          const name = typeof t === "string" ? t : t.name
-          return allowed.has(name)
-        })
-      }
-    }
-
-    return result
+  // ── Hook: chat.params — 温度控制 ──
+  // opencode 1.4.6: (input, output) => void，修改 output 参数
+  "chat.params": async (_input: any, output: any) => {
+    if (!currentWorkflowContext) return
+    const ctx = currentWorkflowContext
+    if (output) output.temperature = ctx.temperature
   },
 
   // ── Hook: experimental.chat.system.transform — system prompt 构建 (D11) ──
-  "experimental.chat.system.transform": async (input: any) => {
-    if (!currentWorkflowContext) return input
+  // opencode 1.4.6: (input, output) => void，修改 output.system (string[])
+  "experimental.chat.system.transform": async (_input: any, output: any) => {
+    if (!currentWorkflowContext) return
     try {
       // 使用共享路径工具定位 agent 文件，不依赖 process.cwd()
       const agentPath = join(findOpencodeDir(), currentWorkflowContext.agentFile)
@@ -1510,17 +1505,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           runtimeContext ? "## Runtime Context\n\n" + runtimeContext : "",
         ].filter((p) => p !== "")
 
-        return {
-          ...input,
-          system: parts.join("\n\n"),
-        }
+        if (output) output.system = [parts.join("\n\n")]
       } else {
-        console.error(`[workflow-engine] Agent file not found: ${agentPath}. System prompt will not be injected.`)
+        getLogger().error("[workflow-engine]", `Agent file not found: ${agentPath}. System prompt will not be injected.`)
       }
     } catch (e: any) {
-      console.error(`[workflow-engine] Failed to build system prompt: ${e.message}`)
+      getLogger().error("[workflow-engine]", `Failed to build system prompt: ${e.message}`)
     }
-    return input
   },
 
   // ── Hook: event — Metrics 采集（message.part.updated 事件） ──
@@ -1557,7 +1548,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         }
       }
     } catch (e: any) {
-      console.warn(`[metrics] event hook 处理失败: ${e.message}`)
+      getLogger().warn("[metrics]", `event hook 处理失败: ${e.message}`)
     }
   },
 })

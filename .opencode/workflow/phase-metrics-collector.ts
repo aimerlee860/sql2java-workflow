@@ -18,6 +18,7 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 import type { PhaseHistoryEntry, WorkflowRun } from "./engine-core"
+import { getLogger } from "./workflow-logger"
 
 // ── Type Definitions ──────────────────────────────────────────────────────────
 
@@ -326,7 +327,7 @@ class PhaseMetricsCollector {
     // 清理 runningTools 残留项（跨阶段边界遗漏的 tool 调用）
     if (this.runningTools.size > 0) {
       const orphaned = [...this.runningTools.keys()]
-      console.warn(`[metrics] 清理 ${orphaned.length} 个未完成的工具调用: ${orphaned.join(", ")}`)
+      getLogger().warn("[metrics]", `清理 ${orphaned.length} 个未完成的工具调用: ${orphaned.join(", ")}`)
       this.runningTools.clear()
     }
 
@@ -362,7 +363,7 @@ class PhaseMetricsCollector {
       writeFileSync(tmpPath, JSON.stringify(this.metrics, null, 2), "utf-8")
       renameSync(tmpPath, filePath)
     } catch (e) {
-      console.warn(`[metrics] persist 失败: ${(e as Error).message}`)
+      getLogger().warn("[metrics]", `persist 失败: ${(e as Error).message}`)
       // 清理孤立 .tmp 文件
       try { if (existsSync(tmpPath)) { unlinkSync(tmpPath) } } catch { /* 忽略清理失败 */ }
     }
@@ -638,7 +639,7 @@ function generateRunMetrics(runId: string, run: WorkflowRun, artifactsDir: strin
       if (m && typeof m.startedAt === "string" && typeof m.phase === "string") {
         phases.push(m as unknown as PhaseMetrics)
       } else if (m) {
-        console.warn(`[metrics] 跳过不合规 metrics 文件: ${f}`)
+        getLogger().warn("[metrics]", `跳过不合规 metrics 文件: ${f}`)
       }
     }
   }

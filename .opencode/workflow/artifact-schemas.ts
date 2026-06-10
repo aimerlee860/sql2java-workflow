@@ -56,7 +56,7 @@ export const InventoryIndexSchema = z.object({
     sourceFile: z.string(),
   })),
 
-  callGraph: z.record(z.array(z.string())).optional(),
+  callGraph: z.record(z.string(), z.array(z.string())).optional(),
 })
 
 // ============================================================================
@@ -200,10 +200,10 @@ const SubprogramSchema = z.object({
 
 /** analysis.json — 全局元数据（不含逐包子程序数据） */
 export const AnalysisMetaSchema = z.object({
-  callGraph: z.record(z.array(z.string())),
-  packageDependency: z.record(z.array(z.string())),
+  callGraph: z.record(z.string(), z.array(z.string())),
+  packageDependency: z.record(z.string(), z.array(z.string())),
   translationOrder: z.array(z.array(z.string())),
-  complexity: z.record(z.object({
+  complexity: z.record(z.string(), z.object({
     score: z.number().min(1).max(10),
     patterns: z.array(z.string()),
     riskLevel: z.enum(["low", "medium", "high"]),
@@ -220,10 +220,10 @@ export const AnalysisPackageSchema = z.object({
 
 /** @deprecated 旧格式兼容，仅用于跨 Schema 校验的 fallback */
 export const AnalysisSchema = z.object({
-  callGraph: z.record(z.array(z.string())),
-  packageDependency: z.record(z.array(z.string())),
+  callGraph: z.record(z.string(), z.array(z.string())),
+  packageDependency: z.record(z.string(), z.array(z.string())),
   translationOrder: z.array(z.array(z.string())),
-  complexity: z.record(z.object({
+  complexity: z.record(z.string(), z.object({
     score: z.number().min(1).max(10),
     patterns: z.array(z.string()),
     riskLevel: z.enum(["low", "medium", "high"]),
@@ -264,7 +264,7 @@ export const PlanSchema = z.object({
     logFramework: z.enum(["slf4j", "log4j2"]),
   }),
 
-  typeMappings: z.record(z.string()),
+  typeMappings: z.record(z.string(), z.string()),
   manualReviewList: z.array(z.object({
     procedure: z.string(),
     reason: z.string(),
@@ -467,7 +467,7 @@ export const FixArtifactSchema = z.object({
 // Schema 查找辅助
 // ============================================================================
 
-import type { ZodTypeAny } from "zod"
+import type { ZodType } from "zod"
 
 /** 阶段名 → 磁盘文件名映射（phase 名与文件名不一致时使用） */
 const PHASE_FILENAME_MAP: Record<string, string> = {
@@ -486,8 +486,8 @@ export function getArtifactFilename(phase: string): string {
 }
 
 /** 根据阶段名查找对应的 Zod Schema */
-export function getSchemaForPhase(phase: string): ZodTypeAny | null {
-  const schemaMap: Record<string, ZodTypeAny> = {
+export function getSchemaForPhase(phase: string): ZodType | null {
+  const schemaMap: Record<string, ZodType> = {
     inventory: InventorySchema,
     "inventory-index": InventoryIndexSchema,
     analyze: AnalysisMetaSchema,
@@ -499,13 +499,13 @@ export function getSchemaForPhase(phase: string): ZodTypeAny | null {
 }
 
 /** 查找 inventory per-package schema（inventory 阶段拆分校验用） */
-export function getInventoryPackageSchema(): ZodTypeAny {
+export function getInventoryPackageSchema(): ZodType {
   return InventoryPackageSchema
 }
 
 /** 根据阶段名查找 per-package schema */
-export function getPerPackageSchema(phase: string): ZodTypeAny | null {
-  const schemaMap: Record<string, ZodTypeAny> = {
+export function getPerPackageSchema(phase: string): ZodType | null {
+  const schemaMap: Record<string, ZodType> = {
     translate: TranslationSchema,
     review: ReviewSchema,
     verify: VerifySchema,
@@ -514,13 +514,13 @@ export function getPerPackageSchema(phase: string): ZodTypeAny | null {
 }
 
 /** 查找 analysis per-package schema（analyze 阶段拆分校验用） */
-export function getAnalysisPackageSchema(): ZodTypeAny {
+export function getAnalysisPackageSchema(): ZodType {
   return AnalysisPackageSchema
 }
 
 /** 根据 summary 文件名查找 summary schema */
-export function getSummarySchema(phase: string): ZodTypeAny | null {
-  const schemaMap: Record<string, ZodTypeAny> = {
+export function getSummarySchema(phase: string): ZodType | null {
+  const schemaMap: Record<string, ZodType> = {
     "review-summary": ReviewSummarySchema,
     "verify-summary": VerifySummarySchema,
   }

@@ -32,9 +32,9 @@ export const FIX_LIMITS = {
 export const DONE_SENTINEL = "__done__" as const
 
 /** 格式化 Zod 校验错误为可读字符串（供 engine-core 和 plugin 共用） */
-export function formatZodIssues(error: { issues: Array<{ path: (string | number)[]; message: string }> }): string {
+export function formatZodIssues(error: { issues: Array<{ path: PropertyKey[]; message: string }> }): string {
   return error.issues
-    .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
+    .map((i) => `  - ${i.path.map(String).join(".")}: ${i.message}`)
     .join("\n")
 }
 
@@ -142,7 +142,7 @@ export const WorkflowRunSchema = z.object({
   currentPhase: z.string().nullable(),
   status: z.enum(["running", "paused", "completed", "completed_with_issues", "aborted"]),
   phaseHistory: z.array(PhaseHistoryEntrySchema),
-  metadata: z.record(z.unknown()),
+  metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
 })

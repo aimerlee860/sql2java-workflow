@@ -18,6 +18,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, renameSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, GENERATED_MARKER_ID } from "./constants"
+import { getLogger } from "./workflow-logger"
 
 // ── oracledb 常量 ──────────────────────────────────────────────────────────
 // 从 oracledb 库动态获取，通过 OraCtx 注入各 fetch 函数，避免模块级可变状态。
@@ -421,7 +422,7 @@ async function fetchConstraints(
     result = await conn.execute(buildConstraintSql(true), binds, { outFormat: ctx.outFormatObject })
   } catch (e: any) {
     if (e.message?.includes("ORA-00904")) {
-      console.warn("[schema-fetcher] Oracle 版本不支持 GENERATED 列，回退到不带过滤的查询")
+      getLogger().warn("[schema-fetcher]", "Oracle 版本不支持 GENERATED 列，回退到不带过滤的查询")
       result = await conn.execute(buildConstraintSql(false), binds, { outFormat: ctx.outFormatObject })
     } else {
       throw e
@@ -1278,7 +1279,7 @@ export async function fetchSchemaIfNeeded(
   try {
     const connParams = buildConnectionParams(config)
     connection = await oracledb.getConnection(connParams)
-    console.error(`[schema-fetcher] 已连接 Oracle，正在获取 schema: ${owner}`)
+    getLogger().warn("[schema-fetcher]", `已连接 Oracle，正在获取 schema: ${owner}`)
 
     // 顺序查询各类型元数据（oracledb 建议单连接上避免并发查询）
     const tableFilter = config.tableFilter
@@ -1321,7 +1322,7 @@ export async function fetchSchemaIfNeeded(
     const totalCount = columns.length + triggers.length + views.length
       + sequences.length + objectTypes.length
     if (totalCount === 0) {
-      console.warn(`[schema-fetcher] Oracle schema "${owner}" 未找到任何对象（可能由过滤条件导致）。继续使用已有 PL/SQL 文件。`)
+      getLogger().warn("[schema-fetcher]", `Oracle schema "${owner}" 未找到任何对象（可能由过滤条件导致）。继续使用已有 PL/SQL 文件。`)
       // 不阻断工作流：生成空的 ddl-output 目录，让 scanSource 继续处理本地文件
     }
 
@@ -1337,8 +1338,9 @@ export async function fetchSchemaIfNeeded(
       columnComments,
     })
 
-    console.error(
-      `[schema-fetcher] DDL 文件已生成: ${result.tablesFetched} 表, ${result.triggersFetched} 触发器, ` +
+    getLogger().warn(
+      "[schema-fetcher]",
+      `DDL 文件已生成: ${result.tablesFetched} 表, ${result.triggersFetched} 触发器, ` +
       `${result.viewsFetched} 视图, ${result.sequencesFetched} 序列, ${result.objectTypesFetched} 类型`,
     )
 

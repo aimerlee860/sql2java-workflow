@@ -12,6 +12,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join, extname, relative } from "node:path"
 import { ensureDeps, findOpencodeDir } from "./ensure-deps"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
+import { getLogger } from "./workflow-logger"
 
 // ── 类型 ────────────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,34 @@ interface ParsedNode {
   nodes: ParsedNode[]
 }
 
+// ── SQL*Plus 命令预处理 ────────────────────────────────────────────────────────
+
+/**
+ * 剥离 SQL*Plus 专有命令，避免 ANTLR 解析器报错。
+ * SQL*Plus 命令是客户端编排指令（prompt/@@/SET 等），不含 PL/SQL 结构定义，
+ * 对 inventory 扫描无影响。
+ *
+ * 处理的命令：
+ *   prompt <text>        — 控制台输出
+ *   @@<file> / @<file>   — 文件引入（扫描器已单独收集每个文件）
+ *   SET / SPOOL / DEFINE / UNDEFINE / VARIABLE / ACCEPT 等
+ */
+function stripSqlPlusCommands(code: string): string {
+  return code
+    .split("\n")
+    .map(line => {
+      const trimmed = line.trimStart()
+      // prompt（SQL*Plus 输出命令）
+      if (/^prompt\b/i.test(trimmed)) return ""
+      // @@ 或 @ 引入文件
+      if (/^@@?\s?\S/i.test(trimmed)) return ""
+      // 常见 SQL*Plus 会话/格式命令
+      if (/^(SET|SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|EXIT|QUIT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|REM|CLEAR)\b/i.test(trimmed)) return ""
+      return line
+    })
+    .join("\n")
+}
+
 // ── Parser 安装检测 & 自动安装 ─────────────────────────────────────────────────
 
 let parserAvailable: boolean | null = null
@@ -131,12 +160,17 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
   const callGraph: Record<string, string[]> = {}
 
   for (const filePath of files) {
-    const code = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
+    const rawCode = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
     const relPath = relative(sourcePath, filePath)
     const ext = extname(filePath).toLowerCase()
+    const code = stripSqlPlusCommands(rawCode)
 
     try {
       const parser = getParserFromInput(code) as any
+      // 移除 ANTLR 默认 ConsoleErrorListener，避免 "no viable alternative" 直接打印到 stderr
+      const lexer = parser.getTokenStream()?.tokenSource
+      lexer?.removeErrorListeners()
+      parser.removeErrorListeners()
       // BailErrorStrategy: 遇错即抛 ParseCancellationException，规避 instanceof RecognitionException
       // ESM/CJS 混用可能导致 catch 块 instanceof 检查失败，异常逃出 ANTLR4 内部 catch
       if (typeof parser._errHandler !== "undefined") {
@@ -184,8 +218,10 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
 
       // 提取调用关系（PKG.PROC 模式）
       extractCallGraph(code, relPath, callGraph)
-    } catch {
-      // 解析失败的单文件降级到 regex 提取
+    } catch (e) {
+      // AST 解析失败，降级到 regex 提取
+      const errMsg = e instanceof Error ? e.message : String(e)
+      getLogger().warn("[plsql-scanner]", `AST 解析失败，降级到 regex: ${relPath} — ${errMsg}`)
       regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
     }
   }
@@ -289,7 +325,7 @@ function extractPackageSpec(
     estimatedLoc: 0,
   }
   existing.specFile = relPath
-  existing.estimatedLoc += node.text.split("\n").length
+  existing.estimatedLoc += (node.text || "").split("\n").length
 
   // 提取 procedures 和 functions
   for (const child of node.nodes) {
@@ -343,7 +379,7 @@ function extractPackageBody(
     estimatedLoc: 0,
   }
   existing.bodyFile = relPath
-  existing.estimatedLoc += node.text.split("\n").length
+  existing.estimatedLoc += (node.text || "").split("\n").length
 
   // body 中可能有额外的 procedure/function 实现，补充行号
   for (const child of node.nodes) {
@@ -418,7 +454,8 @@ function extractTrigger(node: ParsedNode, triggers: TriggerIndex[], relPath: str
 
 /** 提取视图名（AST 模式下视图名 context 类型不确定，使用 regex 回退） */
 function extractView(node: ParsedNode, views: ViewIndex[], relPath: string): void {
-  const match = node.text.match(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)/i)
+  const text = node.text || ""
+  const match = text.match(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)/i)
   if (match) {
     views.push({ name: match[2].toUpperCase(), ddlFile: relPath })
   }
@@ -810,7 +847,7 @@ export async function scanSource(sourcePath: string): Promise<InventoryIndex> {
       return await scanWithAST(sourcePath)
     } catch (e) {
       // AST 扫描整体失败，降级到 regex
-      console.error(`[plsql-scanner] AST scan failed, falling back to regex: ${e}`)
+      getLogger().error("[plsql-scanner]", `AST scan failed, falling back to regex: ${e}`)
       return scanWithRegex(sourcePath)
     }
   }
