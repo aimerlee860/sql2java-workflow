@@ -15,6 +15,13 @@
                    │
                    ▼
 ┌──────────────────────────────────────────────────┐
+│  Schema 预获取（可选，有 db.xml 时触发）            │
+│  schema-fetcher.ts → oracledb 7.x thin mode       │
+│  产出：ddl-output/ + DDL 文件                      │
+└──────────────────┬───────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────┐
 │  预扫描（确定性，不占 LLM 上下文）                   │
 │  @griffithswaite/ts-plsql-parser (AST)            │
 │  安装失败 → regex 降级                             │
@@ -30,7 +37,7 @@
                                                                └→ 增量回到触发阶段（review 或 verify）
 ```
 
-**单流水线**：7 个阶段 + 1 个条件分支阶段（fix），一个 runId，无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。
+**单流水线**：7 个阶段 + 1 个条件分支阶段（fix），一个 runId，无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。启动前可选执行 Schema 预获取（发现 `db.xml` 时自动连接数据库拉取 DDL）。
 
 ## 项目结构
 
@@ -44,15 +51,19 @@ sql2java-workflow/
 │   │   ├── java-architect.md         # plan + scaffold 阶段
 │   │   ├── translator.md             # translate + fix 阶段
 │   │   └── reviewer.md               # review + verify 阶段
+│   ├── docs/
+│   │   └── java-code-spec.md         # 统一 Java 代码规约（自动注入 3 个 agent）
 │   ├── workflow/
 │   │   ├── engine-core.ts            # 状态机核心
 │   │   ├── workflow-definitions.ts   # 工作流定义 + TransitionRule + PHASE_PREREQUISITES
 │   │   ├── artifact-schemas.ts       # Artifact Zod Schemas + getArtifactFilename + getPerPackageSchema
 │   │   ├── plsql-scanner.ts          # PL/SQL AST/regex 预扫描器
+│   │   ├── schema-fetcher.ts         # 数据库 Schema 自动获取（db.xml → ddl-output/）
+│   │   ├── constants.ts              # 共享常量（GENERATED_OUTPUT_DIR 等）
 │   │   └── type-mappings.ts          # Oracle → Java/JDBC 类型映射表
 │   ├── plugins/
 │   │   └── workflow-engine.ts        # 插件入口（workflow 工具 + hooks + artifact 校验）
-│   └── package.json                  # 依赖：@opencode-ai/plugin, zod, ts-plsql-parser
+│   └── package.json                  # 依赖：@opencode-ai/plugin, zod, ts-plsql-parser, oracledb(optional)
 ├── resources/
 │   └── mfg_erp_sql/                  # 示例 PL/SQL 输入（schema/pkg/func/trigger/type）
 ├── minimum_feature_design.md         # 最小可行功能设计文档
@@ -68,12 +79,12 @@ sql2java-workflow/
 |-------|-------|------|---------|
 | sql-analyst | inventory | 0.1 | 基于 inventory-index.json 分批补充语义细节，产出 per-package 文件 |
 | sql-analyst | analyze | 0.1 | 依赖图 + 拓扑排序 + 子程序结构解析 + FSD 生成 |
-| java-architect | plan | 0.2 | 架构规划（需人工确认） |
-| java-architect | scaffold | 0.2 | 项目骨架 + Entity + Mapper/Service 壳 |
-| translator | translate | 0.1 | 按拓扑序逐包翻译，逐包持久化 |
+| java-architect | plan | 0.2 | 架构规划（需人工确认），遵守 Java 代码规约 |
+| java-architect | scaffold | 0.2 | 项目骨架 + Entity + Mapper/Service 壳，遵守 Java 代码规约 |
+| translator | translate | 0.1 | 按拓扑序逐包翻译，逐包持久化，遵守 Java 代码规约 + 中文注释 |
 | translator | fix | 0.1 | 修复 mustFix 项，产出 FixArtifact |
-| reviewer | review | 0.1 | 10 类审查清单，逐包持久化 |
-| reviewer | verify | 0.1 | mvn compile + MyBatis 校验 + 测试骨架生成 |
+| reviewer | review | 0.1 | 15 类审查清单（含命名规约/代码格式/OOP/注释语言），逐包持久化 |
+| reviewer | verify | 0.1 | mvn compile + MyBatis 校验 + 完整单元测试生成（arrange→act→assert） |
 
 ## 工作流定义
 
@@ -117,14 +128,17 @@ sql2java-workflow/
 | D15 | OR 前置语义 | PHASE_PREREQUISITES 支持 string[] 数组组（如 fix 的 summary 文件二选一） |
 | D16 | fix retry 清理 | retry 时清理残留 fix.json，重置 entry status + completedAt |
 | D17 | artifact 缓存 | 单次 advance 内缓存磁盘读取，advance 结束后清除 |
+| D18 | Schema 预获取 | 发现 db.xml 时自动连接 Oracle 拉取 DDL 到 ddl-output/，纯 JS thin mode，不侵入 phase 链 |
+| D19 | Java 代码规约注入 | docs/java-code-spec.md 统一规约自动注入 java-architect / translator / reviewer 三个 agent |
 
 ## 命令用法
 
 ```
-/sql2java <path>                        # 端到端全流程
-/sql2java --status                      # 查看工作流状态
-/sql2java --resume                      # 断点续传
-/sql2java --phases plan,scaffold <path> # 指定阶段执行
+/sql2java <path>                              # 端到端全流程
+/sql2java --db_conf db.xml <path>             # 指定数据库配置文件
+/sql2java --status                            # 查看工作流状态
+/sql2java --resume                            # 断点续传
+/sql2java --phases plan,scaffold <path>       # 指定阶段执行
 ```
 
 ## Artifact 存储
@@ -152,6 +166,22 @@ sql2java-workflow/
 ├── review-summary.json
 ├── verify-summary.json
 └── _events.log
+
+源码目录下（有 db.xml 时自动生成）：
+{sourcePath}/
+├── db.xml                               # 数据库配置（用户放置）
+└── ddl-output/                          # Schema 预获取产出
+    ├── .sql2java-generated              # 标记文件（generator: sql2java-schema-fetcher）
+    ├── tables/
+    │   └── {TABLE_NAME}.sql
+    ├── triggers/
+    │   └── {TRIGGER_NAME}.sql
+    ├── views/
+    │   └── {VIEW_NAME}.sql
+    ├── sequences/
+    │   └── {SEQUENCE_NAME}.sql
+    └── types/
+        └── {TYPE_NAME}.sql
 ```
 
 ## PL/SQL 预扫描器
@@ -168,6 +198,37 @@ sql2java-workflow/
 **Regex 模式已知处理**：
 - BEGIN/END 深度追踪排除 `END IF` / `END LOOP` / `END CASE`
 - 支持无参过程检测（`PROCEDURE init IS`）
+
+## Schema 预获取
+
+`.opencode/workflow/schema-fetcher.ts` 在工作流启动前执行，当发现 `db.xml` 配置文件时自动连接 Oracle 数据库拉取 schema 元数据。
+
+| 特性 | 说明 |
+|------|------|
+| **触发条件** | `--db_conf` 参数或 `{sourcePath}/db.xml` 自动发现 |
+| **连接方式** | oracledb 7.x thin mode（纯 JS，无需 Oracle Instant Client） |
+| **获取内容** | 表（列/约束）、触发器、视图、序列、对象类型（Object Types） |
+| **输出目录** | `{sourcePath}/ddl-output/`，含 `.sql2java-generated` 标记文件 |
+| **幂等性** | 重新运行时清理旧输出后重新生成 |
+| **配置格式** | Oracle JDBC 连接描述符 XML（支持 Service Name / SID / TNS） |
+| **安全建议** | 密码使用 `env:VAR_NAME` 引用环境变量，连接用户只需 SELECT 权限 |
+
+## Java 代码规约注入
+
+`.opencode/docs/java-code-spec.md` 定义统一的 Java 代码规约，工作流引擎在构建 system prompt 时自动注入到 java-architect、translator、reviewer 三个 agent 中。
+
+| 规约板块 | 内容 |
+|---------|------|
+| 命名风格 | UpperCamelCase、lowerCamelCase、常量全大写、ServiceImpl 后缀、布尔属性无 is 前缀 |
+| 常量定义 | 禁止魔法值、long 后缀大写 L |
+| 代码格式 | 4 空格缩进、120 字符行宽、大括号风格 |
+| OOP 规约 | @Override、包装类型、BigDecimal 精度、构造方法无业务逻辑 |
+| 集合与异常 | 集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch |
+| 注释规约 | **中文注释**（Javadoc/行内/TODO）、@author/@date、枚举注释 |
+| ORM 映射 | MyBatis resultMap、#{} 参数绑定 |
+| 工程结构 | 包分层（entity/mapper/service/dto/exception） |
+
+**严重级别**：违反【强制】规则 → major/critical，违反【推荐】→ minor/info。**出现英文注释标记为 major 级别问题。**
 
 ## Workflow Engine 核心方法
 
@@ -198,11 +259,13 @@ sql2java-workflow/
 
 ## 技术栈
 
-- **运行框架**：[opencode](https://opencode.ai) AI Agent 插件（`@opencode-ai/plugin` 1.15.13）
+- **运行框架**：[opencode](https://opencode.ai) AI Agent 插件（`@opencode-ai/plugin` 1.16.2）
 - **Workflow Engine**：TypeScript 确定性状态机
 - **SQL 解析**：AST 预扫描（`@griffithswaite/ts-plsql-parser` ^1.0.5）+ regex 降级 + LLM 语义补充
+- **Schema 获取**：oracledb 7.x thin mode（可选依赖，有 db.xml 时自动启用）
 - **Schema 校验**：Zod ^3.23.0
 - **Agent 定义**：Markdown（按 `## Phase: xxx` 分节，位于 `.opencode/agent/`）
+- **代码规约**：`docs/java-code-spec.md`（自动注入 agent system prompt）
 - **LLM**：Claude API
 - **目标框架**：Spring Boot + MyBatis + Lombok + Maven
 

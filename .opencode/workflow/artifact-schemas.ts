@@ -355,6 +355,8 @@ export const ReviewSchema = z.object({
         "type-mapping", "exception-mapping", "transaction-boundary",
         "cursor-mapping", "parameter-direction", "naming-consistency",
         "todo-remaining",
+        "naming-convention", "code-format", "oop-convention",
+        "comment-convention", "collection-exception",
       ]),
       passed: z.boolean(),
       detail: z.string(),

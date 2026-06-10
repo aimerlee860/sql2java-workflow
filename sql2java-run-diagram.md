@@ -18,18 +18,33 @@
 
 ## 二、分支 4 预检（命令层）
 
-在真正启动工作流前，命令层（LLM 作为执行引擎）执行两步校验：
+在真正启动工作流前，命令层（LLM 作为执行引擎）执行三步校验：
 
 ### Step 1：校验路径有效性
 
 ```bash
-find /path/to/project -type f \( -name "*.sql" -o -name "*.pks" -o -name "*.pkb" \) | head -5
+test -d /path/to/project && echo "exists" || echo "not found"
 ```
 
-- 如果没有找到任何文件 → 报错退出
-- 找到文件 → 继续下一步
+引擎在扫描后会自动校验目录包含可处理文件（package、table、trigger 或 standalone procedure），无需手动检查文件类型。
 
-### Step 2：生成 runId
+### Step 2：Schema 预获取（D18）
+
+数据库配置按以下顺序查找（优先级从高到低）：
+
+1. `--db_conf` 参数指定的路径（`dbConf` 变量）
+2. `{path}/db.xml`（项目根目录自动发现）
+
+```bash
+# 按优先级检测
+test -n "$dbConf" && test -f "$dbConf" && echo "found: $dbConf"
+test -f "<path>/db.xml" && echo "found: <path>/db.xml"
+```
+
+- **有配置（db.xml）** → workflow start 会自动连接数据库获取 schema，生成 DDL 文件到 `{path}/ddl-output/` 目录下
+- **无配置** → 跳过 schema 获取，直接使用已有的 SQL/PLSQL 文件
+
+### Step 3：生成 runId
 
 ```bash
 date -u +%Y%m%d-%H%M%S
@@ -43,11 +58,12 @@ date -u +%Y%m%d-%H%M%S
 
 **文件：`.opencode/plugins/workflow-engine.ts` + `.opencode/workflow/engine-core.ts`**
 
-### Step 3：调用 `workflow({ action: "start", runId: "run-20260602-143000", sourcePath: "/path/to/project" })`
+### Step 3：调用 `workflow({ action: "start", runId: "run-20260602-143000", sourcePath: "/path/to/project", dbConf: dbConf })`
 
 执行流程：
 
 1. **插件层**（`plugins/workflow-engine.ts`）：
+   - **Schema 预获取**（D18）：如果 `dbConf` 存在或 `{sourcePath}/db.xml` 存在 → 调用 `fetchSchemaIfNeeded()` 连接 Oracle 拉取 DDL 到 `{sourcePath}/ddl-output/`
    - 尝试 `engine.loadFromDisk(runId)` — 如果磁盘上已有同 runId 的 `run.json` 则恢复
    - 没有已存在的 → 调用 `engine.start("sql2java", runId, { sourcePath })`
 
@@ -86,14 +102,15 @@ date -u +%Y%m%d-%H%M%S
 1. **读取 agent 文件**：`.opencode/agent/sql-analyst.md`
 2. **提取通用部分**（`extractCommonPart`）：文件开头到第一个 `## Phase:` 之前的内容 — 包含角色定义、绝对规则、Runtime Context 说明、Artifact 写入规则、Oracle 构造识别参考等
 3. **提取当前阶段内容**（`extractPhaseSection`）：`## Phase: inventory` 整个 section — 包含目标、输入输出、工作步骤、质量检查
-4. **构建 Runtime Context**（`buildRuntimeContext`）：
+4. **Java 代码规约注入**（D19）：如果当前 agent 是 java-architect / translator / reviewer，读取 `docs/java-code-spec.md`，替换 agent .md 中的 `<!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入 -->` 注释位置
+5. **构建 Runtime Context**（`buildRuntimeContext`）：
    ```
    currentPhase: inventory
    runId: run-20260602-143000
    sourcePath: /path/to/project
    artifactsDir: .workflow-artifacts/run-20260602-143000
    ```
-5. **拼接最终 system prompt**：`通用部分 + Phase Section + Runtime Context`
+6. **拼接最终 system prompt**：`通用部分 + [Java 代码规约] + Phase Section + Runtime Context`
 
 同时 `chat.params` hook 生效：
 - **温度控制**：temperature = 0.1
@@ -258,7 +275,7 @@ LLM **以 java-architect 身份执行 plan 阶段**的工作：
 **Agent：reviewer.md → Phase: review**
 
 1. 确定审查范围（全量 or 增量）
-2. **逐包审查**：对每个包按 10 类审查清单逐项检查（逻辑等价、SQL 完整性、空值处理、类型映射、异常映射、事务边界、游标映射、参数方向、命名一致性、TODO 残留）
+2. **逐包审查**：对每个包按 **15 类审查清单**逐项检查（逻辑等价、SQL 完整性、空值处理、类型映射、异常映射、事务边界、游标映射、参数方向、命名一致性、TODO 残留、命名规约、代码格式、OOP 规约、注释规约、集合与异常）
 3. 写入 per-package `review.json`
 4. 写入 `review-summary.json`（含 `allPassed` 字段）
 
@@ -278,7 +295,7 @@ LLM **以 java-architect 身份执行 plan 阶段**的工作：
 
 1. 执行 `mvn compile`，收集编译错误
 2. 逐包校验：MyBatis XML namespace / statement id 匹配、编译错误归因、TODO 残留统计
-3. 生成测试骨架
+3. **生成完整单元测试**：每个测试方法包含 arrange（Mock 设置）→ act（调用）→ assert（断言），禁止空方法体；测试类使用中文 Javadoc 注释
 4. 写入 per-package `verify.json` + `verify-summary.json`
 
 完成后调用 `workflow({ action: "advance", runId })`
@@ -356,11 +373,14 @@ LLM **以 java-architect 身份执行 plan 阶段**的工作：
   ▼
 命令解析 → 分支 4（默认全流程）
   │
-  ├─ 校验路径含 .sql/.pks/.pkb 文件
+  ├─ 校验路径存在
+  ├─ Schema 预获取（D18）：检测 db.xml → 有则连接 Oracle 拉取 DDL 到 ddl-output/
   ├─ 生成 runId: run-YYYYMMDD-HHmmss
   │
   ▼
-workflow({ action: "start", runId, sourcePath })
+workflow({ action: "start", runId, sourcePath, dbConf })
+  │  Schema 预获取: fetchSchemaIfNeeded() → ddl-output/（有 db.xml 时）
+  │  预扫描: scanSource(sourcePath) → inventory-index.json（AST 或 regex）
   │  引擎: 创建 WorkflowRun, currentPhase="inventory", status="running"
   │  持久化: .workflow-artifacts/{runId}/run.json
   │  Hook: 构建 system prompt (agent/sql-analyst.md + inventory section + Runtime Context)
@@ -378,6 +398,7 @@ workflow({ action: "start", runId, sourcePath })
   ▼
 ③ plan (java-architect, temp=0.2)
   │  架构规划 → 写入 plan.json（需人工确认）
+  │  [Java 代码规约自动注入 D19]
   │  advance → 跨 Schema 校验（D9）→ requiresConfirmation=true → status="paused"（D4）
   │  ⏸️ 不激活 agent，等待用户确认
   │  用户调用 confirm → status="running" → 激活 agent
@@ -385,23 +406,26 @@ workflow({ action: "start", runId, sourcePath })
   ▼
 ④ scaffold (java-architect, temp=0.2)
   │  生成 Maven 项目骨架 → 写入 scaffold.json + Java 文件
+  │  [Java 代码规约自动注入 D19]
   │  advance → scaffold→translate (always)
   │
   ▼
 ⑤ translate (translator, temp=0.1)
   │  按拓扑序逐包翻译 → 写入 translations/{pkg}/translation.json + Java 文件
+  │  [Java 代码规约自动注入 D19 + 中文注释要求]
   │  advance → translate→review (always)
   │
   ▼
 ⑥ review (reviewer, temp=0.1)
-  │  10 类审查清单逐包审查 → review.json + review-summary.json
+  │  15 类审查清单逐包审查 → review.json + review-summary.json
+  │  [Java 代码规约自动注入 D19]
   │  advance → D8 推导 allPassed
   │     ├─ passed → review→verify
   │     └─ failed → review→fix ←──┐
   │                                │
   ▼                               │
 ⑦ verify (reviewer, temp=0.1)     │
-  │  mvn compile + MyBatis 校验    │
+  │  mvn compile + MyBatis 校验 + 完整单元测试生成
   │  advance → D8 推导 allPassed   │
   │     ├─ passed → __done__ ✅    │
   │     └─ failed → fix ←─────────┤
@@ -429,9 +453,11 @@ workflow({ action: "start", runId, sourcePath })
 | D7 | fix 动态路由 | fix 不写死 transitions，由 handleFixAdvance 根据 branchedFrom 动态回环 |
 | D8 | result 推导 | review/verify 阶段从 summary 的 allPassed 自动推导 result（deriveReviewResult） |
 | D9 | 跨 Schema 校验 | inventory ↔ analysis ↔ plan 的包名一致性（extractPackageNames 双格式兼容） |
-| D11 | system prompt 构建 | 通用部分 + Phase Section + Runtime Context 拼接注入 |
+| D11 | system prompt 构建 | 通用部分 + Java 代码规约（D19）+ Phase Section + Runtime Context 拼接注入 |
 | D12 | fix 包名校验 | fixedPackages 必须存在于 inventory 且覆盖所有失败包 |
 | D14 | phase→filename | getArtifactFilename 处理 phase 名与磁盘文件名不一致 |
 | D15 | OR 前置 | PHASE_PREREQUISITES 支持 string[] 组内二选一（如 fix 的 summary 文件） |
 | D16 | fix retry 清理 | retry 时清理残留 fix.json，重置 entry status + completedAt |
 | D17 | artifact 缓存 | loadArtifactJson 单次 advance 内缓存，advance 结束后清除 |
+| D18 | Schema 预获取 | 有 db.xml 时自动连接 Oracle 拉取 DDL，纯 JS thin mode，不侵入 phase 链 |
+| D19 | Java 代码规约注入 | docs/java-code-spec.md 自动注入 java-architect / translator / reviewer |
