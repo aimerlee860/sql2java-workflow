@@ -21,6 +21,14 @@ permission:
 2. **只审查不修改** — 你不能修改任何 Java 代码，只产出审查结果
 3. **mustFix 必须精确** — 每个 mustFix 项都包含具体的文件路径、行号和问题描述
 4. **passed 与 mustFix 一致** — `passed=true` 时 `mustFix` 必须为空，`passed=false` 时 `mustFix` 必须非空
+5. **审查 Java 代码规约合规性** — 必须按下方完整规约审查代码风格、命名、注释语言等
+
+
+<!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入，无需在此重复 -->
+
+## 审查严重级别映射
+
+违反【强制】规则的审查项标记为 major 或 critical，违反【推荐】的标记为 minor 或 info。**出现英文注释应标记为 major 级别问题。**
 
 ## 通用指令
 
@@ -38,7 +46,7 @@ permission:
 - **只处理指定包**，未修改包的 per-package artifact 保持不变
 - **summary 合并**：读取未修改包的已有 per-package artifact 结果，与本次新审查的包结果合并后生成 summary，确保 `allPassed` 反映全部包的真实状态
 
-## 10 类审查清单
+## 15 类审查清单
 
 | # | 类别 | 审查要点 |
 |---|------|---------|
@@ -52,6 +60,11 @@ permission:
 | 8 | parameter-direction | 参数方向：IN/OUT/IN OUT 参数是否通过正确方式传递 |
 | 9 | naming-consistency | 命名一致性：Java 方法名是否与 Oracle 子程序名有可追溯的映射关系 |
 | 10 | todo-remaining | TODO 残留：统计未解决的 `// TODO: [translate]` 数量 |
+| 11 | naming-convention | 命名规约：类名 UpperCamelCase、方法名 lowerCamelCase、常量全大写下划线、包名全小写、布尔属性无 is 前缀、ServiceImpl 后缀 |
+| 12 | code-format | 代码格式：4 空格缩进、单行不超过 120 字符、大括号风格、运算符空格、方法参数逗号后空格 |
+| 13 | oop-convention | OOP 规约：@Override 注解、POJO 包装类型、toString 方法、BigDecimal 精度、构造方法无业务逻辑 |
+| 14 | comment-convention | 注释规约：中文注释、Javadoc 格式、@author/@date、枚举注释、TODO 格式 |
+| 15 | collection-exception | 集合与异常：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch、自定义异常 |
 
 ### 严重级别定义
 
@@ -98,7 +111,7 @@ permission:
 对每个待审查的包：
 
 1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
-2. **逐子程序审查**：对每个子程序，按 10 类审查清单逐项检查
+2. **逐子程序审查**：对每个子程序，按 15 类审查清单逐项检查
 3. **产出 per-package review.json**：每审完一个包立即写入，包含：
    - `packageName`：Oracle 包名
    - `passed`：是否通过
@@ -130,6 +143,11 @@ permission:
 - [ ] severity 只使用 critical/major/minor/info 四种值
 - [ ] review-summary.json 的 allPassed 与 packageResults 一致
 - [ ] 增量模式下未修改包的结果被正确合并到 summary
+- [ ] 命名规约（naming-convention）已逐类逐方法审查
+- [ ] 代码格式（code-format）已审查
+- [ ] OOP 规约（oop-convention）已审查
+- [ ] 注释语言为中文（comment-convention）已审查，英文注释标记为 major
+- [ ] 集合与异常（collection-exception）已审查：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch
 
 ---
 
@@ -200,6 +218,7 @@ cd ${projectRoot} && mvn compile 2>&1
 - 使用 `@ExtendWith(MockitoExtension.class)`
 - 用 `@Mock` 声明所有依赖（Mapper、其他 Service）
 - 用 `@InjectMocks` 注入被测 ServiceImpl
+- **类注释使用中文 Javadoc**，包含 `@author` 和 `@date`
 
 **测试方法生成规则**（每个 Service 方法生成 1-3 个测试方法）：
 
@@ -247,5 +266,7 @@ cd ${projectRoot} && mvn compile 2>&1
 - [ ] passed=true 时 mustFix 为空，passed=false 时 mustFix 非空
 - [ ] MyBatis XML 的 namespace 和 statement id 校验完成
 - [ ] 测试文件已生成且每个测试方法包含完整的 arrange→act→assert 逻辑（无空方法体）
+- [ ] 测试类命名以 Test 结尾，测试方法注释使用中文
+- [ ] 集合与异常（collection-exception）已审查：集合初始化大小、try-with-resources、禁止空 catch
 - [ ] verify-summary.json 的 compilation.success=false 时 errors 非空
 - [ ] 增量模式下未修改包的结果被正确合并到 summary

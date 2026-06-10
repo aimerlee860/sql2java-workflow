@@ -9,7 +9,7 @@
  *   - 大输出截断
  *   - 依赖自动安装（node_modules 缺失时自动 npm/bun install）
  */
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
@@ -82,6 +82,34 @@ function setWorkflowContext(run: WorkflowRun): void {
 
 function clearWorkflowContext(): void {
   currentWorkflowContext = null
+  _cachedJavaCodeSpec = null
+  _cachedSpecMtime = null
+}
+
+/** 需要 Java 代码规约的 agent 文件名（正向白名单） */
+const JAVA_SPEC_AGENTS = ["java-architect", "translator", "reviewer"]
+
+/** 缓存的 Java 代码规约内容 + 文件 mtime（缺失时不缓存，每次重试） */
+let _cachedJavaCodeSpec: string | null = null
+let _cachedSpecMtime: number | null = null
+
+/** 读取共享 Java 代码规约文件（mtime 感知缓存，缺失/不可读不缓存） */
+function readJavaCodeSpec(): string {
+  const specPath = join(findOpencodeDir(), "docs", "java-code-spec.md")
+  try {
+    const stat = statSync(specPath)
+    const mtime = stat.mtimeMs
+    if (_cachedJavaCodeSpec !== null && _cachedSpecMtime === mtime) {
+      return _cachedJavaCodeSpec
+    }
+    const content = readFileSync(specPath, "utf-8").trim()
+    _cachedJavaCodeSpec = content
+    _cachedSpecMtime = mtime
+    return content
+  } catch {
+    console.warn("[workflow-engine] Java 代码规约文件未找到或不可读: %s", specPath)
+    return ""
+  }
 }
 
 /** 提取 agent .md 通用部分（文件头到第一个 ## Phase: 之前） */
@@ -1202,8 +1230,14 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           if (output && typeof output === "object") {
             const truncated = truncateStringsDeep(output, 10000)
             // 将截断后的字段写回 output（仅写回截断后的顶级字段，避免替换整个对象引用）
-            if (truncated && typeof truncated === "object" && !Array.isArray(truncated)) {
-              Object.assign(output as Record<string, unknown>, truncated as Record<string, unknown>)
+            if (truncated && typeof truncated === "object") {
+              if (Array.isArray(truncated)) {
+                // 数组：用 splice 替换内容，保持原始数组引用
+                const arr = output as unknown[]
+                arr.splice(0, arr.length, ...(truncated as unknown[]))
+              } else {
+                Object.assign(output as Record<string, unknown>, truncated as Record<string, unknown>)
+              }
             }
           }
         }
@@ -1259,15 +1293,19 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
 
         // 4. 拼接 system prompt
         const sharedInstructions = run ? buildSharedInstructions(run) : ""
+        // 仅对白名单中的 agent 注入代码规约
+        const needsJavaSpec = JAVA_SPEC_AGENTS.some(a => currentWorkflowContext.agentFile.includes(a))
+        const rawSpec = needsJavaSpec ? readJavaCodeSpec() : ""
+        // 规约缺失时注入显眼警告，避免 agent 在不知情下产出无规约代码
+        const javaCodeSpec = rawSpec || (needsJavaSpec
+          ? "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 docs/java-code-spec.md**\n"
+          : "")
         const parts = [
           common,
-          "",
           phaseSection,
-          "",
+          javaCodeSpec,
           sharedInstructions,
-          "",
-          "## Runtime Context",
-          runtimeContext,
+          runtimeContext ? "## Runtime Context\n\n" + runtimeContext : "",
         ].filter((p) => p !== "")
 
         return {

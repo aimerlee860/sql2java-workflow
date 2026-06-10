@@ -17,11 +17,16 @@ permission:
 
 ## 绝对规则 — 翻译五原则
 
-1. **不重构** — 保持原有逻辑结构，即使 Java 可以更优雅
+1. **不重构** — 保持原有逻辑结构，即使 Java 可以更优雅。Java 规约中的【推荐】条款（如卫语句替代深层 if-else）在翻译阶段不强制执行，review 阶段可标记为改进建议但不作为 mustFix
 2. **不优化** — 游标循环就是 for-each，不改为 stream 操作
 3. **不合并** — 分立的 SELECT 保持独立调用
 4. **不省略** — 每条 PL/SQL 都要有对应 Java 代码
-5. **不猜测** — 不确定的标 `// TODO: [translate] 原因`
+5. **不猜测** — 不确定的标 `// TODO: [translate] 标记人 标记时间 中文说明原因`
+6. **遵守 Java 代码规约** — 所有生成的 Java 代码必须严格遵守 Java 代码规约（由引擎自动注入）。【强制】条款必须执行，【推荐】条款在翻译阶段按原则 1-5 的优先级处理
+7. **使用中文注释** — 所有 Javadoc、行内注释、TODO 标记一律使用中文，专有名词与关键字保持英文
+
+
+<!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入，无需在此重复 -->
 
 ## 通用指令
 
@@ -46,7 +51,7 @@ permission:
 | `UPDATE` | Mapper `@Update` 或 XML update |
 | `DELETE` | Mapper `@Delete` 或 XML delete |
 | `MERGE INTO` | XML merge/insertOrUpdate |
-| `EXECUTE IMMEDIATE` | `// TODO: [translate] 动态 SQL` |
+| `EXECUTE IMMEDIATE` | `// TODO: [translate] 标记人 标记时间 动态 SQL 需要手动实现` |
 | `v_var := expr` | `Type var = expr;` |
 | `IF ... THEN ... ELSIF ... ELSE` | `if (...) { } else if (...) { } else { }` |
 | `LOOP ... EXIT WHEN` | `while (true) { if (...) break; }` |
@@ -161,8 +166,9 @@ translation.json 包含：
 - [ ] 每个子程序都有对应的 Java 方法
 - [ ] 每个 SQL 语句都有对应的 MyBatis 映射
 - [ ] OUT/IN OUT 参数通过 DTO 传递
-- [ ] 不确定的构造标记了 `// TODO: [translate]`
+- [ ] 不确定的构造标记了 `// TODO: [translate] 标记人 标记时间 中文说明`
 - [ ] translation.json 记录了所有翻译决策和 TODO
+- [ ] Java 代码规约已全面遵守（命名、格式、注释语言、OOP、集合与异常等，详见注入的规约文档）
 
 ---
 
@@ -233,3 +239,5 @@ translation.json 包含：
 - [ ] fixedPackages 使用 inventory 中的 Oracle 原始包名
 - [ ] 修复遵循五原则，不引入新重构
 - [ ] 更新了对应包的 translation.json
+- [ ] 修复后的代码仍遵循 Java 代码规约
+- [ ] 修复后的注释仍使用中文

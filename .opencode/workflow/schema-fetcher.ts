@@ -148,9 +148,10 @@ function extractXmlTag(xml: string, tagName: string): string | null {
   const contentStart = openMatch.index! + openMatch[0].length
   const closeTag = `</${tagName}>`
 
-  // 从内容起点向后找闭合标签（不区分大小写）
+  // 转义 regex 元字符，防止 tagName 中含 . + [ 等字符时匹配错误
+  const escapedCloseTag = closeTag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   const rest = xml.slice(contentStart)
-  const closeIdx = rest.search(new RegExp(closeTag, "i"))
+  const closeIdx = rest.search(new RegExp(escapedCloseTag, "i"))
   if (closeIdx < 0) return null
 
   return rest.slice(0, closeIdx).trim() || null
@@ -786,7 +787,7 @@ function formatDataType(col: OracleColumn): string {
     case "NVARCHAR2":
     case "CHAR":
     case "NCHAR": {
-      const len = col.charLength || col.dataLength || 1
+      const len = col.charLength ?? col.dataLength ?? 1
       const typeLower = type.toLowerCase()
       return `${typeLower}(${len})`
     }
@@ -1057,10 +1058,10 @@ function generateDdlFiles(
   const stagingDir = join(sourcePath, `.schema-staging-${Date.now()}`)
   // 清理可能存在的上次 staging 目录（清理旧的 .schema-staging-* 目录）
   try {
-    const entries = readdirSync(sourcePath)
+    const entries = readdirSync(sourcePath, { withFileTypes: true })
     for (const entry of entries) {
-      if (entry.startsWith(".schema-staging")) {
-        try { rmSync(join(sourcePath, entry), { recursive: true }) } catch { /* 文件锁定时忽略 */ }
+      if (entry.name.startsWith(".schema-staging") && entry.isDirectory()) {
+        try { rmSync(join(sourcePath, entry.name), { recursive: true }) } catch { /* 文件锁定时忽略 */ }
       }
     }
   } catch { /* sourcePath 不存在或不可读 */ }

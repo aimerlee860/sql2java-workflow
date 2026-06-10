@@ -21,6 +21,10 @@ permission:
 2. **先规划后施工** — plan 阶段只产出 plan.json，不写 Java 代码；scaffold 阶段才写代码
 3. **保持映射一致** — Oracle Package → Java 类的映射一旦确定，后续阶段严格遵循
 4. **命名可追溯** — 每个 Java 类名/方法名都能追溯到对应的 Oracle 对象
+5. **遵守 Java 代码规约** — 所有生成的 Java 代码必须严格遵守 Java 代码规约（由引擎自动注入）
+6. **使用中文注释** — 所有 Javadoc、行内注释、TODO 标记一律使用中文，专有名词与关键字保持英文
+
+<!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入，无需在此重复 -->
 
 ## 通用指令
 
@@ -139,12 +143,16 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
 
 #### Step 7: 编写编码约定
 
-在 `conventions` 字段中编写编码约定文本，作为 translator 和 reviewer 的翻译指导。内容包括：
-- 命名规范细则
-- 异常处理规范
-- 事务边界约定
-- MyBatis XML 编写规范
-- TODO 标记格式
+在 `conventions` 字段中编写**项目特有**的编码约定文本，作为 translator 和 reviewer 的翻译指导。
+
+**注意**：通用 Java 代码规约（命名、格式、OOP、集合、注释、异常等）已由引擎从 `docs/java-code-spec.md` 自动注入，无需在 conventions 中重复。`conventions` 字段仅负责**项目特有的**覆盖和补充：
+
+- **注释语言要求**：所有注释必须使用中文，包括 Javadoc、行内注释、TODO 标记；专有名词和 Java 关键字保持英文
+- **事务边界约定**：@Transactional 使用规范、回滚策略
+- **MyBatis XML 编写规范**：resultMap 定义、#{} 参数绑定、禁止 select *
+- **TODO 标记格式**：`// TODO: [translate] 标记人 标记时间 中文说明原因`
+- **项目特有的命名映射**：如 Oracle Package → Java 类的特殊映射规则
+- **项目特有的异常策略**：自定义业务异常类名和层级
 
 #### Step 8: 写入 plan.json
 
@@ -215,24 +223,29 @@ plan 阶段完成 advance 后，工作流会暂停等待用户确认（`requires
   - `ValidationException`（校验失败）
 - **基础配置**：MyBatis 配置、Spring 配置
 
+**所有公共模块必须遵循注入的 Java 代码规约**（类注释、方法注释、常量命名、异常类命名等详见规约文档）。
+
 #### Step 4: 生成 Entity 类
 
 从 inventory.json 的 tables 数组生成 Entity 类：
-- 类名：表名转 PascalCase + 后缀
+- 类名：表名转 PascalCase + 后缀（如 `OrderDO`）
 - 字段：列名转 camelCase，类型按 plan.json 的 typeMappings
 - 注解：`@Data`（Lombok）、`@TableName`（如适用）
+- 布尔属性、包装类型、注释格式等遵循注入的 Java 代码规约
 
 #### Step 5: 生成 Mapper 接口和 XML 空壳
 
 为每个 Oracle Package 生成：
 - Mapper 接口（空壳，含 `@Mapper` 注解）
 - Mapper XML（基本 namespace 配置）
+- 注释格式遵循注入的 Java 代码规约
 
 #### Step 6: 生成 Service 接口和实现空壳
 
 为每个 Oracle Package 生成：
 - Service 接口（空壳）
 - ServiceImpl（注入对应 Mapper，空壳方法）
+- 方法注释、Impl 后缀、@Override 注解、构造器注入等遵循注入的 Java 代码规约
 
 #### Step 7: 写入 scaffold.json
 
