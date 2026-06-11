@@ -9,6 +9,23 @@
 - **已裁剪**：并发处理（线程池、锁、ThreadLocal 等，PL/SQL 翻译不涉及显式线程创建）、视图模板规则
 - **已保留**：命名、常量、格式、OOP、集合、控制语句、注释、异常、日志、ORM 映射、工程结构
 
+## 【强制】Java 版本要求
+
+**所有生成的 Java 代码必须兼容 Java 1.8（JDK 8）标准，禁止使用 Java 9 及以上版本引入的语法和 API。** 具体要求：
+
+1. 【强制】禁止使用 `var` 关键字（Java 10+），所有局部变量必须显式声明类型。
+2. 【强制】禁止使用 `List.of()`、`Map.of()`、`Set.of()` 等不可变集合工厂方法（Java 9+），应使用 `Collections.unmodifiableList()` 或 `Arrays.asList()` 等方式替代。
+3. 【强制】禁止使用 `Optional.ifPresentOrElse()`、`Optional.or()`、`Optional.stream()` 等方法（Java 9+），仅允许使用 Java 8 中 `Optional` 的方法。
+4. 【强制】禁止使用 `Stream.takeWhile()`、`Stream.dropWhile()`、`Stream.ofNullable()` 等方法（Java 9+）。
+5. 【强制】禁止使用 `String.isBlank()`、`String.strip()`、`String.stripLeading()`、`String.stripTrailing()`、`String.lines()`、`String.repeat()` 等方法（Java 11+），应使用 `trim()` 和自行实现等 Java 8 兼容方式。
+6. 【强制】禁止使用 `HttpClient` API（Java 11+），网络请求使用 `HttpURLConnection` 或第三方库。
+7. 【强制】禁止使用 `record` 关键字（Java 14+ 预览 / Java 16+ 正式），使用传统 class 替代。
+8. 【强制】禁止使用 `sealed` / `permits` / `instanceof` 模式匹配（Java 15+ / Java 16+）。
+9. 【强制】禁止使用文本块 `"""`（Java 13+ 预览 / Java 15+ 正式），字符串拼接使用 `+` 或 `StringBuilder`。
+10. 【强制】禁止使用 `switch` 表达式（Java 12+ 预览 / Java 14+ 正式），使用传统 `switch` 语句。
+11. 【强制】Lambda 和 Stream API 可正常使用（Java 8 已引入），但不得使用 Java 9+ 新增的增强功能。
+12. 【强制】Maven/Gradle 构建配置中 `source` 和 `target` 必须设置为 `1.8`。
+
 ---
 
 ## (一) 命名风格
