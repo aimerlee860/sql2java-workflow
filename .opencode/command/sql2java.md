@@ -17,17 +17,19 @@ permission:
 ### 语法
 
 ```
-/sql2java [--db_conf <config_path>] <phases> <path>
+/sql2java [--db_conf <config_path>] [--structure <structure_file>] <phases> <path>
 ```
 
 - `--db_conf <config_path>`: 可选。指定数据库配置文件路径（db.xml，Oracle JDBC 连接描述符格式）。未指定时自动在 `<path>` 目录下查找 `db.xml`
+- `--structure <structure_file>`: 可选。Java 项目目录结构定义文件（Markdown tree 格式）。未指定时自动在 `<path>` 目录下查找 `project-structure.md`。都没有则使用默认 Maven 结构
 - `<phases>`: 可选。逗号分隔的阶段名，或模式关键字
 - `<path>`: PL/SQL 源码目录路径
 
 ### 参数提取顺序
 
 1. 从 `$ARGUMENTS` 中提取 `--db_conf <path>`，记为 `dbConf`，从参数中移除
-2. 按以下规则路由剩余参数
+2. 从 `$ARGUMENTS` 中提取 `--structure <path>`，记为 `structureConf`，从参数中移除
+3. 按以下规则路由剩余参数
 
 ### 已知阶段名
 
@@ -183,6 +185,22 @@ inventory → analyze → plan → scaffold → translate → review → verify 
    - **有配置（db.xml）** → workflow start 会自动连接数据库获取 schema，生成 DDL 文件到 `<path>/ddl-output/` 目录下（即使已有 PL/SQL 文件也会获取），然后继续正常流程
    - **无配置** → 跳过 schema 获取，直接使用已有的 SQL/PLSQL 文件
 
+1.6 **项目结构定义查找**
+
+   按以下顺序查找（优先级从高到低）：
+
+   1. `--structure` 参数指定的路径（`structureConf` 变量）
+   2. `<path>/project-structure.md`（项目根目录自动发现）
+
+   ```bash
+   # 按优先级检测
+   test -n "$structureConf" && test -f "$structureConf" && echo "found: $structureConf"
+   test -f "<path>/project-structure.md" && echo "found: <path>/project-structure.md"
+   ```
+
+   - **有定义文件** → 传递给 workflow start，scaffold 阶段将使用自定义目录结构
+   - **无定义文件** → 使用默认 Maven 结构（硬编码在 agent prompt 中）
+
 2. **生成 runId**：`run-{YYYYMMDD-HHmmss}`（当前日期时间）
    ```bash
    date -u +%Y%m%d-%H%M%S
@@ -190,7 +208,7 @@ inventory → analyze → plan → scaffold → translate → review → verify 
 
 3. **启动工作流**：
    ```javascript
-   workflow({ action: "start", runId: "run-20260601-100000", sourcePath: "<path>", dbConf: dbConf })
+   workflow({ action: "start", runId: "run-20260601-100000", sourcePath: "<path>", dbConf: dbConf, structureConf: structureConf })
    ```
 
 4. **进入 inventory 阶段**：后续由 agent + workflow 工具自动推进

@@ -167,6 +167,156 @@ function readJavaCodeSpec(): string {
   }
 }
 
+/**
+ * 解析目录结构定义文本为路径列表。自动检测三种格式：
+ *
+ * 格式 1 — Tree（含 ├── └── 连接符）：
+ *   ├── src/
+ *   │   └── main/
+ *   │       └── java/{packageBase}/config
+ *
+ * 格式 2 — 缩进（纯空格/Tab，无 tree 字符）：
+ *   src/
+ *     main/
+ *       java/{packageBase}/config
+ *
+ * 格式 3 — 平铺路径（每行一个完整路径）：
+ *   src/main/java/{packageBase}/config
+ *
+ * 公共规则：
+ *   - 空行和 # 开头的注释行跳过
+ *   - {projectRoot}/ 根行跳过
+ *   - 尾部 / 会被清理
+ *   - {packageBase} 等占位符原样保留
+ */
+function parseStructureText(text: string): string[] {
+  const rawLines = text.split("\n").map(l => l.replace(/\r$/, ""))
+  // 过滤：非空、非注释、非 projectRoot 根行
+  const lines = rawLines
+    .map(l => l.replace(/\s+#.*$/, ""))   // 剥离行内注释（空格 + # 开头）
+    .filter(l => {
+      const t = l.trim()
+      return t && !t.startsWith("#") && !/^\{projectRoot\}\s*\/?\s*$/.test(t)
+    })
+  if (lines.length === 0) return []
+
+  // 格式检测：任一行含 tree connector → tree 格式
+  const hasTreeConnector = lines.some(l => /[├└]── /.test(l))
+  if (hasTreeConnector) return parseTreeFormat(lines)
+
+  // 格式检测：有多级缩进（不同行 leading spaces 不同）→ 缩进格式
+  const indents = lines.map(l => {
+    const m = l.match(/^( +|\t+)/)
+    return m ? m[1].length : 0
+  })
+  const hasMultipleIndents = new Set(indents).size > 1
+  if (hasMultipleIndents) return parseIndentFormat(lines)
+
+  // 否则：平铺路径
+  return parseFlatFormat(lines)
+}
+
+/** 格式 1：Tree（├── / └── 连接符，每级占 4 字符宽度） */
+function parseTreeFormat(lines: string[]): string[] {
+  const result: string[] = []
+  const stack: { name: string; depth: number }[] = []
+
+  for (const line of lines) {
+    const connectorIdx = line.search(/[├└]── /)
+    if (connectorIdx === -1 || connectorIdx % 4 !== 0) continue
+
+    const depth = connectorIdx / 4
+    const name = line.slice(connectorIdx + 4).trim()
+    if (!name) continue
+
+    const cleanName = name.replace(/\/+$/, "")
+    while (stack.length > depth) stack.pop()
+
+    const parentPath = stack.map(s => s.name).join("/")
+    result.push(parentPath ? `${parentPath}/${cleanName}` : cleanName)
+    stack.push({ name: cleanName, depth })
+  }
+  return result
+}
+
+/** 格式 2：缩进（空格或 Tab，自动推断每级宽度） */
+function parseIndentFormat(lines: string[]): string[] {
+  const result: string[] = []
+
+  // 推断缩进单位：取所有非零缩进的最小公约数
+  const indentLengths = lines
+    .map(l => { const m = l.match(/^( +|\t+)/); return m ? m[1].length : 0 })
+    .filter(n => n > 0)
+  const unit = indentLengths.length > 0 ? Math.min(...indentLengths) : 2
+
+  const stack: { name: string; depth: number }[] = []
+
+  for (const line of lines) {
+    const m = line.match(/^( +|\t+)/)
+    const indentLen = m ? m[1].length : 0
+    const depth = Math.round(indentLen / unit)
+    const name = line.trim()
+    if (!name) continue
+
+    const cleanName = name.replace(/\/+$/, "")
+    while (stack.length > depth) stack.pop()
+
+    const parentPath = stack.map(s => s.name).join("/")
+    result.push(parentPath ? `${parentPath}/${cleanName}` : cleanName)
+    stack.push({ name: cleanName, depth })
+  }
+  return result
+}
+
+/** 格式 3：平铺路径（每行一个完整路径） */
+function parseFlatFormat(lines: string[]): string[] {
+  return lines
+    .map(l => l.trim().replace(/\/+$/, ""))
+    .filter(l => l.length > 0)
+}
+
+/**
+ * 加载项目目录结构定义。
+ * 优先级：1) structureConf 指定路径  2) sourcePath/project-structure.md 自动发现  3) null（用默认）
+ *
+ * 当 structureConf 显式指定但文件不存在时，抛出 Error（用户应知道指定的路径无效）。
+ * 其他情况（自动发现失败、解析失败）返回 null，不阻塞流程。
+ */
+function loadProjectStructure(structureConf?: string, sourcePath?: string): string[] | null {
+  let filePath: string | null = null
+
+  // 优先级 1: CLI 参数指定（必须存在，否则报错）
+  if (structureConf) {
+    if (!existsSync(structureConf)) {
+      throw new Error(`--structure 指定的文件不存在: ${structureConf}`)
+    }
+    filePath = structureConf
+  }
+  // 优先级 2: 自动发现
+  else if (sourcePath) {
+    const autoPath = join(sourcePath, "project-structure.md")
+    if (!existsSync(autoPath)) return null
+    filePath = autoPath
+  }
+
+  if (!filePath) return null
+
+  try {
+    const raw = readFileSync(filePath, "utf-8")
+    const paths = parseStructureText(raw)
+    if (paths.length === 0) {
+      getLogger().warn("[workflow-engine]", `结构定义文件解析结果为空: ${filePath}`)
+      return null
+    }
+    getLogger().info("[workflow-engine]", `加载项目结构定义: ${filePath} (${paths.length} 个路径)`)
+    return paths
+  } catch (e: any) {
+    if (e.message.startsWith("--structure")) throw e // 重新抛出上面的显式错误
+    getLogger().warn("[workflow-engine]", `无法加载结构定义文件 ${filePath}: ${e.message}`)
+    return null
+  }
+}
+
 /** 提取 agent .md 通用部分（文件头到第一个 ## Phase: 之前） */
 function extractCommonPart(content: string): string {
   const lines = content.split("\n")
@@ -227,6 +377,13 @@ function buildRuntimeContext(run: WorkflowRun): string {
     lines.push(`  targetPackages: ${JSON.stringify(currentEntry.incrementalContext.targetPackages)}`)
   }
 
+  // projectStructure: 自定义目录结构覆盖
+  const ps = (run.metadata as Record<string, unknown>).projectStructure
+  if (ps && Array.isArray(ps)) {
+    lines.push(`projectStructure:`)
+    for (const dir of ps) lines.push(`  - ${dir}`)
+  }
+
   return lines.join("\n")
 }
 
@@ -247,6 +404,7 @@ function buildSharedInstructions(run: WorkflowRun): string {
 | \`artifactsDir\` | artifact 输出目录 | 读取上游 artifact / 写入产出 |
 | \`upstreamArtifacts\` | 上游 artifact 路径列表 | 当前阶段需要读取的文件 |
 | \`incrementalContext\` | 增量模式上下文（可选） | fix 后增量处理时传入 targetPackages |
+| \`projectStructure\` | 自定义目录结构路径列表（可选） | scaffold 阶段使用自定义目录布局替代默认模板 |
 
 ### Artifact 写入规则
 
@@ -731,6 +889,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         result: zFn.enum(["passed", "failed"]).optional(),
         phases: zFn.string().optional(),        // --phases 用
         dbConf: zFn.string().optional(),        // --db_conf 用
+        structureConf: zFn.string().optional(), // --structure 用
       },
       execute: async (args: any, context: any) => {
         // opencode 1.4.6: execute 必须返回 string，title/metadata 通过 context.metadata() 设置
@@ -741,7 +900,23 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           case "start": {
             const runId = args.runId ?? `run-${Date.now()}`
             initLogger(runId)
-            const metadata = args.sourcePath ? { sourcePath: args.sourcePath } : {}
+
+            // 加载自定义项目目录结构
+            let projectStructure: string[] | null = null
+            try {
+              projectStructure = args.sourcePath
+                ? loadProjectStructure(args.structureConf, args.sourcePath)
+                : null
+            } catch (e: any) {
+              return {
+                title: "Error",
+                output: `❌ ${e.message}`,
+                metadata: { runId },
+              }
+            }
+            const metadata: Record<string, unknown> = {}
+            if (args.sourcePath) metadata.sourcePath = args.sourcePath
+            if (projectStructure) metadata.projectStructure = projectStructure
 
             // 尝试从磁盘恢复已有 run
             try {
