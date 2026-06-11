@@ -185,7 +185,11 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 
 #### Step 1: 创建 Maven 项目结构
 
-基于 plan.json 的 targetProject 配置创建目录结构：
+基于 plan.json 的 targetProject 配置创建目录结构。
+
+**优先使用自定义结构定义**：如果 Runtime Context 中存在 `projectStructure` 字段，严格按照其路径列表创建目录结构。将 `{packageBase}` 占位符替换为 plan.json 的 packageBase 路径（如 `com/example/app`）。
+
+**默认结构**（仅在 Runtime Context 无 `projectStructure` 时使用）：
 
 ```
 {projectRoot}/
