@@ -1298,6 +1298,18 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           // ── fixContinue — fix 耗尽后用户选择继续修复 ──
           case "fixContinue": {
             if (!args.runId) throw new Error("runId required")
+            // 前置状态校验：fixContinue 仅在 completed_with_issues 时可用，
+            // 避免 LLM 在 run 仍为 running 时误调用导致异常
+            const currentRun = engine.status(args.runId)
+            if (!currentRun || currentRun.status !== "completed_with_issues") {
+              const actualStatus = currentRun?.status ?? "unknown"
+              const currentPhase = currentRun?.currentPhase ?? "unknown"
+              return {
+                title: "Invalid Action",
+                output: `⚠️ fixContinue 仅在 fix 循环耗尽（status=completed_with_issues）时可用。当前状态：status=${actualStatus}, phase=${currentPhase}。\n\n请根据当前状态选择正确的操作：\n- 当前阶段已完成 → workflow({ action: "advance", runId: "${args.runId}", result: "passed" 或 "failed" })\n- fix 失败但未耗尽 → workflow({ action: "retry", runId: "${args.runId}" })\n- fix 循环耗尽后才可 → workflow({ action: "fixContinue", runId: "${args.runId}" })`,
+                metadata: { runId: args.runId, error: "invalid_state", actualStatus },
+              }
+            }
             const r = engine.fixContinue(args.runId)
             setWorkflowContext(r) // 已内部创建正确的 PhaseMetricsCollector
             const startBanner = formatPhaseStartBanner("fix")
