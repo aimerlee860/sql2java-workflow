@@ -65,6 +65,7 @@ permission:
 | 13 | oop-convention | OOP 规约：@Override 注解、POJO 包装类型、toString 方法、BigDecimal 精度、构造方法无业务逻辑 |
 | 14 | comment-convention | 注释规约：中文注释、Javadoc 格式、@author/@date、枚举注释、TODO 格式 |
 | 15 | collection-exception | 集合与异常：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch、自定义异常 |
+| 16 | version-compliance | **版本合规性**：代码、pom.xml、依赖必须完全符合注入的 Java 代码规约中"Java 版本与框架配置"段落。对照"禁止的 Java 9+ 语法和 API"逐项检查代码，对照"pom.xml 构建配置"检查构建配置，对照"依赖命名空间"检查命名空间和依赖版本。**违反此项标记为 critical** |
 
 ### 严重级别定义
 
@@ -148,6 +149,7 @@ permission:
 - [ ] OOP 规约（oop-convention）已审查
 - [ ] 注释语言为中文（comment-convention）已审查，英文注释标记为 major
 - [ ] 集合与异常（collection-exception）已审查：集合初始化大小、entrySet 遍历、try-with-resources、禁止空 catch
+- [ ] 版本合规性（version-compliance）已审查：代码 API、pom.xml 配置、依赖命名空间均符合注入的 Java 代码规约中的"Java 版本与框架配置"
 
 ---
 

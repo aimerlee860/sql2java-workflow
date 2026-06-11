@@ -107,8 +107,9 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 基于分析结果确定：
 - **groupId** / **artifactId** — 基于源码项目名
 - **packageBase** — 如 `com.example.translated`
-- **javaVersion** — 推荐 Java 17
-- **springBootVersion** — 推荐 3.2+
+- **javaVersion** — **必须严格使用注入的 Java 代码规约中"Java 版本与框架配置"段落的值**
+- **springBootVersion** — **必须严格使用注入的 Java 代码规约中"Java 版本与框架配置"段落的值**
+- 所有依赖版本必须与规约中的配置兼容，不得以"推荐默认值"为由使用更高版本
 
 #### Step 3: 设计包映射
 
@@ -213,6 +214,8 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 #### Step 2: 生成 pom.xml
 
 包含依赖：spring-boot-starter、spring-boot-starter-web、mybatis-spring-boot-starter、lombok、h2（测试用）。
+
+> **pom.xml 的 `<java.version>`、`<source>`、`<target>`、Spring Boot parent 版本、MyBatis starter 版本必须与注入的 Java 代码规约中"Java 版本与框架配置"段落完全一致。** 依赖的命名空间（javax/jakarta）也必须与规约一致。
 
 #### Step 3: 生成公共模块
 

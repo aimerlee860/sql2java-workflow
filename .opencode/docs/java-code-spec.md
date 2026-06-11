@@ -9,7 +9,34 @@
 - **已裁剪**：并发处理（线程池、锁、ThreadLocal 等，PL/SQL 翻译不涉及显式线程创建）、视图模板规则
 - **已保留**：命名、常量、格式、OOP、集合、控制语句、注释、异常、日志、ORM 映射、工程结构
 
-## 【强制】Java 版本要求
+## 【强制】Java 版本与框架配置（唯一事实来源）
+
+> **此段落是所有版本和框架决策的唯一权威来源。plan.json 的 javaVersion / springBootVersion、
+> pom.xml 的构建配置、代码中的 API 使用，都必须与此段落完全一致。agent 不得使用自选默认值覆盖。**
+>
+> **如需切换目标 Java 版本，只需修改此段落后重新运行工作流，所有 agent 将自动遵循新配置。**
+
+### 目标版本
+
+- **Java 版本**: 1.8（JDK 8）
+- **Spring Boot 版本**: 2.7.x（最后一个支持 Java 8 的版本，禁止使用 3.x）
+- **MyBatis starter**: mybatis-spring-boot-starter 2.x（禁止使用 mybatis-plus-spring-boot3-starter）
+
+### 依赖命名空间
+
+- Servlet API: `javax.servlet`（禁止 `jakarta.servlet`）
+- Validation API: `javax.validation`（禁止 `jakarta.validation`）
+- Persistence API: `javax.persistence`（禁止 `jakarta.persistence`）
+- 所有依赖版本必须兼容 Java 8，禁止引入任何需要 Java 9+ 的库
+
+### pom.xml 构建配置
+
+- `<java.version>1.8</java.version>`
+- `<maven.compiler.source>1.8</maven.compiler.source>`
+- `<maven.compiler.target>1.8</maven.compiler.target>`
+- Spring Boot parent 版本必须为 2.7.x
+
+### 禁止的 Java 9+ 语法和 API
 
 **所有生成的 Java 代码必须兼容 Java 1.8（JDK 8）标准，禁止使用 Java 9 及以上版本引入的语法和 API。** 具体要求：
 
