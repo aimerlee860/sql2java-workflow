@@ -1,7 +1,7 @@
 /**
  * Engine Core — 确定性状态机引擎核心
  *
- * 单流水线架构：7 个阶段 + 1 个条件分支阶段（fix），一个 runId。
+ * 单流水线架构：8 个阶段 + 1 个条件分支阶段（fix），一个 runId。
  * 无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。
  *
  * 设计决策索引：
@@ -58,6 +58,7 @@ export interface PhaseConfig {
   maxRetries: number
   requiresConfirmation?: boolean                // 为 true 时 advance 后暂停等待确认
   isFixPhase?: boolean                          // 标记 fix 阶段，引擎特殊处理
+  needsCrossSchemaValidation?: boolean          // 为 true 时 advance 后执行跨 Schema 校验
   tools: string[]                               // 允许的工具列表
   description?: string                          // 阶段中文描述，用于输出 banner
 }
@@ -227,10 +228,12 @@ export class WorkflowEngine {
       }
     }
 
-    // ── Step 2-3: 跨 Schema 校验 (D9) ──
+    // ── Step 2: 查找当前阶段配置 ──
+    const currentPhaseConfig = def.phases.find(p => p.name === run.currentPhase)
+
+    // ── Step 3: 跨 Schema 校验 (D9) ──
     // inventory-index ↔ inventory 包名一致性校验由 plugin 层 validateInventoryPackages 完成，此处不重复
-    // analyze/plan 完成后：校验 inventory ↔ analysis ↔ plan 包名一致性
-    if (run.currentPhase === "analyze" || run.currentPhase === "plan") {
+    if (currentPhaseConfig?.needsCrossSchemaValidation) {
       const crossSchemaWarnings = this.validateCrossSchema(run, run.currentPhase!)
       for (const w of crossSchemaWarnings) {
         this.appendEvent(runId, "ADVANCE", run.currentPhase ?? "", `[cross-schema-warning] ${w}`)
@@ -238,7 +241,6 @@ export class WorkflowEngine {
     }
 
     // ── Step 4: fix 阶段特殊处理 ──
-    const currentPhaseConfig = def.phases.find(p => p.name === run.currentPhase)
     if (currentPhaseConfig?.isFixPhase) {
       return this.handleFixAdvance(run, def, currentEntry, input, now)
     }
@@ -574,22 +576,24 @@ export class WorkflowEngine {
 
     // inventory-index ↔ inventory 一致性已在 inventory 阶段完成时独立校验，此处不重复
 
-    // inventory 包名 ↔ analysis 包名（双向）
+    // inventory 包名 ↔ analysis 包名（双向，大小写不敏感）
     const invNames = this.extractPackageNames(inventory)
     const anaNames = this.extractPackageNames(analysis)
+    const invUpper = new Set([...invNames].map((n) => n.toUpperCase()))
+    const anaUpper = new Set([...anaNames].map((n) => n.toUpperCase()))
     for (const name of invNames) {
-      if (!anaNames.has(name)) warnings.push(`analysis 缺少包: ${name}`)
+      if (!anaUpper.has(name.toUpperCase())) warnings.push(`analysis 缺少包: ${name}`)
     }
     for (const name of anaNames) {
-      if (!invNames.has(name)) warnings.push(`inventory 缺少包: ${name}（analysis 中存在但 inventory 中不存在）`)
+      if (!invUpper.has(name.toUpperCase())) warnings.push(`inventory 缺少包: ${name}（analysis 中存在但 inventory 中不存在）`)
     }
 
-    // translationOrder 覆盖校验
-    const orderedNames = new Set(
-      ((analysis.translationOrder as string[][]) ?? []).flat()
+    // translationOrder 覆盖校验（大小写不敏感）
+    const orderedUpper = new Set(
+      ((analysis.translationOrder as string[][]) ?? []).flat().map((n: string) => n.toUpperCase())
     )
     for (const name of anaNames) {
-      if (!orderedNames.has(name)) warnings.push(`translationOrder 缺少包: ${name}`)
+      if (!orderedUpper.has(name.toUpperCase())) warnings.push(`translationOrder 缺少包: ${name}`)
     }
 
     // plan 映射覆盖（仅 plan 完成后校验）
@@ -605,6 +609,27 @@ export class WorkflowEngine {
       for (const name of invNames) {
         if (!mappedNames.has(name)) warnings.push(`plan 未映射包: ${name}`)
       }
+    }
+
+    // dedup 跨包引用校验（仅 dedup 完成后校验）
+    if (completedPhase === "dedup") {
+      const dedup = this.loadArtifactJson(artifactsDir, "dedup")
+      if (!dedup) {
+        warnings.push("dedup 校验跳过：dedup artifact 不存在")
+        return warnings
+      }
+
+      // 校验 affectedPackages 引用有效包名
+      const moduleRefs = (
+        (dedup.extractedModules as Array<{ affectedPackages?: string[] }>) ?? []
+      ).flatMap((m) => (m.affectedPackages ?? []))
+      this.validatePackageRefs(moduleRefs, invNames, "dedup: affectedPackages", warnings)
+
+      // 校验 packageChanges 引用有效包名
+      const changePkgs = (
+        (dedup.packageChanges as Array<{ packageName: string }>) ?? []
+      ).map((c) => c.packageName)
+      this.validatePackageRefs(changePkgs, invNames, "dedup: packageChanges", warnings)
     }
 
     return warnings
@@ -717,6 +742,20 @@ export class WorkflowEngine {
       names = names.map((n) => n.toUpperCase())
     }
     return new Set(names)
+  }
+
+  /** 校验包名引用列表是否全部在有效包名集合中（大小写不敏感），无效引用追加到 warnings */
+  private validatePackageRefs(
+    refs: string[],
+    validNames: Set<string>,
+    label: string,
+    warnings: string[],
+  ): void {
+    const upperValid = new Set([...validNames].map((n) => n.toUpperCase()))
+    const invalid = refs.filter((p) => !upperValid.has(p.toUpperCase()))
+    if (invalid.length > 0) {
+      warnings.push(`${label} 引用了不存在的包: ${[...new Set(invalid)].join(", ")}`)
+    }
   }
 
   /** 匹配 TransitionRule (D1: 根据 result 匹配 condition) */
@@ -930,32 +969,47 @@ export class WorkflowEngine {
     currentEntry.status = "completed"
     currentEntry.completedAt = now
 
-    // 创建触发阶段新 entry（增量模式）
+    // F2: fix 后路由到 dedup（而非直接回到 review/verify）
+    // 确保翻译修改后 dedup.json 被重新生成，避免过期数据影响下游阶段。
+    // dedup 完成后由已有的 dedup → review (condition: "always") 自然推进到 review → verify。
+    // 直接查找 condition:"always" 规则，避免 matchTransitionRule 的 exact-match-then-fallback
+    // 在未来添加 condition:"passed" 的 fix transition 时匹配到错误规则。
+    const fixAlwaysRule = def.transitions.find(t => t.from === "fix" && t.condition === "always")
+    const nextPhase = fixAlwaysRule?.to
+    if (!nextPhase) {
+      return {
+        run,
+        nextPhase: null,
+        finished: false,
+        waitingForConfirmation: false,
+        rejected: true,
+        rejectionReason: "fix 完成后无可用 transition（缺少 { from: 'fix', condition: 'always' } 规则）",
+      }
+    }
     const newEntry: PhaseHistoryEntry = {
-      phase: triggerPhase,
+      phase: nextPhase,
       status: "in_progress",
       startedAt: now,
       retryCount: 0,
-      branchedFrom: "fix",
+      branchedFrom: triggerPhase, // 记录原始触发阶段(review/verify)，而非 "fix"
       incrementalContext: {
         targetPackages: fixedPackages,
       },
     }
     run.phaseHistory.push(newEntry)
-    const prevPhase = run.currentPhase
-    run.currentPhase = triggerPhase
+    run.currentPhase = nextPhase
     run.updatedAt = now
 
-    const triggerPhaseConfig = def.phases.find(p => p.name === triggerPhase) ?? null
+    const nextPhaseConfig = def.phases.find(p => p.name === nextPhase) ?? null
     this.persist(run)
     this.appendEvent(
-      run.runId, "ADVANCE", triggerPhase,
-      `fix → ${triggerPhase} (incremental, packages: ${fixedPackages.join(",")})`
+      run.runId, "ADVANCE", nextPhase,
+      `fix → ${nextPhase} (incremental, packages: ${fixedPackages.join(",")})`
     )
 
     return {
       run,
-      nextPhase: triggerPhaseConfig,
+      nextPhase: nextPhaseConfig,
       finished: false,
       waitingForConfirmation: false,
       rejected: false,

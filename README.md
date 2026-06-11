@@ -29,15 +29,15 @@
 └──────────────────┬───────────────────────────────┘
                    │
                    ▼
-  inventory → analyze → plan（人工确认）→ scaffold → translate → review → verify → 完成
-                                                               │            │
-                                                               ↓ (failed)   ↓ (failed)
-                                                               fix ←────────┘
-                                                               │
-                                                               └→ 增量回到触发阶段（review 或 verify）
+  inventory → analyze → plan（人工确认）→ scaffold → translate → dedup → review → verify → 完成
+                                                ↑       │             │            │
+                                                │       │             ↓ (failed)   ↓ (failed)
+                                                │       │             fix ←────────┘
+                                                │       │             │
+                                                └───────┘             └→ fix → dedup → review（增量回到触发阶段）
 ```
 
-**单流水线**：7 个阶段 + 1 个条件分支阶段（fix），一个 runId，无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。启动前可选执行 Schema 预获取（发现 `db.xml` 时自动连接数据库拉取 DDL）。
+**单流水线**：8 个阶段 + 1 个条件分支阶段（fix），一个 runId，无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。fix 完成后经 dedup 重新去重再审查，确保 dedup.json 与翻译结果一致。启动前可选执行 Schema 预获取（发现 `db.xml` 时自动连接数据库拉取 DDL）。
 
 ## 项目结构
 
@@ -48,7 +48,7 @@ sql2java-workflow/
 │   │   └── sql2java.md               # /sql2java 命令入口
 │   ├── agent/
 │   │   ├── sql-analyst.md            # inventory + analyze 阶段
-│   │   ├── java-architect.md         # plan + scaffold 阶段
+│   │   ├── java-architect.md         # plan + scaffold + dedup 阶段
 │   │   ├── translator.md             # translate + fix 阶段
 │   │   └── reviewer.md               # review + verify 阶段
 │   ├── docs/
@@ -80,7 +80,8 @@ sql2java-workflow/
 | sql-analyst | inventory | 0.1 | 基于 inventory-index.json 分批补充语义细节，产出 per-package 文件 |
 | sql-analyst | analyze | 0.1 | 依赖图 + 拓扑排序 + 子程序结构解析 + FSD 生成 |
 | java-architect | plan | 0.2 | 架构规划（需人工确认），遵守 Java 代码规约 |
-| java-architect | scaffold | 0.2 | 项目骨架 + Entity + Mapper/Service 壳，遵守 Java 代码规约 |
+| java-architect | scaffold | 0.2 | 项目骨架 + Entity + Mapper/Service 壳 + 公共模块骨架，遵守 Java 代码规约 |
+| java-architect | dedup | 0.2 | 跨包重复代码检测 + 公共模块抽取 |
 | translator | translate | 0.1 | 按拓扑序逐包翻译，逐包持久化，遵守 Java 代码规约 + 中文注释 |
 | translator | fix | 0.1 | 修复 mustFix 项，产出 FixArtifact |
 | reviewer | review | 0.1 | 15 类审查清单（含命名规约/代码格式/OOP/注释语言），逐包持久化 |
@@ -97,14 +98,15 @@ sql2java-workflow/
 | plan | java-architect | 1 | 架构规划（需人工确认） |
 | scaffold | java-architect | 1 | 项目骨架生成 |
 | translate | translator | 3 | 按拓扑序逐包翻译 |
+| dedup | java-architect | 2 | 跨包重复代码检测 + 公共模块抽取 |
 | review | reviewer | 1 | 按包独立审查 |
 | verify | reviewer | 2 | 全局编译 + 按包校验 |
 | fix | translator | 3 | 修复 mustFix 项 |
 
 ### 条件分支
 
-- **无条件前进**：inventory → analyze → plan → scaffold → translate → review → verify → 完成
-- **fix 循环**：review/verify failed → fix → 增量回到触发阶段
+- **无条件前进**：inventory → analyze → plan → scaffold → translate → dedup → review → verify → 完成
+- **fix 循环**：review/verify failed → fix → dedup → review → verify（fix 修改翻译后重新去重再审查）
 - **exhausted 策略**：globalMax=3, phaseMax=2, 任一达限 → `completed_with_issues`
 
 ## 设计决策
@@ -130,6 +132,7 @@ sql2java-workflow/
 | D17 | artifact 缓存 | 单次 advance 内缓存磁盘读取，advance 结束后清除 |
 | D18 | Schema 预获取 | 发现 db.xml 时自动连接 Oracle 拉取 DDL 到 ddl-output/，纯 JS thin mode，不侵入 phase 链 |
 | D19 | Java 代码规约注入 | docs/java-code-spec.md 统一规约自动注入 java-architect / translator / reviewer 三个 agent |
+| D20 | dedup 公共模块抽取 | translate 完成后扫描所有包，检测跨包重复代码（DTO/工具方法/常量/异常类/MyBatis 片段），抽取为共享模块并更新引用；不修改 Service 接口和 SQL 内容 |
 
 ## 命令用法
 
@@ -157,6 +160,7 @@ sql2java-workflow/
 ├── analysis.json                        # 全局元数据（callGraph + topology + complexity）
 ├── plan.json
 ├── scaffold.json
+├── dedup.json                           # dedup 阶段产出（跨包重复代码检测 + 公共模块抽取）
 ├── fix.json                             # fix 阶段产出（每次 fix 覆盖）
 ├── fsd/{package}/{subprogram}.md        # FSD 文档（analyze 阶段副产物）
 ├── translations/{package}/

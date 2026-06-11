@@ -592,6 +592,39 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
         const pkgError = validateInventoryPackages(artifactsDir)
         if (pkgError) return pkgError
       }
+
+      // dedup 阶段：增量模式下校验 dedup.json 未丢失非增量包数据
+      if (phase === "dedup") {
+        const currentEntry = engine.findCurrentEntry(run)
+        const isIncremental = !!currentEntry?.incrementalContext?.targetPackages?.length
+        if (isIncremental) {
+          const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
+          if (inventory) {
+            const invPkgCount = engine.extractPackageNames(inventory).size
+            const dedupStats = parsed.scanStats as { totalPackages?: number } | undefined
+            if (dedupStats && dedupStats.totalPackages !== undefined && dedupStats.totalPackages < invPkgCount) {
+              return `dedup.json scanStats.totalPackages (${dedupStats.totalPackages}) < inventory package count (${invPkgCount}). Incremental dedup must merge with existing data to preserve all packages.`
+            }
+            // 内容覆盖检查：验证 extractedModules 未丢失非目标包数据
+            // 防止 agent 正确携带 totalPackages 计数但丢失非目标包的抽取数据
+            const targetPkgs = new Set(
+              ((currentEntry!.incrementalContext!.targetPackages as string[]) ?? []).map((p) => p.toUpperCase())
+            )
+            const modules = (parsed.extractedModules as Array<{ sources?: Array<{ packageName: string }> }>) ?? []
+            // 空模块 + 存在非目标包 → 数据丢失
+            if (modules.length === 0 && invPkgCount > targetPkgs.size) {
+              return `dedup.json incremental run has empty extractedModules but inventory has ${invPkgCount} packages (target: ${targetPkgs.size}). Non-target package data must be preserved.`
+            }
+            const sourcePkgs = new Set(
+              modules.flatMap((m) => (m.sources ?? []).map((s) => s.packageName.toUpperCase()))
+            )
+            const nonTargetSourcePkgs = [...sourcePkgs].filter((p) => !targetPkgs.has(p))
+            if (modules.length > 0 && nonTargetSourcePkgs.length === 0 && invPkgCount > targetPkgs.size) {
+              return `dedup.json incremental run has extracted modules only from target packages (${[...targetPkgs].join(", ")}), but inventory has ${invPkgCount} packages. Non-target package data may have been lost during merge.`
+            }
+          }
+        }
+      }
     } catch (e: any) {
       return `Failed to read/parse ${filePath}: ${e.message}`
     }
@@ -693,14 +726,12 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
           const errors = formatZodIssues(result.error)
           return `Zod validation failed for ${summaryPhase}.json:\n${errors}`
         }
-        // verify-summary: 校验 testFiles[] 中的路径实际存在（兼容 testExecution 和旧 testGeneration）
-        const testOutput = parsed.testExecution ?? parsed.testGeneration
-        if (summaryPhase === "verify-summary" && testOutput) {
-          const shouldCheck = "executed" in testOutput
-            ? (testOutput as { executed: boolean }).executed
-            : (testOutput as { generated: boolean }).generated
-          if (shouldCheck) {
-            const missing = (testOutput.testFiles as string[]).filter(
+        // verify-summary: 校验 testFiles[] 中的路径实际存在
+        if (summaryPhase === "verify-summary") {
+          const te = parsed.testExecution as { executed?: boolean; testFiles?: string[] } | undefined
+          if (te && te.executed) {
+            const files = te.testFiles ?? []
+            const missing = files.filter(
               (f) => !existsSync(f) && !existsSync(join(artifactsDir, f)) && !existsSync(join(process.cwd(), f))
             )
             if (missing.length > 0) {

@@ -219,12 +219,44 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 
 #### Step 3: 生成公共模块
 
+分为两类：**完整生成**（scaffold 阶段直接写完）和**骨架预留**（空壳 + TODO，dedup 阶段填充）。
+
+##### 3A: 完整生成的公共模块（fillStrategy = "scaffold"）
+
 - **类型映射工具类**：Oracle 类型 → Java 类型的转换辅助
 - **异常体系**：基于 plan.json 的 exceptionStrategy 生成
   - `BusinessException`（业务异常基类）
   - `DataNotFoundException`（数据未找到）
   - `ValidationException`（校验失败）
 - **基础配置**：MyBatis 配置、Spring 配置
+
+##### 3B: 骨架预留的公共模块（fillStrategy = "dedup"）
+
+以下模块生成空壳文件（类结构 + 方法签名 + TODO），由 dedup 阶段根据翻译结果填充实际内容：
+
+- **工具类骨架**：
+  - `util/DateUtils.java` — 日期格式化工具
+  - `util/StringUtils.java` — 字符串处理工具
+  - `util/TypeConvertUtils.java` — PL/SQL 特有类型转换（扩展已有类型映射）
+  - `util/OracleFunctionMapper.java` — Oracle 内置函数映射（NVL→Optional, DECODE→switch 等）
+- **常量类骨架**：
+  - `constants/BusinessConstants.java` — 业务常量
+  - `constants/ErrorCode.java` — 错误码常量
+- **通用 DTO 目录**：创建 `dto/common/` 目录（不生成具体类）
+- **MyBatis 公共片段骨架**：`resources/mapper/common/common-fragment.xml`（空 XML + 注释说明）
+- **测试工具骨架**：
+  - `test/util/TestBase.java` — 测试基类（通用 Mock 配置）
+
+每个骨架文件的类注释中标注：
+```java
+// TODO: [scaffold] 此文件为骨架，由 dedup 阶段根据翻译结果填充实际内容
+```
+
+##### 3C: scaffold.json 记录
+
+在 scaffold.json 的 `generated` 中：
+- `commonClasses` 保持不变（记录所有公共模块文件）
+- `commonModules`（可选）记录每个文件的 category 和 fillStrategy，供 dedup 阶段参考
 
 **所有公共模块必须遵循注入的 Java 代码规约**（类注释、方法注释、常量命名、异常类命名等详见规约文档）。
 
@@ -295,3 +327,114 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 - [ ] 测试骨架方法签名与 ServiceImpl 公共方法一一对应
 - [ ] Java 文件可编译（包声明正确、import 齐全）
 - [ ] scaffold.json 的 generated 记录了所有已生成文件
+- [ ] 公共模块骨架（commonModules）包含所有 fillStrategy="dedup" 的空壳文件
+- [ ] 骨架文件的 TODO 标记格式正确：`// TODO: [scaffold] 此文件为骨架，由 dedup 阶段根据翻译结果填充实际内容`
+
+---
+
+## Phase: dedup
+
+### 目标
+
+扫描所有包的翻译结果，检测跨包重复代码，将重复代码抽取为共享公共模块，减少冗余并提高可维护性。
+
+### 输入
+
+- **上游 artifact**：
+  - `${artifactsDir}/plan.json` — 映射规则和编码约定
+  - `${artifactsDir}/scaffold.json` — 项目结构和已有公共模块
+  - `${artifactsDir}/inventory.json` — 包名列表
+  - `${artifactsDir}/analysis.json` — 全局元数据
+  - `${artifactsDir}/translations/*/translation.json` — 所有包的翻译记录
+
+### 增量模式
+
+当 `incrementalContext.targetPackages` 非空时，dedup 处于增量模式（由 fix 循环触发）：
+
+- 仅重新扫描 `targetPackages` 中列出的包
+- 保留已有的非增量模块（不重新抽取不涉及的包）
+- 更新 dedup.json 时合并：替换涉及的包的 packageChanges，保留不涉及的部分
+- 如果已有 dedup.json，在其基础上更新而非从头生成
+- scaffold 阶段已生成的骨架文件（fillStrategy="dedup"）仍需保留，只更新内容
+
+### 输出
+
+- **artifact 路径**：`${artifactsDir}/dedup.json`
+- **公共模块文件**：写入项目目录的公共模块包下（util/, dto/common/, constants/ 等）
+- **修改的 Java 文件**：更新各包的引用
+
+### 工作步骤
+
+#### Step 1: 读取所有包的翻译结果
+
+读取 `translations/*/translation.json`，获取每个包生成的文件列表。
+逐文件读取 Java 源码内容，建立全量代码索引。
+
+#### Step 2: 重复代码检测
+
+按以下维度检测重复（同一模式出现在 ≥ 2 个包中才标记为重复）：
+
+1. **DTO 类重复**：字段名 + 类型完全一致（忽略类名差异）
+2. **工具方法重复**：方法体相同（允许局部变量名差异）
+3. **常量重复**：常量名 + 值相同
+4. **异常类重复**：字段 + 构造器相同
+5. **MyBatis 片段重复**：resultMap / SQL 片段相同
+
+#### Step 3: 抽取决策
+
+对每个重复组：
+- 如果差异度 < 10%（仅变量名/注释不同）→ 抽取
+- 如果差异度 ≥ 10%（有实质性差异）→ 记录到 `skippedDuplicates`，不抽取
+- 包含 `// TODO: [translate]` 标记的代码 → 不抽取
+- 仅 1 个包使用的代码 → 不抽取
+
+**不抽取的代码类型**：
+- 业务逻辑方法（违反"不重构"原则）
+- Service 接口 / ServiceImpl 方法体
+- 相似但有实质差异的代码
+
+#### Step 4: 创建公共模块
+
+对每个决定抽取的重复组：
+1. 在对应的公共目录下创建新文件（util/, dto/common/, constants/, exception/）
+2. 确保新文件遵循 Java 代码规约（命名、注释、格式）
+3. 所有 Javadoc 使用中文注释
+4. 如果 scaffold 阶段已生成对应的骨架文件（fillStrategy="dedup"），在骨架基础上填充实际内容
+
+#### Step 5: 更新各包引用
+
+对每个受影响的包：
+1. 在 Java 文件中添加 import 语句
+2. 移除被抽取的类/方法/常量定义
+3. 将调用改为使用公共模块
+4. 更新 `translations/{package}/translation.json` 的 `decisions` 字段，追加抽取决策记录
+
+#### Step 6: 写入 dedup.json
+
+组装符合 DedupSchema 的 JSON，写入 `${artifactsDir}/dedup.json`。
+
+### 安全约束
+
+1. **不修改 Service 接口** — 公共 API 不变，确保 review 阶段仍可对照 Oracle 源码审查
+2. **不修改 Mapper XML 的外部 SQL** — SQL 语句内容不变，只允许抽取 resultMap/SQL 片段引用
+3. **不合并业务逻辑** — ServiceImpl 的方法体不合并，只抽取纯工具性质的代码
+4. **保持翻译五原则** — 抽取后的代码仍须遵循"不重构、不优化、不合并、不省略、不猜测"
+
+### 阶段完成
+
+工作完成后调用：
+```
+workflow({ action: "advance", runId: "${runId}", result: "passed" })
+```
+
+dedup 是 `condition: "always"` 阶段，result 固定传 `"passed"`。
+
+### 质量检查
+
+- [ ] 所有包的翻译结果已扫描（scanStats.totalPackages 覆盖所有包）
+- [ ] 重复代码已被正确识别和分类
+- [ ] 抽取的公共模块遵循 Java 代码规约
+- [ ] 各包的引用已正确更新（import 齐全、无编译错误）
+- [ ] 未抽取的重复有明确的跳过原因记录（skippedDuplicates）
+- [ ] dedup.json 格式符合 DedupSchema
+- [ ] 受影响包的 translation.json 的 decisions 已更新

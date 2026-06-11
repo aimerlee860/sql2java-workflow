@@ -120,6 +120,16 @@ interface PhaseBusinessData {
   // fix
   fixedPackageCount?: number
   fixedPackageNames?: string[]
+
+  // dedup
+  dedupPackagesScanned?: number
+  dedupFilesScanned?: number
+  dedupDuplicateGroups?: number
+  dedupExtractedModules?: number
+  dedupFilesExtracted?: number
+  dedupFilesModified?: number
+  dedupLinesRemoved?: number
+  dedupLinesAdded?: number
 }
 
 /** 最终汇总 */
@@ -416,6 +426,9 @@ function extractBusinessData(phase: string, artifactsDir: string): PhaseBusiness
     case "fix":
       extractFixData(data, artifactsDir)
       break
+    case "dedup":
+      extractDedupData(data, artifactsDir)
+      break
   }
 
   return data
@@ -601,13 +614,9 @@ function extractVerifyData(data: PhaseBusinessData, dir: string): void {
   } catch { /* skip */ }
 
   try {
-    // 优先读 testExecution（新 schema），fallback testGeneration（旧 schema）
     const te = json.testExecution as Record<string, unknown> | undefined
-    const tg = json.testGeneration as Record<string, unknown> | undefined
     if (te && te.executed) {
       data.testFileCount = safeArrayLen(te.testFiles)
-    } else if (tg && tg.generated) {
-      data.testFileCount = safeArrayLen(tg.testFiles)
     }
   } catch { /* skip */ }
 }
@@ -624,6 +633,34 @@ function extractFixData(data: PhaseBusinessData, dir: string): void {
         : typeof p === "object" && p !== null && "name" in p ? String((p as Record<string, unknown>).name)
         : String(p)
       )
+    }
+  } catch { /* skip */ }
+}
+
+function extractDedupData(data: PhaseBusinessData, dir: string): void {
+  const json = readJsonSafe(join(dir, "dedup.json"))
+  if (!json) return
+
+  try {
+    const stats = json.scanStats as Record<string, unknown> | undefined
+    if (stats) {
+      data.dedupPackagesScanned = optionalNumber(stats.totalPackages)
+      data.dedupFilesScanned = optionalNumber(stats.totalFilesScanned)
+      data.dedupDuplicateGroups = optionalNumber(stats.duplicateGroupsFound)
+    }
+  } catch { /* skip */ }
+
+  try {
+    data.dedupExtractedModules = safeArrayLen(json.extractedModules)
+  } catch { /* skip */ }
+
+  try {
+    const metrics = json.metrics as Record<string, unknown> | undefined
+    if (metrics) {
+      data.dedupFilesExtracted = optionalNumber(metrics.filesExtracted)
+      data.dedupFilesModified = optionalNumber(metrics.filesModified)
+      data.dedupLinesRemoved = optionalNumber(metrics.linesRemoved)
+      data.dedupLinesAdded = optionalNumber(metrics.linesAdded)
     }
   } catch { /* skip */ }
 }
@@ -863,6 +900,16 @@ function formatBusinessLines(phase: string, biz: PhaseBusinessData): string[] {
       if (biz.fixedPackageNames && biz.fixedPackageNames.length > 0) {
         lines.push(`  修复包:  ${biz.fixedPackageNames.join(", ")}`)
       }
+      break
+    case "dedup":
+      fmt("扫描包:", biz.dedupPackagesScanned)
+      fmt("扫描文件:", biz.dedupFilesScanned)
+      fmt("重复组:", biz.dedupDuplicateGroups)
+      fmt("抽取模块:", biz.dedupExtractedModules)
+      fmt("抽取文件:", biz.dedupFilesExtracted)
+      fmt("修改文件:", biz.dedupFilesModified)
+      fmt("删除行:", biz.dedupLinesRemoved)
+      fmt("新增行:", biz.dedupLinesAdded)
       break
   }
 

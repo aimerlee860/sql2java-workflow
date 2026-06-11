@@ -1,7 +1,7 @@
 /**
  * Workflow Definitions — SQL2JAVA 单流水线工作流定义
  *
- * 7 个阶段 + 1 个条件分支阶段（fix），一个 runId。
+ * 8 个阶段 + 1 个条件分支阶段（fix），一个 runId。
  * 无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。
  */
 
@@ -28,6 +28,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       agentFile: "agent/sql-analyst.md",
       temperature: 0.1,
       maxRetries: 2,
+      needsCrossSchemaValidation: true,
       tools: ["read", "bash", "write", "workflow"],
     },
     {
@@ -36,6 +37,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       agentFile: "agent/java-architect.md",
       temperature: 0.2,
       maxRetries: 1,
+      needsCrossSchemaValidation: true,
       tools: ["read", "bash", "write", "edit", "workflow"],
     },
     {
@@ -52,6 +54,15 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
+      tools: ["read", "bash", "write", "edit", "workflow"],
+    },
+    {
+      name: "dedup",
+      description: "跨包重复代码检测 + 公共模块抽取",
+      agentFile: "agent/java-architect.md",
+      temperature: 0.2,
+      maxRetries: 2,
+      needsCrossSchemaValidation: true,
       tools: ["read", "bash", "write", "edit", "workflow"],
     },
     {
@@ -87,14 +98,16 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     { from: "analyze",    condition: "always",  to: "plan" },
     { from: "plan",       condition: "always",  to: "scaffold" },
     { from: "scaffold",   condition: "always",  to: "translate" },
-    { from: "translate",  condition: "always",  to: "review" },
+    { from: "translate",  condition: "always",  to: "dedup" },
+    { from: "dedup",      condition: "always",  to: "review" },
     // ── review 分支 ──
     { from: "review",     condition: "passed",  to: "verify" },
     { from: "review",     condition: "failed",  to: "fix" },
     // ── verify 分支 ──
     { from: "verify",     condition: "passed",  to: "__done__" },
     { from: "verify",     condition: "failed",  to: "fix" },
-    // ── fix 回环：D7 动态路由，不在此写死 ──
+    // ── fix 回环：fix → dedup → review → verify ──
+    { from: "fix",        condition: "always",  to: "dedup" },
   ],
 }
 
@@ -102,20 +115,32 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
 // Upstream Artifacts 映射
 // ============================================================================
 
+// 共享 artifact 路径常量，避免跨阶段重复声明时遗漏
+const _INV_BASE = ["inventory-index.json", "inventory.json", "inventory-packages/*.json"] as const
+const _ANALYSIS = ["analysis.json", "analysis-packages/*.json"] as const
+const _PLAN = ["plan.json"] as const
+const _SCAFFOLD = ["scaffold.json"] as const
+const _DEDUP = ["dedup.json"] as const
+const _TRANSLATIONS = ["translations/*/translation.json"] as const
+const _FSD = ["fsd/*/*.md"] as const
+
 /** 每个 phase 需要读取的上游 artifact 路径模板 */
 export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   inventory: ["inventory-index.json"],
-  analyze: ["inventory-index.json", "inventory.json", "inventory-packages/*.json"],
-  plan: ["inventory-index.json", "inventory.json", "inventory-packages/*.json", "analysis.json", "analysis-packages/*.json", "fsd/*/*.md"],
-  scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages/*.json"],
-  translate: ["inventory-index.json", "inventory.json", "inventory-packages/*.json", "plan.json", "analysis.json", "analysis-packages/*.json", "scaffold.json", "fsd/*/*.md"],
-  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages/*.json", "translations/*/translation.json"],
-  verify: ["plan.json", "scaffold.json", "translations/*/translation.json"],
+  analyze: [..._INV_BASE],
+  plan: [..._INV_BASE, ..._ANALYSIS, ..._FSD],
+  scaffold: [..._PLAN, ..._INV_BASE],
+  translate: [..._INV_BASE, ..._PLAN, ..._ANALYSIS, ..._SCAFFOLD, ..._FSD],
+  dedup: [..._PLAN, ..._SCAFFOLD, ..._INV_BASE, ..._ANALYSIS, ..._TRANSLATIONS],
+  // TODO (F9): translations/*/translation.json 在 dedup/review/verify 三阶段重复读取，
+  // artifactCache 每次 advance 清空导致无法跨阶段缓存。考虑支持只读 artifact 的跨阶段缓存。
+  review: [..._PLAN, ..._SCAFFOLD, ..._ANALYSIS, ..._DEDUP, ..._TRANSLATIONS],
+  verify: [..._PLAN, ..._SCAFFOLD, ..._DEDUP, ..._TRANSLATIONS],
   fix: [
-    "analysis.json", "analysis-packages/*.json", "plan.json", "scaffold.json",
+    ..._ANALYSIS, ..._PLAN, ..._SCAFFOLD, ..._DEDUP,
     // 动态路径：取决于触发阶段（review 或 verify），plugin 注入时需根据 branchedFrom 拼接
     "review-summary.json", "verify-summary.json",
-    "translations/*/translation.json", "translations/*/review.json", "translations/*/verify.json",
+    ..._TRANSLATIONS, "translations/*/review.json", "translations/*/verify.json",
   ],
 }
 
@@ -136,10 +161,11 @@ export const PHASE_PREREQUISITES: Record<string, PrerequisiteItem[]> = {
   plan: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages"],
   scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages"],
   translate: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages", "plan.json", "scaffold.json"],
-  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages"],
-  verify: ["plan.json", "scaffold.json"],
+  dedup: ["inventory.json", "plan.json", "scaffold.json", "analysis.json", "translations"],
+  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages", "dedup.json"],
+  verify: ["plan.json", "scaffold.json", "dedup.json"],
   fix: [
-    "analysis.json", "analysis-packages", "plan.json", "scaffold.json",
+    "analysis.json", "analysis-packages", "plan.json", "scaffold.json", "dedup.json",
     // 触发阶段的 summary：review-summary.json 或 verify-summary.json，至少一个
     ["review-summary.json", "verify-summary.json"],
     "translations",

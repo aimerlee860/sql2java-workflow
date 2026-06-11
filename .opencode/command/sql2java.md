@@ -33,7 +33,7 @@ permission:
 
 ### 已知阶段名
 
-inventory, analyze, plan, scaffold, translate, review, verify, fix
+inventory, analyze, plan, scaffold, translate, dedup, review, verify, fix
 
 ### 模式关键字
 
@@ -52,18 +52,18 @@ inventory, analyze, plan, scaffold, translate, review, verify, fix
 | Agent | 阶段 | 职责 |
 |-------|------|------|
 | sql-analyst | inventory, analyze | 扫描源码编目、依赖分析、FSD 生成 |
-| java-architect | plan, scaffold | 架构规划、骨架生成 |
+| java-architect | plan, scaffold, dedup | 架构规划、骨架生成、公共模块抽取 |
 | translator | translate, fix | IR → Java/MyBatis 代码 |
 | reviewer | review, verify | 翻译质量审查、编译验证 |
 
 ## 工作流程
 
 ```
-inventory → analyze → plan → scaffold → translate → review → verify → 完成
-                                                   │            │
-                                                   ↓ (failed)   ↓ (failed)
-                                                   fix ←────────┘
-                                                   └→ 增量回到触发阶段
+inventory → analyze → plan → scaffold → translate → dedup → review → verify → 完成
+                                                ↑       │             │
+                                                │       ↓ (failed)   ↓ (failed)
+                                                │       fix ←────────┘
+                                                └───────┘ (fix → dedup → review)
 ```
 
 ---

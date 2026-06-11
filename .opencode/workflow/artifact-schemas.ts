@@ -10,6 +10,23 @@
 import { z } from "zod"
 
 // ============================================================================
+// 共享枚举 — 跨 Schema 共用的常量定义
+// ============================================================================
+
+/**
+ * 模块类别 — ScaffoldSchema.commonModules.classes.category 与
+ * DedupSchema.extractedModules.category 共用，确保跨阶段一致性。
+ *
+ * 合并自两个原始枚举：Scaffold 侧重骨架分类，Dedup 侧重抽取分类。
+ */
+const ModuleCategoryValues = [
+  "exception", "config", "type-mapper", "dto",
+  "constants", "util", "mybatis", "mybatis-fragment",
+  "mapper-interface", "test-base",
+] as const
+const ModuleCategorySchema = z.enum(ModuleCategoryValues)
+
+// ============================================================================
 // Inventory Index Schema（预扫描索引，machine-generated）
 // ============================================================================
 
@@ -301,10 +318,22 @@ export const ScaffoldSchema = z.object({
       oraclePackage: z.string(),
       testClass: z.string(),
     })).optional(),
+    // TODO (F8): commonClasses {file, purpose} 和 commonModules.classes {file, purpose, category, fillStrategy}
+    // 结构重叠。考虑统一为单一数组（category/fillStrategy 可选），避免消费者需检查两个数组。
     commonClasses: z.array(z.object({
       file: z.string(),
       purpose: z.string(),
     })),
+    /** 公共模块骨架（细粒度分类 + 填充策略） */
+    commonModules: z.object({
+      classes: z.array(z.object({
+        file: z.string(),
+        purpose: z.string(),
+        category: ModuleCategorySchema,
+        fillStrategy: z.enum(["scaffold", "dedup"]),
+      })),
+      directories: z.array(z.string()),
+    }).optional(),
   }),
   conventions: z.string(),
   basedOnPlanHash: z.string().optional(),
@@ -343,6 +372,24 @@ export const TranslationSchema = z.object({
     suggestion: z.string(),
   })),
 })
+
+// ============================================================================
+// 共享 Refine 描述（消除 ReviewSchema/VerifySchema 和 Summary Schema 之间的复制粘贴）
+// ============================================================================
+
+/** passed 与 mustFix 一致性校验描述 */
+const passedMustFixRefine = {
+  check: (data: { passed: boolean; mustFix: unknown[] }) =>
+    (data.passed === true) === (data.mustFix.length === 0),
+  message: "passed 与 mustFix 必须一致：passed=true 时 mustFix 必须为空，passed=false 时 mustFix 必须非空",
+} as const
+
+/** allPassed 与 packageResults 一致性校验描述 */
+const allPassedRefine = {
+  check: (data: { allPassed: boolean; packageResults: { passed: boolean }[] }) =>
+    data.allPassed === data.packageResults.every(p => p.passed),
+  message: "allPassed 应与 packageResults 一致",
+} as const
 
 // ============================================================================
 // Review Schema（每包一个）
@@ -442,6 +489,8 @@ export const VerifySummarySchema = z.object({
     passed: z.boolean(),
     mybatisValid: z.boolean(),
   })),
+  // BREAKING: testExecution 为必填（旧版 testGeneration 已移除）
+  // 如需恢复旧数据兼容，改回 .optional() 并加 refine 保证至少一个存在
   testExecution: z.object({
     executed: z.boolean(),
     totalTests: z.number().optional(),
@@ -453,11 +502,7 @@ export const VerifySummarySchema = z.object({
       message: z.string(),
     })).optional(),
     testFiles: z.array(z.string()),
-  }).optional(),
-  testGeneration: z.object({
-    generated: z.boolean(),
-    testFiles: z.array(z.string()),
-  }).optional(),
+  }),
   totalTodosRemaining: z.number(),
   unresolvedIssues: z.array(z.object({
     packageName: z.string(),
@@ -469,10 +514,61 @@ export const VerifySummarySchema = z.object({
 ).refine(
   data => data.compilation.success === true || (data.compilation.errors !== undefined && data.compilation.errors.length > 0),
   { message: "compilation.success=false 时 errors 必须非空" }
-).refine(
-  data => data.testExecution != null || data.testGeneration != null,
-  { message: "verify-summary 必须包含 testExecution 或 testGeneration（至少其一）" }
 )
+
+// ============================================================================
+// Dedup Schema（dedup 阶段产出 — 跨包重复代码检测 + 公共模块抽取）
+// ============================================================================
+
+export const DedupSchema = z.object({
+  /** 扫描统计 */
+  scanStats: z.object({
+    totalPackages: z.number(),
+    totalFilesScanned: z.number(),
+    duplicateGroupsFound: z.number(),
+  }),
+
+  /** 抽取的公共模块列表 */
+  extractedModules: z.array(z.object({
+    /** 新建的公共模块文件路径（相对于 projectRoot） */
+    file: z.string(),
+    /** 模块类别 */
+    category: ModuleCategorySchema,
+    /** 模块用途描述 */
+    purpose: z.string(),
+    /** 此模块来源：从哪些包的哪些代码中抽取 */
+    sources: z.array(z.object({
+      packageName: z.string(),
+      originalFile: z.string(),
+      originalClassName: z.string(),
+    })),
+    /** 受影响的包（引用被更新的包） */
+    affectedPackages: z.array(z.string()),
+  })),
+
+  /** 未抽取的重复代码（记录为什么不抽取） */
+  skippedDuplicates: z.array(z.object({
+    reason: z.string(),
+    packages: z.array(z.string()),
+    codePattern: z.string(),
+  })).optional(),
+
+  /** 各包的引用变更摘要 */
+  packageChanges: z.array(z.object({
+    packageName: z.string(),
+    filesModified: z.array(z.string()),
+    importsAdded: z.array(z.string()),
+    classesRemoved: z.array(z.string()),
+  })),
+
+  /** dedup 阶段质量指标 */
+  metrics: z.object({
+    filesExtracted: z.number(),
+    filesModified: z.number(),
+    linesRemoved: z.number(),
+    linesAdded: z.number(),
+  }),
+})
 
 // ============================================================================
 // Fix Artifact Schema（fix 阶段产出）
@@ -484,24 +580,6 @@ export const FixArtifactSchema = z.object({
   data => data.fixedPackages.length > 0,
   { message: "fixedPackages 不能为空，fix 必须至少修复一个包" }
 )
-
-// ============================================================================
-// 共享 Refine 描述（消除 ReviewSchema/VerifySchema 和 Summary Schema 之间的复制粘贴）
-// ============================================================================
-
-/** passed 与 mustFix 一致性校验描述 */
-const passedMustFixRefine = {
-  check: (data: { passed: boolean; mustFix: unknown[] }) =>
-    (data.passed === true) === (data.mustFix.length === 0),
-  message: "passed 与 mustFix 必须一致：passed=true 时 mustFix 必须为空，passed=false 时 mustFix 必须非空",
-} as const
-
-/** allPassed 与 packageResults 一致性校验描述 */
-const allPassedRefine = {
-  check: (data: { allPassed: boolean; packageResults: { passed: boolean }[] }) =>
-    data.allPassed === data.packageResults.every(p => p.passed),
-  message: "allPassed 应与 packageResults 一致",
-} as const
 
 // ============================================================================
 // Schema 查找辅助
@@ -517,6 +595,7 @@ const PHASE_FILENAME_MAP: Record<string, string> = {
   plan: "plan",
   scaffold: "scaffold",
   translate: "translation",  // phase="translate" → 文件名 translation.json
+  dedup: "dedup",
   fix: "fix",
 }
 
@@ -533,6 +612,7 @@ export function getSchemaForPhase(phase: string): ZodType | null {
     analyze: AnalysisMetaSchema,
     plan: PlanSchema,
     scaffold: ScaffoldSchema,
+    dedup: DedupSchema,
     fix: FixArtifactSchema,
   }
   return schemaMap[phase] ?? null
