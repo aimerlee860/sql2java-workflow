@@ -1624,7 +1624,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         content: zFn
           .string()
           .max(2 * 1024 * 1024, "单个 artifact 内容不能超过 2 MB")
-          .describe("要写入的文件内容（JSON 字符串）"),
+          .describe("要写入的文件内容（.json 文件须为合法 JSON，其他格式直接写入）"),
       },
       execute: async (args: any, context: any) => {
         // 从 currentWorkflowContext 获取当前激活的 runId
@@ -1651,11 +1651,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
         }
 
-        // 校验 content 是否为合法 JSON
-        try {
-          JSON.parse(args.content)
-        } catch {
-          return '❌ content 不是合法的 JSON 字符串。请确保 content 可以被 JSON.parse 正确解析。'
+        // 校验：.json 文件须为合法 JSON，其他格式直接写入
+        if (args.path.endsWith('.json')) {
+          try {
+            JSON.parse(args.content)
+          } catch {
+            return '❌ .json 文件的 content 不是合法的 JSON 字符串。请确保 content 可以被 JSON.parse 正确解析。'
+          }
         }
 
         // 确保父目录存在
