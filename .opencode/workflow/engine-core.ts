@@ -969,9 +969,9 @@ export class WorkflowEngine {
     currentEntry.status = "completed"
     currentEntry.completedAt = now
 
-    // F2: fix 后路由到 dedup（而非直接回到 review/verify）
-    // 确保翻译修改后 dedup.json 被重新生成，避免过期数据影响下游阶段。
-    // dedup 完成后由已有的 dedup → review (condition: "always") 自然推进到 review → verify。
+    // F2: fix 后直接路由到 review（不再经过 dedup）。
+    // review 不依赖 dedup.json 内容，跳过 dedup 减少循环开销。
+    // dedup 只在主线 translate 后执行一次。
     // 直接查找 condition:"always" 规则，避免 matchTransitionRule 的 exact-match-then-fallback
     // 在未来添加 condition:"passed" 的 fix transition 时匹配到错误规则。
     const fixAlwaysRule = def.transitions.find(t => t.from === "fix" && t.condition === "always")

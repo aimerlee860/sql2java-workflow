@@ -32,7 +32,8 @@ permission:
 
 ### 本阶段特有写入规则
 
-- Java 源文件使用 `write` 工具写入 `plan.json` 中指定的项目目录
+- Java 源文件使用 `write` 工具写入 Runtime Context 中 `projectRoot` 指定的目录
+- `projectRoot` 由引擎从 plan.json 自动计算并注入，**必须使用注入值，不要自行编造路径**
 - **必须用 `write` 工具逐个写入文件**，不要只把代码输出在回复文本中
 
 ### 阶段完成
@@ -186,7 +187,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 
 #### Step 1: 创建 Maven 项目结构
 
-基于 plan.json 的 targetProject 配置创建目录结构。
+使用 Runtime Context 中的 `projectRoot` 值作为项目根目录。基于 plan.json 的 targetProject 配置创建目录结构。
 
 **优先使用自定义结构定义**：如果 Runtime Context 中存在 `projectStructure` 字段，严格按照其路径列表创建目录结构。将 `{packageBase}` 占位符替换为 plan.json 的 packageBase 路径（如 `com/example/app`）。
 
@@ -219,9 +220,9 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 
 #### Step 3: 生成公共模块
 
-分为两类：**完整生成**（scaffold 阶段直接写完）和**骨架预留**（空壳 + TODO，dedup 阶段填充）。
+scaffold 阶段只生成**确定的、可直接完成的**公共模块。其余公共模块由 dedup 阶段根据实际翻译结果按需创建。
 
-##### 3A: 完整生成的公共模块（fillStrategy = "scaffold"）
+##### 3A: 完整生成的公共模块
 
 - **类型映射工具类**：Oracle 类型 → Java 类型的转换辅助
 - **异常体系**：基于 plan.json 的 exceptionStrategy 生成
@@ -230,33 +231,13 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
   - `ValidationException`（校验失败）
 - **基础配置**：MyBatis 配置、Spring 配置
 
-##### 3B: 骨架预留的公共模块（fillStrategy = "dedup"）
+**不生成**工具类骨架、常量类骨架、MyBatis 公共片段骨架、测试工具骨架等。这些模块在 dedup 阶段发现跨包重复时按需创建（含骨架和实际代码）。
 
-以下模块生成空壳文件（类结构 + 方法签名 + TODO），由 dedup 阶段根据翻译结果填充实际内容：
-
-- **工具类骨架**：
-  - `util/DateUtils.java` — 日期格式化工具
-  - `util/StringUtils.java` — 字符串处理工具
-  - `util/TypeConvertUtils.java` — PL/SQL 特有类型转换（扩展已有类型映射）
-  - `util/OracleFunctionMapper.java` — Oracle 内置函数映射（NVL→Optional, DECODE→switch 等）
-- **常量类骨架**：
-  - `constants/BusinessConstants.java` — 业务常量
-  - `constants/ErrorCode.java` — 错误码常量
-- **通用 DTO 目录**：创建 `dto/common/` 目录（不生成具体类）
-- **MyBatis 公共片段骨架**：`resources/mapper/common/common-fragment.xml`（空 XML + 注释说明）
-- **测试工具骨架**：
-  - `test/util/TestBase.java` — 测试基类（通用 Mock 配置）
-
-每个骨架文件的类注释中标注：
-```java
-// TODO: [scaffold] 此文件为骨架，由 dedup 阶段根据翻译结果填充实际内容
-```
-
-##### 3C: scaffold.json 记录
+##### 3B: scaffold.json 记录
 
 在 scaffold.json 的 `generated` 中：
-- `commonClasses` 保持不变（记录所有公共模块文件）
-- `commonModules`（可选）记录每个文件的 category 和 fillStrategy，供 dedup 阶段参考
+- `commonClasses` 只记录 scaffold 完整生成的模块文件
+- `commonModules`（可选）记录每个文件的 category
 
 **所有公共模块必须遵循注入的 Java 代码规约**（类注释、方法注释、常量命名、异常类命名等详见规约文档）。
 
@@ -310,7 +291,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 #### Step 7: 写入 scaffold.json
 
 组装符合 ScaffoldSchema 的 JSON，包含：
-- `projectRoot`：项目根目录
+- `projectRoot`：**必须使用 Runtime Context 中注入的 `projectRoot` 值**（格式为 `generated/{artifactId}`）
 - `structure`：目录列表和 pomXml 内容
 - `generated`：所有生成的文件清单（entities、mapperInterfaces、serviceShells、testShells、commonClasses）
 - `conventions`：从 plan.json 复制
@@ -327,8 +308,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 - [ ] 测试骨架方法签名与 ServiceImpl 公共方法一一对应
 - [ ] Java 文件可编译（包声明正确、import 齐全）
 - [ ] scaffold.json 的 generated 记录了所有已生成文件
-- [ ] 公共模块骨架（commonModules）包含所有 fillStrategy="dedup" 的空壳文件
-- [ ] 骨架文件的 TODO 标记格式正确：`// TODO: [scaffold] 此文件为骨架，由 dedup 阶段根据翻译结果填充实际内容`
+- [ ] 公共模块（commonModules）仅包含 scaffold 完整生成的模块，无空壳或 TODO 骨架
 
 ---
 
@@ -355,7 +335,7 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 - 保留已有的非增量模块（不重新抽取不涉及的包）
 - 更新 dedup.json 时合并：替换涉及的包的 packageChanges，保留不涉及的部分
 - 如果已有 dedup.json，在其基础上更新而非从头生成
-- scaffold 阶段已生成的骨架文件（fillStrategy="dedup"）仍需保留，只更新内容
+- scaffold 阶段不再生成骨架文件，公共模块全部由 dedup 从零创建
 
 ### 输出
 
@@ -396,10 +376,10 @@ plan 和 scaffold 都是 `condition: "always"` 阶段，result 固定传 `"passe
 #### Step 4: 创建公共模块
 
 对每个决定抽取的重复组：
-1. 在对应的公共目录下创建新文件（util/, dto/common/, constants/, exception/）
+1. 在对应的公共目录下**从零创建**新文件（util/, dto/common/, constants/, exception/）— scaffold 不再生成骨架，dedup 负责创建完整文件
 2. 确保新文件遵循 Java 代码规约（命名、注释、格式）
 3. 所有 Javadoc 使用中文注释
-4. 如果 scaffold 阶段已生成对应的骨架文件（fillStrategy="dedup"），在骨架基础上填充实际内容
+4. 公共模块必须包含完整实现，不允许出现 `// TODO` 空方法
 
 #### Step 5: 更新各包引用
 

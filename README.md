@@ -34,10 +34,10 @@
                                                 │       │             ↓ (failed)   ↓ (failed)
                                                 │       │             fix ←────────┘
                                                 │       │             │
-                                                └───────┘             └→ fix → dedup → review（增量回到触发阶段）
+                                                └───────┘             └→ fix → review（增量回到触发阶段）
 ```
 
-**单流水线**：8 个阶段 + 1 个条件分支阶段（fix），一个 runId，无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。fix 完成后经 dedup 重新去重再审查，确保 dedup.json 与翻译结果一致。启动前可选执行 Schema 预获取（发现 `db.xml` 时自动连接数据库拉取 DDL）。
+**单流水线**：8 个阶段 + 1 个条件分支阶段（fix），一个 runId，无条件前进 + review/verify 失败时进入 fix 循环（增量重做）。fix 完成后直接回到 review 审查，dedup 只在主线 translate 后执行一次。启动前可选执行 Schema 预获取（发现 `db.xml` 时自动连接数据库拉取 DDL）。
 
 ## 项目结构
 
@@ -106,7 +106,7 @@ sql2java-workflow/
 ### 条件分支
 
 - **无条件前进**：inventory → analyze → plan → scaffold → translate → dedup → review → verify → 完成
-- **fix 循环**：review/verify failed → fix → dedup → review → verify（fix 修改翻译后重新去重再审查）
+- **fix 循环**：review/verify failed → fix → review → verify（fix 修改翻译后直接回到 review 审查）
 - **exhausted 策略**：globalMax=3, phaseMax=2, 任一达限 → `completed_with_issues`
 
 ## 设计决策
@@ -142,6 +142,66 @@ sql2java-workflow/
 /sql2java --status                            # 查看工作流状态
 /sql2java --resume                            # 断点续传
 /sql2java --phases plan,scaffold <path>       # 指定阶段执行
+```
+
+## 后台运行长程任务
+
+sql2java 工作流涉及多个阶段，完整转译耗时较长。可通过 opencode 的非交互模式在后台无人值守运行。
+
+### 前置条件
+
+- 使用 `--dangerously-skip-permissions` 自动批准权限（包括 plan 阶段的 confirm）
+- 配合 `--resume` 可在 LLM 上下文溢出或中断后断点续传
+
+### 方案一：nohup 后台直接运行
+
+```bash
+nohup opencode run "/sql2java /path/to/plsql" \
+  --dangerously-skip-permissions \
+  --format json \
+  -m zai-coding-plan/glm-5.1 \
+  > sql2java-output.json 2>&1 &
+```
+
+### 方案二：headless 服务 + 挂载执行
+
+```bash
+# 启动后台服务
+opencode serve --port 4096 &
+
+# 挂载到服务上执行
+opencode run "/sql2java /path/to/plsql" \
+  --attach http://localhost:4096 \
+  --dangerously-skip-permissions \
+  --format json \
+  -m zai-coding-plan/glm-5.1
+```
+
+### 方案三：断点续传（中断后恢复）
+
+```bash
+nohup opencode run "/sql2java --resume" \
+  --dangerously-skip-permissions \
+  --format json \
+  -m zai-coding-plan/glm-5.1 \
+  >> sql2java-output.json 2>&1 &
+```
+
+### 参数说明
+
+| 参数 | 说明 |
+|------|------|
+| `run "message"` | 非交互模式，处理完 prompt 后退出 |
+| `--format json` | 原始 JSON 事件流输出（适合脚本解析）；`default` 为可读文本 |
+| `--dangerously-skip-permissions` | 自动批准所有权限，无需人工确认 |
+| `-m zai-coding-plan/glm-5.1` | 指定模型（可用 `opencode models` 查看全部可用模型） |
+| `--attach <url>` | 连接到已运行的 headless 服务 |
+
+### 查看可用模型
+
+```bash
+opencode models                  # 列出所有
+opencode models zai-coding-plan  # 只看 z.ai 模型
 ```
 
 ## Artifact 存储

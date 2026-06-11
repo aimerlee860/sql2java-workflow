@@ -106,8 +106,8 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     // ── verify 分支 ──
     { from: "verify",     condition: "passed",  to: "__done__" },
     { from: "verify",     condition: "failed",  to: "fix" },
-    // ── fix 回环：fix → dedup → review → verify ──
-    { from: "fix",        condition: "always",  to: "dedup" },
+    // ── fix 回环：fix → review → verify ──
+    { from: "fix",        condition: "always",  to: "review" },
   ],
 }
 
@@ -162,7 +162,7 @@ export const PHASE_PREREQUISITES: Record<string, PrerequisiteItem[]> = {
   scaffold: ["plan.json", "inventory-index.json", "inventory.json", "inventory-packages"],
   translate: ["inventory-index.json", "inventory.json", "inventory-packages", "analysis.json", "analysis-packages", "plan.json", "scaffold.json"],
   dedup: ["inventory.json", "plan.json", "scaffold.json", "analysis.json", "translations"],
-  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages", "dedup.json"],
+  review: ["plan.json", "scaffold.json", "analysis.json", "analysis-packages"],
   verify: ["plan.json", "scaffold.json", "dedup.json"],
   fix: [
     "analysis.json", "analysis-packages", "plan.json", "scaffold.json", "dedup.json",

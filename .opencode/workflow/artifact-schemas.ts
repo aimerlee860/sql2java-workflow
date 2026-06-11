@@ -318,19 +318,18 @@ export const ScaffoldSchema = z.object({
       oraclePackage: z.string(),
       testClass: z.string(),
     })).optional(),
-    // TODO (F8): commonClasses {file, purpose} 和 commonModules.classes {file, purpose, category, fillStrategy}
-    // 结构重叠。考虑统一为单一数组（category/fillStrategy 可选），避免消费者需检查两个数组。
+    // TODO (F8): commonClasses {file, purpose} 和 commonModules.classes {file, purpose, category}
+    // 结构重叠。考虑统一为单一数组（category 可选），避免消费者需检查两个数组。
     commonClasses: z.array(z.object({
       file: z.string(),
       purpose: z.string(),
     })),
-    /** 公共模块骨架（细粒度分类 + 填充策略） */
+    /** 公共模块（细粒度分类） */
     commonModules: z.object({
       classes: z.array(z.object({
         file: z.string(),
         purpose: z.string(),
         category: ModuleCategorySchema,
-        fillStrategy: z.enum(["scaffold", "dedup"]),
       })),
       directories: z.array(z.string()),
     }).optional(),

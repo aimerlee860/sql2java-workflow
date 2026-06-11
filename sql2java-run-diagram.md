@@ -336,12 +336,12 @@ LLM **以 java-architect 身份执行 plan 阶段**的工作：
   - 包名必须存在于 inventory 中（`extractPackageNames` 双格式兼容）
   - `fixedPackages` 必须覆盖所有失败包
   - 校验失败 → rejected，LLM 需修正后重新 advance
-- **D3/D7 增量回环**：fix passed 后，创建触发阶段的新 entry：
+- **D3/D7 增量回环**：fix passed 后，创建 review 阶段的新 entry：
   ```
-  { phase: "review" (或 "verify"), status: "in_progress",
+  { phase: "review", status: "in_progress",
     incrementalContext: { targetPackages: ["PKG_ORDER", "PKG_PAYMENT"] } }
   ```
-  → 回到触发阶段，**只重新处理修复过的包**（增量模式）
+  → 回到 review，**只重新处理修复过的包**（增量模式）
 - **D14 文件名映射**：`getArtifactFilename` 确保 fix → `fix.json` 的正确映射
 
 ### fix 失败处理
