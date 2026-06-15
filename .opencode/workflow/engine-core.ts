@@ -831,9 +831,16 @@ export class WorkflowEngine {
         const summary = this.loadArtifactJson(artifactsDir, "review-summary")
         if (!summary) break
 
+        // 增量模式：只检查目标包
+        const reviewEntry = this.findCurrentEntry(run)
+        const reviewTargetPkgs = reviewEntry?.incrementalContext?.targetPackages
+        const reviewPkgsToCheck = reviewTargetPkgs?.length ? new Set(reviewTargetPkgs.map(p => p.toUpperCase())) : null
+
         // G3: per-package score check
         const packageResults = (summary.packageResults as Array<{ packageName: string; passed: boolean; score: number }>) ?? []
         for (const pr of packageResults) {
+          // 增量模式下跳过非目标包
+          if (reviewPkgsToCheck && !reviewPkgsToCheck.has(pr.packageName.toUpperCase())) continue
           if (pr.passed && pr.score < QUALITY_GATE_THRESHOLDS.REVIEW_PASS_SCORE) {
             findings.push({
               message: `${pr.packageName}: review passed=true 但 score=${pr.score} 低于阈值 ${QUALITY_GATE_THRESHOLDS.REVIEW_PASS_SCORE}。低分不应通过审查，请补充审查或修正评分`,
