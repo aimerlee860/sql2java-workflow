@@ -13,6 +13,7 @@ import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSy
 import { join, dirname, resolve, sep } from "node:path"
 import { safeWriteFile } from "../workflow/cross-platform"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
+import { enhanceRejection } from "../workflow/rejection-guidance"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
 import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-definitions"
 import {
@@ -1141,12 +1142,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             if (statusBefore && statusBefore.status === "running" && !isFixFailed) {
               const validationError = validateArtifactOnDisk(statusBefore)
               if (validationError) {
+                const enhancedError = enhanceRejection(statusBefore.currentPhase, validationError)
                 return {
                   title: "Validation Failed",
-                  output: validationError,
+                  output: enhancedError,
                   metadata: {
                     rejected: true,
-                    rejectionReason: validationError,
+                    rejectionReason: enhancedError,
                   },
                 }
               }
@@ -1158,7 +1160,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const completedPhase = statusBefore?.currentPhase ?? ""
             getLogger().info("[advance]", `阶段 ${completedPhase} 请求 advance, result=${args.result ?? "auto"}`)
 
-            const adv = engine.advance(runId, { result: args.result })
+            const adv = engine.advance(runId, { result: args.result, acceptWarnings: args.acceptWarnings })
 
             // ── Metrics: finalize 当前 collector（仅当阶段成功完成时） ──
             // try-catch 保护：engine.advance() 已提交状态，metrics I/O 失败不应阻断流程
@@ -1243,12 +1245,25 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
 
             if (adv.rejected) {
+              // 路径 B：warning pending → LLM 需显式确认（修好 / acceptWarnings）
+              if (adv.warningPending) {
+                const warnings = adv.crossSchemaWarnings ?? []
+                return {
+                  title: "Warnings Pending",
+                  output: `⚠️ 跨 Schema 校验发现以下警告，请选择处理方式：\n\n` +
+                    warnings.map(w => `  - ${w}`).join("\n") +
+                    `\n\n1. 修正问题后重新 advance\n2. 接受风险并继续：workflow({ action: "advance", runId: "${runId}", acceptWarnings: true })`,
+                  metadata: { rejected: true, warningPending: true, crossSchemaWarnings: warnings },
+                }
+              }
+              // 路径 A：blocking 拒绝 → LLM 必须修好
               // 不清理 workflowContext：LLM 应修正 artifact 后重新 advance，当前 phase context 仍有效
               // activeCollector 保持活跃，继续累计
               getLogger().warn("[advance]", `阶段 ${completedPhase} advance 被拒绝: ${adv.rejectionReason}`)
+              const enhancedError = enhanceRejection(completedPhase, adv.rejectionReason!)
               return {
                 title: "Rejected",
-                output: adv.rejectionReason!,
+                output: enhancedError,
                 metadata: { rejected: true },
               }
             }
@@ -1274,10 +1289,15 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const duration = phaseMetrics?.wallDurationMs != null ? formatDuration(phaseMetrics.wallDurationMs) : undefined
             const endBanner = formatPhaseEndBanner(completedPhase, duration)
             const startBanner = formatPhaseStartBanner(adv.run.currentPhase)
+            let advanceOutput = `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}\n\n📌 调用 todowrite 更新进度：${completedPhase}→completed，${adv.run.currentPhase}→in_progress`
+            // 路径 C：已确认的 warning 追加提醒
+            if (adv.crossSchemaWarnings && adv.crossSchemaWarnings.length > 0) {
+              advanceOutput += `\n\nℹ️ 已确认的跨 Schema 警告：\n${adv.crossSchemaWarnings.map(w => `  - ${w}`).join("\n")}`
+            }
             return {
               title: `→ ${adv.run.currentPhase}`,
-              output: `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}\n\n📌 调用 todowrite 更新进度：${completedPhase}→completed，${adv.run.currentPhase}→in_progress`,
-              metadata: { runId, phase: adv.run.currentPhase, reportPath: phaseReportText ? join(ARTIFACT_DIR, runId, "reports", `${completedPhase || "unknown"}-report.txt`) : undefined },
+              output: advanceOutput,
+              metadata: { runId, phase: adv.run.currentPhase, crossSchemaWarnings: adv.crossSchemaWarnings, reportPath: phaseReportText ? join(ARTIFACT_DIR, runId, "reports", `${completedPhase || "unknown"}-report.txt`) : undefined },
             }
           }
 
