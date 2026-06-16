@@ -112,7 +112,7 @@ permission:
 ### 输出
 
 - **per-package artifact**：`${artifactsDir}/translations/{package}/translation.json`
-- **Java 文件**：写入 scaffold 指定的项目目录
+- **Java 文件**：写入 Runtime Context 中 `projectRoot` 指定的目录（绝对路径，与 scaffold 阶段使用同一个目录）
 
 ### 工作步骤
 
@@ -218,7 +218,7 @@ permission:
 
 **每翻译完一个包**，立即写入：
 - `${artifactsDir}/translations/{package}/translation.json` — 符合 TranslationSchema
-- 对应的 Java 文件到项目目录
+- 对应的 Java 文件到 Runtime Context 中 `projectRoot` 指定的目录（绝对路径）
 
 translation.json 包含：
 - `packageName`：Oracle 包名
@@ -279,7 +279,7 @@ translation.json 包含：
 
 ### 输出
 
-- **更新 Java 文件**：修复后的代码覆盖原文件
+- **更新 Java 文件**：修复后的代码覆盖原文件（路径基于 `projectRoot`，如 `{projectRoot}/src/main/java/...`）
 - **更新 translation.json**：对应的包翻译记录
 - **fix artifact**：`${artifactsDir}/fix.json` — 符合 FixArtifactSchema
 
@@ -294,7 +294,7 @@ translation.json 包含：
 #### Step 2: 逐包修复
 
 对每个 mustFix 项：
-1. 定位到具体 Java 文件和行号
+1. 定位到具体 Java 文件和行号（文件路径基于 `projectRoot`，如 `{projectRoot}/src/main/java/...`）
 2. 对照 `analysis-packages/{pkg}.json` 的子程序结构和源码理解问题
 3. 按五原则修复（如果 mustFix 项涉及测试文件，同样修复测试代码）
 4. 更新对应的 translation.json

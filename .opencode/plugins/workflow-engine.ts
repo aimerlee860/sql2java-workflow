@@ -460,7 +460,8 @@ function buildSharedInstructions(run: WorkflowRun): string {
 
 ### Artifact 写入规则
 
-- 所有 artifact 使用 \`write\` 工具写入 \`\${artifactsDir}/\` 下的指定路径
+- **JSON artifact**（plan.json、scaffold.json、translation.json 等元数据文件）使用 \`write\` 工具写入 \`\${artifactsDir}/\` 下的指定路径
+- **Java 源文件**（.java、.xml、.yml、pom.xml 等）必须写入 Runtime Context 中 \`projectRoot\` 指定的目录（绝对路径），**绝不能**写入 \`\${artifactsDir}/\` 下
 - 写入前确保 JSON 格式合法（无尾逗号、引号闭合）
 - 逐包持久化：每处理完一个包立即写入 per-package artifact，避免中途崩溃丢失
 - 写入后不需要读回验证（引擎 advance 时会做 Zod 校验）
@@ -665,8 +666,9 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
       }
 
       // scaffold 阶段：校验 projectRoot 必须指向项目根目录下的 generated/{artifactId}
+      // 并校验 Java 文件实际写入了 projectRoot 而非 artifactsDir/translations/
       if (phase === "scaffold") {
-        const scaffoldData = parsed as { projectRoot: string }
+        const scaffoldData = parsed as { projectRoot: string; generated?: Record<string, unknown> }
         const planForRoot = engine.loadArtifactJson(artifactsDir, "plan")
         if (planForRoot) {
           const artifactId = (planForRoot.targetProject as { artifactId: string })?.artifactId
@@ -674,6 +676,15 @@ function validateArtifactOnDisk(run: WorkflowRun): string | null {
             const expectedRoot = join(resolveProjectRoot(), "generated", artifactId)
             if (scaffoldData.projectRoot !== expectedRoot) {
               return `scaffold.json projectRoot 必须是 "${expectedRoot}"，实际为 "${scaffoldData.projectRoot}"。请使用 Runtime Context 中注入的 projectRoot 值。`
+            }
+            // D14: 校验 pom.xml 实际存在于 projectRoot 下（而非 artifactsDir/translations/ 下）
+            const pomInProjectRoot = existsSync(join(expectedRoot, "pom.xml"))
+            const pomInArtifactsDir = existsSync(join(artifactsDir, "translations", artifactId, "pom.xml"))
+            if (!pomInProjectRoot && pomInArtifactsDir) {
+              return `scaffold 阶段 pom.xml 写入了错误位置 "${join(artifactsDir, "translations", artifactId)}"。Java 源文件必须写入 projectRoot="${expectedRoot}"，不能写入 artifactsDir/translations/。请将所有 Java 文件从 artifactsDir/translations/${artifactId}/ 移动到 ${expectedRoot}/。`
+            }
+            if (!pomInProjectRoot) {
+              return `scaffold 阶段未在 projectRoot="${expectedRoot}" 下找到 pom.xml。请确保 Java 源文件写入 Runtime Context 中注入的 projectRoot 目录。`
             }
           }
         }

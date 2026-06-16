@@ -34,8 +34,10 @@ permission:
 
 ### 本阶段特有写入规则
 
-- Java 源文件使用 `write` 工具写入 Runtime Context 中 `projectRoot` 指定的目录
+- **Java 源文件**（.java、.xml、.yml、pom.xml 等所有非 JSON 文件）必须写入 Runtime Context 中 `projectRoot` 指定的目录（绝对路径，如 `/path/to/generated/{artifactId}/`）
+- **JSON artifact**（scaffold.json）写入 `${artifactsDir}/scaffold.json`
 - `projectRoot` 是绝对路径，由引擎从 plan.json 自动计算并注入，**必须使用注入值，不要自行编造路径**
+- **绝不能**将 Java 源文件写入 `${artifactsDir}/translations/` 下——该目录是 translate 阶段用于 per-package translation.json 的，与 Java 源文件无关
 - **必须用 `write` 工具逐个写入文件**，不要只把代码输出在回复文本中
 
 ### 阶段完成
@@ -456,7 +458,7 @@ mybatis:
 ### 输出
 
 - **artifact 路径**：`${artifactsDir}/dedup.json`
-- **公共模块文件**：写入项目目录的公共模块包下（util/, dto/common/, constants/ 等）
+- **公共模块文件**：写入 Runtime Context 中 `projectRoot` 指定的目录的公共模块包下（util/, dto/common/, constants/ 等）
 - **修改的 Java 文件**：更新各包的引用
 
 ### 工作步骤
@@ -464,7 +466,7 @@ mybatis:
 #### Step 1: 读取所有包的翻译结果
 
 读取 `translations/*/translation.json`，获取每个包生成的文件列表。
-逐文件读取 Java 源码内容，建立全量代码索引。
+逐文件从 `projectRoot` 目录读取 Java 源码内容（路径如 `{projectRoot}/src/main/java/...`），建立全量代码索引。
 
 #### Step 2: 重复代码检测
 
@@ -492,7 +494,7 @@ mybatis:
 #### Step 4: 创建公共模块
 
 对每个决定抽取的重复组：
-1. 在对应的公共目录下**从零创建**新文件（util/, dto/common/, constants/, exception/）— scaffold 不再生成骨架，dedup 负责创建完整文件
+1. 在 `projectRoot` 下的对应公共目录中**从零创建**新文件（`{projectRoot}/src/main/java/.../util/`、`dto/common/`、`constants/`、`exception/`）— scaffold 不再生成骨架，dedup 负责创建完整文件
 2. 确保新文件遵循 Java 代码规约（命名、注释、格式）
 3. 所有 Javadoc 使用中文注释
 4. 公共模块必须包含完整实现，不允许出现 `// TODO` 空方法
@@ -500,7 +502,7 @@ mybatis:
 #### Step 5: 更新各包引用
 
 对每个受影响的包：
-1. 在 Java 文件中添加 import 语句
+1. 在 `projectRoot` 下的 Java 文件中添加 import 语句
 2. 移除被抽取的类/方法/常量定义
 3. 将调用改为使用公共模块
 4. 更新 `translations/{package}/translation.json` 的 `decisions` 字段，追加抽取决策记录

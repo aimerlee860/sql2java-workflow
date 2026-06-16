@@ -97,7 +97,7 @@ permission:
   - `${artifactsDir}/analysis.json` — 全局元数据
   - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构和翻译注意事项
   - `${artifactsDir}/translations/*/translation.json` — 翻译记录
-- **Java 文件**：scaffold 目录下的 Java 代码
+- **Java 文件**：Runtime Context 中 `projectRoot` 指定的目录下的 Java 代码（使用 `read` 工具读取，路径为 `{projectRoot}/src/...`）
 - **源码文件**：原始 PL/SQL 文件（对照审查）
 
 ### 输出
@@ -117,12 +117,12 @@ permission:
 对每个待审查的包：
 
 1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
-2. **逐子程序审查**：对每个子程序，按 20 类审查清单逐项检查
-3. **审查 ServiceImpl 测试代码**：读取测试类 Java 文件（`src/test/java/` 下对应的 `{ServiceImplClass}Test.java`）
+2. **逐子程序审查**：对每个子程序，按 20 类审查清单逐项检查。Java 文件路径基于 `projectRoot`（如 `{projectRoot}/src/main/java/...`）
+3. **审查 ServiceImpl 测试代码**：读取测试类 Java 文件（`{projectRoot}/src/test/java/` 下对应的 `{ServiceImplClass}Test.java`）
    - 按 test-completeness（#17）检查：无空方法体、无 `// TODO: [test]` 残留、arrange→act→assert 结构完整
    - 按 test-correctness（#18）检查：Mock 设置与 ServiceImpl 依赖一致、断言覆盖关键逻辑
    - 空 TODO 测试方法标记为 mustFix（severity: major）
-4. **审查 Mapper 集成测试代码**：读取 Mapper 集成测试文件（`src/test/java/` 下对应的 `{MapperName}IntegrationTest.java`）
+4. **审查 Mapper 集成测试代码**：读取 Mapper 集成测试文件（`{projectRoot}/src/test/java/` 下对应的 `{MapperName}IntegrationTest.java`）
    - 按 mapper-test-completeness（#19）检查：每个 Mapper XML statement 都有对应测试方法、无空方法体（`@Disabled` 除外）、无 `// TODO: [mapper-test]` 残留、arrange→act→assert 结构完整
    - 按 mapper-test-correctness（#20）检查：测试数据 INSERT 与 `schema-h2.sql` 表结构一致、`@MybatisTest` + `@AutoConfigureTestDatabase` 配置正确、H2 不兼容 SQL 已标 `@Disabled`、测试数据使用硬编码 ID
    - 空 TODO 测试方法标记为 mustFix（severity: major）
@@ -184,7 +184,7 @@ permission:
   - `${artifactsDir}/plan.json` — 映射规则
   - `${artifactsDir}/scaffold.json` — 项目结构
   - `${artifactsDir}/translations/*/translation.json` — 翻译记录
-- **Java 文件**：scaffold 目录下的 Java 代码
+- **Java 文件**：Runtime Context 中 `projectRoot` 指定的目录下的 Java 代码（编译验证使用 `cd ${projectRoot} && mvn compile`）
 
 ### 输出
 
