@@ -1995,8 +1995,6 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
     }),
   },
 
-  },
-
   // ── Hook: tool.execute.after — 大输出截断 ──
   "tool.execute.after": async (input: any, output: any) => {
     if (
