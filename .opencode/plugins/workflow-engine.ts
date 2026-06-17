@@ -157,6 +157,9 @@ function clearWorkflowContext(): void {
   activeCollector = null
   _cachedJavaCodeSpec = null
   _cachedSpecMtime = null
+  _cachedUserSpec = null
+  _cachedUserSpecMtime = null
+  _cachedUserSpecPath = null
   destroyLogger()
 }
 
@@ -183,6 +186,240 @@ function readJavaCodeSpec(): string {
   } catch {
     getLogger().warn("[workflow-engine]", `Java 代码规约文件未找到或不可读: ${specPath}`)
     return ""
+  }
+}
+
+// ── 用户自定义规约（--spec）解析与合并 ──
+
+/** 解析 Markdown 文本为 ## 标题级别的章节 Map。
+ *  - 键：章节标题（去掉 `## ` 前缀后的文本）
+ *  - 值：章节正文（不含标题行本身）
+ *  - 首个 ## 之前的内容存为 `__preamble__`
+ *  - ### 及更深层标题保留在章节正文中，不作为章节边界
+ */
+function parseMarkdownSections(text: string): Map<string, string> {
+  const sections = new Map<string, string>()
+  const lines = text.split("\n")
+  let currentTitle = "__preamble__"
+  let currentBody: string[] = []
+
+  for (const line of lines) {
+    if (/^## (?!#)/.test(line)) {
+      // 保存上一个章节
+      if (currentBody.length > 0 || currentTitle !== "__preamble__") {
+        sections.set(currentTitle, currentBody.join("\n").trim())
+      }
+      currentTitle = line.replace(/^## /, "").trim()
+      currentBody = []
+    } else {
+      currentBody.push(line)
+    }
+  }
+  // 保存最后一个章节
+  if (currentBody.length > 0 || currentTitle !== "__preamble__") {
+    sections.set(currentTitle, currentBody.join("\n").trim())
+  }
+  return sections
+}
+
+/** 合并内置规范与用户规范：用户章节覆盖同名内置章节，独有章节追加到末尾。
+ *  - 精确标题匹配（区分大小写）：用户需复制内置标题才能覆盖
+ *  - 不匹配的用户章节追加到末尾（保留用户文件中的顺序）
+ *  - 用户未覆盖的内置章节保留原样
+ */
+function mergeSpecSections(
+  builtIn: Map<string, string>,
+  user: Map<string, string>,
+): string {
+  const parts: string[] = []
+
+  // Preamble: 用户覆盖内置
+  const userPreamble = user.get("__preamble__")
+  const builtInPreamble = builtIn.get("__preamble__")
+  if (userPreamble) {
+    parts.push(userPreamble)
+  } else if (builtInPreamble) {
+    parts.push(builtInPreamble)
+  }
+
+  // 内置章节（保留原始顺序），用户同名章节覆盖
+  for (const [title, body] of builtIn) {
+    if (title === "__preamble__") continue
+    const sectionBody = user.has(title) ? user.get(title)! : body
+    parts.push(`## ${title}\n\n${sectionBody}`)
+  }
+
+  // 用户独有章节（内置中不存在的），追加到末尾
+  for (const [title, body] of user) {
+    if (title === "__preamble__") continue
+    if (!builtIn.has(title)) {
+      parts.push(`## ${title}\n\n${body}`)
+    }
+  }
+
+  return parts.join("\n\n")
+}
+
+/** 目录结构章节标题匹配模式 */
+const STRUCTURE_SECTION_PATTERN = /^(工程结构|目录结构|Project Structure|Directory Structure)$/
+
+/** 从规范章节中提取目录结构路径列表。
+ *  查找标题匹配 `工程结构`/`目录结构`/`Project Structure`/`Directory Structure` 的章节，
+ *  对其正文调用 parseStructureText() 解析目录路径。
+ */
+function extractStructureFromSpec(sections: Map<string, string>): string[] | null {
+  for (const [title, body] of sections) {
+    if (STRUCTURE_SECTION_PATTERN.test(title)) {
+      const paths = parseStructureText(body)
+      if (paths.length > 0) return paths
+    }
+  }
+  return null
+}
+
+/** 用户自定义规约加载结果 */
+interface UserSpecResult {
+  rawMarkdown: string
+  sections: Map<string, string>
+  projectStructure: string[] | null
+  sourcePath: string
+}
+
+/** 缓存的用户规约 + mtime */
+let _cachedUserSpec: UserSpecResult | null = null
+let _cachedUserSpecMtime: number | null = null
+let _cachedUserSpecPath: string | null = null
+
+/** 加载用户自定义规约文件（--spec 参数）。
+ *  优先级：1) specConf 指定路径  2) sourcePath/project-spec.md  3) sourcePath/project-structure.md（旧格式）
+ *
+ *  旧格式检测：project-structure.md 无 ## 标题时，退化为纯目录结构文件。
+ */
+function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | null {
+  let filePath: string | null = null
+
+  // 优先级 1: CLI --spec 参数指定（必须存在，否则报错）
+  if (specConf) {
+    if (!existsSync(specConf)) {
+      throw new Error(`--spec 指定的文件不存在: ${specConf}`)
+    }
+    filePath = specConf
+  }
+  // 优先级 2: project-spec.md 自动发现
+  else if (sourcePath) {
+    const newAutoPath = join(sourcePath, "project-spec.md")
+    if (existsSync(newAutoPath)) {
+      filePath = newAutoPath
+    } else {
+      // 优先级 3: project-structure.md 旧格式自动发现
+      const legacyPath = join(sourcePath, "project-structure.md")
+      if (existsSync(legacyPath)) {
+        filePath = legacyPath
+      }
+    }
+  }
+
+  if (!filePath) return null
+
+  try {
+    if (!existsSync(filePath)) {
+      // 文件在运行期间被删除（start 时存在，system.transform 时已不存在）
+      getLogger().warn("[workflow-engine]", `用户规范文件已不存在: ${filePath}，回退到内置规约`)
+      return null
+    }
+    const stat = statSync(filePath)
+    const mtime = stat.mtimeMs
+    if (_cachedUserSpec && _cachedUserSpecPath === filePath && _cachedUserSpecMtime === mtime) {
+      return _cachedUserSpec
+    }
+
+    const rawMarkdown = readFileSync(filePath, "utf-8").trim()
+
+    // 无 ## 标题的文件处理
+    const hasHeadings = /^## /m.test(rawMarkdown)
+    if (!hasHeadings) {
+      // 旧格式 project-structure.md：纯目录结构文件，无章节
+      if (filePath.endsWith("project-structure.md")) {
+        const paths = parseStructureText(rawMarkdown)
+        const result: UserSpecResult = {
+          rawMarkdown,
+          sections: new Map(),
+          projectStructure: paths.length > 0 ? paths : null,
+          sourcePath: filePath,
+        }
+        _cachedUserSpec = result
+        _cachedUserSpecMtime = mtime
+        _cachedUserSpecPath = filePath
+        getLogger().info("[workflow-engine]", `加载传统格式结构定义: ${filePath} (${paths.length} 个路径，建议迁移到 project-spec.md)`)
+        return result
+      }
+      // 其他无标题文件：先尝试解析为目录结构，否则包装为单个章节
+      const paths = parseStructureText(rawMarkdown)
+      if (paths.length > 0) {
+        const result: UserSpecResult = {
+          rawMarkdown,
+          sections: new Map(),
+          projectStructure: paths,
+          sourcePath: filePath,
+        }
+        _cachedUserSpec = result
+        _cachedUserSpecMtime = mtime
+        _cachedUserSpecPath = filePath
+        getLogger().info("[workflow-engine]", `加载无标题结构定义: ${filePath} (${paths.length} 个路径)`)
+        return result
+      }
+      // 纯文本规约：包装为"用户自定义规约"章节，避免内容丢失到 preamble
+      const wrappedSections = new Map<string, string>()
+      wrappedSections.set("用户自定义规约", rawMarkdown)
+      const result: UserSpecResult = {
+        rawMarkdown,
+        sections: wrappedSections,
+        projectStructure: null,
+        sourcePath: filePath,
+      }
+      _cachedUserSpec = result
+      _cachedUserSpecMtime = mtime
+      _cachedUserSpecPath = filePath
+      getLogger().info("[workflow-engine]", `加载无标题规约文件: ${filePath}（已包装为"用户自定义规约"章节）`)
+      return result
+    }
+
+    // 新格式：按 ## 章节解析
+    const sections = parseMarkdownSections(rawMarkdown)
+    const projectStructure = extractStructureFromSpec(sections)
+
+    // 检测近似标题重叠：用户可能想覆盖内置章节但标题不完全匹配
+    const builtInSections = parseMarkdownSections(readJavaCodeSpec())
+    for (const [userTitle] of sections) {
+      if (userTitle === "__preamble__") continue
+      for (const [builtInTitle] of builtInSections) {
+        if (builtInTitle === "__preamble__") continue
+        if (userTitle !== builtInTitle && (
+          builtInTitle.includes(userTitle) || userTitle.includes(builtInTitle)
+        )) {
+          getLogger().warn("[workflow-engine]",
+            `用户规约章节 "${userTitle}" 与内置章节 "${builtInTitle}" 标题不完全匹配，将作为新章节追加而非覆盖。如需覆盖，请使用精确标题。`)
+        }
+      }
+    }
+
+    const result: UserSpecResult = {
+      rawMarkdown,
+      sections,
+      projectStructure,
+      sourcePath: filePath,
+    }
+    _cachedUserSpec = result
+    _cachedUserSpecMtime = mtime
+    _cachedUserSpecPath = filePath
+
+    getLogger().info("[workflow-engine]",
+      `加载用户规范: ${filePath} (${sections.size} 个章节, ${projectStructure?.length ?? 0} 个结构路径)`)
+    return result
+  } catch (e: any) {
+    if (e.message.startsWith("--spec")) throw e
+    getLogger().warn("[workflow-engine]", `无法加载用户规范文件 ${filePath}: ${e.message}`)
+    return null
   }
 }
 
@@ -292,48 +529,6 @@ function parseFlatFormat(lines: string[]): string[] {
   return lines
     .map(l => l.trim().replace(/\/+$/, ""))
     .filter(l => l.length > 0)
-}
-
-/**
- * 加载项目目录结构定义。
- * 优先级：1) structureConf 指定路径  2) sourcePath/project-structure.md 自动发现  3) null（用默认）
- *
- * 当 structureConf 显式指定但文件不存在时，抛出 Error（用户应知道指定的路径无效）。
- * 其他情况（自动发现失败、解析失败）返回 null，不阻塞流程。
- */
-function loadProjectStructure(structureConf?: string, sourcePath?: string): string[] | null {
-  let filePath: string | null = null
-
-  // 优先级 1: CLI 参数指定（必须存在，否则报错）
-  if (structureConf) {
-    if (!existsSync(structureConf)) {
-      throw new Error(`--structure 指定的文件不存在: ${structureConf}`)
-    }
-    filePath = structureConf
-  }
-  // 优先级 2: 自动发现
-  else if (sourcePath) {
-    const autoPath = join(sourcePath, "project-structure.md")
-    if (!existsSync(autoPath)) return null
-    filePath = autoPath
-  }
-
-  if (!filePath) return null
-
-  try {
-    const raw = readFileSync(filePath, "utf-8")
-    const paths = parseStructureText(raw)
-    if (paths.length === 0) {
-      getLogger().warn("[workflow-engine]", `结构定义文件解析结果为空: ${filePath}`)
-      return null
-    }
-    getLogger().info("[workflow-engine]", `加载项目结构定义: ${filePath} (${paths.length} 个路径)`)
-    return paths
-  } catch (e: any) {
-    if (e.message.startsWith("--structure")) throw e // 重新抛出上面的显式错误
-    getLogger().warn("[workflow-engine]", `无法加载结构定义文件 ${filePath}: ${e.message}`)
-    return null
-  }
 }
 
 /** 提取 agent .md 通用部分（文件头到第一个 ## Phase: 之前） */
@@ -455,7 +650,7 @@ function buildSharedInstructions(run: WorkflowRun): string {
 | \`artifactsDir\` | artifact 输出目录 | 读取上游 artifact / 写入产出 |
 | \`upstreamArtifacts\` | 上游 artifact 路径列表 | 当前阶段需要读取的文件 |
 | \`incrementalContext\` | 增量模式上下文（可选） | fix 后增量处理时传入 targetPackages |
-| \`projectStructure\` | 自定义目录结构路径列表（可选） | scaffold 阶段使用自定义目录布局替代默认模板 |
+| \`projectStructure\` | 自定义目录结构路径列表（可选，由 --spec 提取） | scaffold 阶段使用自定义目录布局替代默认模板 |
 | \`projectRoot\` | Java 项目输出根目录（绝对路径，scaffold 及之后阶段，可选） | scaffold 写入 Java 文件到此目录，后续阶段从此目录读取 |
 
 ### Artifact 写入规则
@@ -1232,7 +1427,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         result: zFn.enum(["passed", "failed"]).optional(),
         phases: zFn.string().optional(),        // --phases 用
         dbConf: zFn.string().optional(),        // --db_conf 用
-        structureConf: zFn.string().optional(), // --structure 用
+        specConf: zFn.string().optional(),      // --spec 用
       },
       execute: async (args: any, context: any) => {
         // ── Worker 编排工具拦截（L1 防线）──
@@ -1258,12 +1453,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const runId = args.runId ?? `run-${Date.now()}`
             initLogger(runId)
 
-            // 加载自定义项目目录结构
-            let projectStructure: string[] | null = null
+            // 加载用户自定义规约（--spec）
+            let userSpecResult: UserSpecResult | null = null
             try {
-              projectStructure = args.sourcePath
-                ? loadProjectStructure(args.structureConf, args.sourcePath)
-                : null
+              userSpecResult = loadUserSpec(args.specConf, args.sourcePath)
             } catch (e: any) {
               return {
                 title: "Error",
@@ -1273,7 +1466,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
             const metadata: Record<string, unknown> = {}
             if (args.sourcePath) metadata.sourcePath = args.sourcePath
-            if (projectStructure) metadata.projectStructure = projectStructure
+            if (userSpecResult?.projectStructure) metadata.projectStructure = userSpecResult.projectStructure
+            if (userSpecResult?.sourcePath) metadata.userSpecPath = userSpecResult.sourcePath
 
             // 尝试从磁盘恢复已有 run
             try {
@@ -2397,10 +2591,31 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         // 仅对白名单中的 agent 注入代码规约
         const needsJavaSpec = JAVA_SPEC_AGENTS.some(a => currentWorkflowContext.agentFile.includes(a))
         const rawSpec = needsJavaSpec ? readJavaCodeSpec() : ""
-        // 规约缺失时注入显眼警告，避免 agent 在不知情下产出无规约代码
-        const javaCodeSpec = rawSpec || (needsJavaSpec
-          ? "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/docs/java-code-spec.md**\n"
-          : "")
+        // 合并用户自定义规约（--spec）：用户章节覆盖同名内置章节，独有章节追加
+        let javaCodeSpec: string
+        if (needsJavaSpec && rawSpec) {
+          const userSpecPath = (run?.metadata as Record<string, unknown>)?.userSpecPath as string | undefined
+          if (userSpecPath) {
+            try {
+              const userSpec = loadUserSpec(userSpecPath, undefined)
+              if (userSpec && userSpec.sections.size > 0) {
+                javaCodeSpec = mergeSpecSections(parseMarkdownSections(rawSpec), userSpec.sections)
+              } else {
+                javaCodeSpec = rawSpec
+              }
+            } catch (e: any) {
+              getLogger().warn("[workflow-engine]", `合并用户规约失败，回退到内置规约: ${e.message}`)
+              javaCodeSpec = rawSpec
+            }
+          } else {
+            javaCodeSpec = rawSpec
+          }
+        } else if (needsJavaSpec) {
+          // 规约缺失时注入显眼警告，避免 agent 在不知情下产出无规约代码
+          javaCodeSpec = "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/docs/java-code-spec.md**\n"
+        } else {
+          javaCodeSpec = ""
+        }
         // D13 已迁至 dispatch workOrder — schema hint 不再注入 system prompt（单一来源原则）
         const parts = [
           common,

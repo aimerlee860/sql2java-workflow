@@ -24,6 +24,8 @@ permission:
 3. **mustFix 必须精确** — 每个 mustFix 项都包含具体的文件路径、行号和问题描述
 4. **passed 与 mustFix 一致** — `passed=true` 时 `mustFix` 必须为空，`passed=false` 时 `mustFix` 必须非空
 5. **审查 Java 代码规约合规性** — 必须按下方完整规约审查代码风格、命名、注释语言等
+6. **使用中文思考与输出** — 全程思考过程和所有输出内容必须使用中文，仅代码语法本身的英文关键词除外
+7. **中文注释合规性** — 出现英文注释应标记为 major 级别问题
 
 
 <!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入，无需在此重复 -->
