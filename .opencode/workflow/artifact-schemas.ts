@@ -532,6 +532,10 @@ export const VerifySummarySchema = z.object({
   allPassed: z.boolean(),
   compilation: z.object({
     success: z.boolean(),
+    /** 编译是否因环境不可用（Maven/JDK 缺失）而跳过 */
+    skipped: z.boolean().optional(),
+    /** 跳过原因（skipped=true 时必填） */
+    skipReason: z.string().optional(),
     errors: z.array(z.object({
       file: z.string(),
       line: z.coerce.number(),
@@ -547,6 +551,8 @@ export const VerifySummarySchema = z.object({
   // 如需恢复旧数据兼容，改回 .optional() 并加 refine 保证至少一个存在
   testExecution: z.object({
     executed: z.boolean(),
+    /** 测试未执行的原因（如环境不可用），executed=false 时使用 */
+    skipReason: z.string().optional(),
     totalTests: z.coerce.number().nullable().optional(),
     passedTests: z.coerce.number().nullable().optional(),
     failedTests: z.coerce.number().nullable().optional(),
@@ -568,8 +574,8 @@ export const VerifySummarySchema = z.object({
   allPassedRefine.check,
   { message: allPassedRefine.message }
 ).refine(
-  data => data.compilation.success === true || data.compilation.errors !== undefined,
-  { message: "compilation.success=false 时 errors 必须存在（允许空数组）" }
+  data => data.compilation.success === true || data.compilation.skipped === true || data.compilation.errors !== undefined,
+  { message: "compilation.success=false 时 errors 必须存在（允许空数组），除非 skipped=true" }
 )
 
 // ============================================================================

@@ -247,7 +247,29 @@ permission:
 
 ### 工作步骤
 
+#### Step 0: 编译环境检测
+
+在执行任何编译/测试命令前，先检测 Maven 和 JDK 是否可用：
+
+```bash
+which mvn && mvn --version 2>&1
+which java && java -version 2>&1
+```
+
+**环境不可用时的处理**：
+- 如果 `mvn` 或 `java` 任一命令不在 PATH 中，**跳过编译和测试步骤**（Step 1 和 Step 4），**不要尝试安装**
+- 在 verify-summary.json 中标记：
+  - `compilation.skipped = true`，`compilation.skipReason = "Maven/JDK 未安装，编译验证已跳过"`
+  - `testExecution.executed = false`，`testExecution.skipReason = "Maven/JDK 未安装，测试执行已跳过"`
+  - `unresolvedIssues` 中添加 `{ packageName: "GLOBAL", issue: "编译环境不可用（Maven/JDK 未安装），编译验证和测试执行已跳过，请手动执行" }`
+- **继续执行 Step 2-3**（MyBatis XML 校验、编译错误归因、TODO 统计等不依赖编译工具的检查）
+- 编译跳过不阻止流程推进：如果所有非编译检查项通过，`allPassed` 仍可为 `true`，编译跳过作为未完成项提醒用户
+
+**环境可用时**：正常执行 Step 1-6。
+
 #### Step 1: 全局编译验证
+
+> ⚠️ 仅在 Step 0 检测到 Maven 和 JDK 均可用时执行。否则跳过此步骤。
 
 ```bash
 cd ${projectRoot} && mvn compile 2>&1
@@ -270,7 +292,7 @@ cd ${projectRoot} && mvn compile 2>&1
    - `h2SchemaValid`：`schema-h2.sql` 是否存在且 SQL 语法可被 H2 解析
    - `mapperTestConfigValid`：`application-test.yml` 是否正确配置 H2 数据源
 
-2. **编译错误归因**：将 mvn compile 的错误归因到具体包和文件，填入 per-package 的 `mustFix`
+2. **编译错误归因**：将 mvn compile 的错误归因到具体包和文件，填入 per-package 的 `mustFix`（编译跳过时此子步骤也跳过，mustFix 中不含编译错误项）
 
 3. **TODO 残留统计**：统计该包 Java 文件中 `// TODO: [translate]` 的数量
 
@@ -307,6 +329,8 @@ cd ${projectRoot} && mvn compile 2>&1
 
 #### Step 4: 执行测试
 
+> ⚠️ 仅在 Step 0 检测到 Maven 和 JDK 均可用时执行。否则跳过此步骤。
+
 运行 Maven 测试并收集结果：
 
 ```bash
@@ -335,9 +359,9 @@ cd ${projectRoot} && mvn test 2>&1
 
 全部包校完后（或增量模式下合并已有结果），写入顶层 summary：
 - `allPassed`：所有包是否都 passed
-- `compilation`：{ success, errors[] }
+- `compilation`：{ success, skipped?, skipReason?, errors[] }
 - `packageResults`：每个包的摘要（packageName, passed, mybatisValid）
-- `testExecution`：{ executed, totalTests, passedTests, failedTests, testErrors[], testFiles[] }
+- `testExecution`：{ executed, skipReason?, totalTests, passedTests, failedTests, testErrors[], testFiles[] }
 - `totalTodosRemaining`：所有包的 TODO 残留总数
 - `unresolvedIssues`：未解决的问题列表
 
@@ -348,6 +372,7 @@ cd ${projectRoot} && mvn test 2>&1
   "allPassed": false,
   "compilation": {
     "success": false,
+    "skipped": false,
     "errors": [
       { "file": "src/main/java/.../OrderServiceImpl.java", "line": 23, "message": "找不到符号 OrderDO" }
     ]
@@ -377,9 +402,40 @@ cd ${projectRoot} && mvn test 2>&1
 }
 ```
 
+**编译环境不可用时的示例**：
+
+```json
+{
+  "allPassed": true,
+  "compilation": {
+    "success": false,
+    "skipped": true,
+    "skipReason": "Maven/JDK 未安装，编译验证已跳过"
+  },
+  "packageResults": [
+    { "packageName": "PKG_ORDER", "passed": true, "mybatisValid": true },
+    { "packageName": "PKG_UTIL", "passed": true, "mybatisValid": true }
+  ],
+  "testExecution": {
+    "executed": false,
+    "skipReason": "Maven/JDK 未安装，测试执行已跳过",
+    "testFiles": [
+      "src/test/java/.../OrderServiceImplTest.java",
+      "src/test/java/.../OrderMapperIntegrationTest.java"
+    ]
+  },
+  "totalTodosRemaining": 3,
+  "unresolvedIssues": [
+    { "packageName": "GLOBAL", "issue": "编译环境不可用（Maven/JDK 未安装），编译验证和测试执行已跳过，请手动执行" }
+  ]
+}
+```
+
 **关键字段说明**：
-- `compilation.success=false` 时 `errors` **必须存在**（空数组 `[]` 也可通过）
+- `compilation.success=false` 时 `errors` **必须存在**（空数组 `[]` 也可通过），**除非** `compilation.skipped=true`
+- `compilation.skipped=true` 时 `errors` 可省略，`skipReason` 必填
 - `testExecution` 为必填字段
+- `testExecution.skipReason`：测试未执行的原因（环境不可用等），仅在 `executed=false` 时使用
 - `testErrors[].testType`：`"unit"`（ServiceImpl 单元测试）或 `"integration"`（Mapper 集成测试）
 - `testExecution.testFiles[]`：测试文件路径必须实际存在于磁盘
 - `unresolvedIssues`：可选字段
@@ -392,8 +448,13 @@ cd ${projectRoot} && mvn test 2>&1
 
 ### 质量检查
 
-- [ ] mvn compile 执行完成（无论成功失败）
-- [ ] mvn test 执行完成（无论成功失败）
+- [ ] Step 0 编译环境检测已执行（mvn/java 可用性）
+- [ ] 编译环境不可用时，compilation.skipped=true 且 skipReason 已填写
+- [ ] 编译环境不可用时，testExecution.executed=false 且 skipReason 已填写
+- [ ] 编译环境不可用时，unresolvedIssues 包含 GLOBAL 编译跳过提醒
+- [ ] 编译环境不可用时，MyBatis XML 校验等非编译检查仍正常执行
+- [ ] mvn compile 执行完成（无论成功失败，或因环境不可用已跳过）
+- [ ] mvn test 执行完成（无论成功失败，或因环境不可用已跳过）
 - [ ] 每个包的 verify.json 已写入
 - [ ] 编译错误正确归因到具体包和文件
 - [ ] passed=true 时 mustFix 为空，passed=false 时 mustFix 非空
