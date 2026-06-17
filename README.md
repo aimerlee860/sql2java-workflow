@@ -52,7 +52,7 @@ sql2java-workflow/
 │   │   ├── translator.md             # translate + fix 阶段
 │   │   └── reviewer.md               # review + verify 阶段
 │   ├── docs/
-│   │   └── java-code-spec.md         # 统一 Java 代码规约（自动注入 3 个 agent）
+│   │   └── java-code-spec.md         # 统一 Java 代码规约（自动注入 3 个 agent，支持 --spec 覆盖）
 │   ├── workflow/
 │   │   ├── engine-core.ts            # 状态机核心
 │   │   ├── workflow-definitions.ts   # 工作流定义 + TransitionRule + PHASE_PREREQUISITES
@@ -153,12 +153,14 @@ sql2java-workflow/
 | D21 | L3 质量门控 | 确定性数值门控：G1 翻译完成率≥0.8 / G3 review 分数≥70 / G6 测试通过率≥0.7 |
 | D22 | rejection guidance | 每阶段的拒绝引导，鼓励重做而非修补 JSON |
 | D23 | 跨平台文件操作 | atomicRename/safeRm/safeWriteFile 处理 Windows 文件锁定 |
+| D24 | 用户自定义规约 | `--spec` 参数指定 Markdown 规约文件，按 `##` 章节覆盖内置 java-code-spec.md 同名章节，独有章节追加；目录结构从"工程结构"章节提取 |
 
 ## 命令用法
 
 ```
 /sql2java <path>                              # 端到端全流程
 /sql2java --db_conf db.xml <path>             # 指定数据库配置文件
+/sql2java --spec project-spec.md <path>       # 指定用户自定义代码规约文件
 /sql2java --status                            # 查看工作流状态
 /sql2java --resume                            # 断点续传
 /sql2java --phases plan,scaffold <path>       # 指定阶段执行
@@ -314,6 +316,34 @@ opencode models zai-coding-plan  # 只看 z.ai 模型
 
 **严重级别**：违反【强制】规则 → major/critical，违反【推荐】→ minor/info。**出现英文注释标记为 major 级别问题。**
 
+### 用户自定义规约（--spec）
+
+通过 `--spec` 参数提供自定义规约文件，按 `##` 章节覆盖内置 `java-code-spec.md` 的同名章节：
+
+```markdown
+## 【强制】Java 版本与框架配置（唯一事实来源）
+
+- **Java 版本**: 17
+- **Spring Boot 版本**: 3.2.x
+
+## (一) 命名风格
+
+1. 【强制】方法名使用 snake_case（公司内部规范）
+
+## 工程结构
+
+src/main/java/{packageBase}/controller
+src/main/java/{packageBase}/service
+```
+
+**合并规则**：
+- 用户 `##` 标题与内置**精确匹配** → 覆盖该章节
+- 用户独有的 `##` 章节 → 追加到末尾
+- 用户未覆盖的内置章节 → 保留默认
+- `## 工程结构` 等目录结构章节 → 自动提取路径列表
+
+**文件发现优先级**：`--spec <path>` → `<sourcePath>/project-spec.md` → `<sourcePath>/project-structure.md`（旧格式，仅目录结构）
+
 ## Workflow Engine 核心方法
 
 | 方法 | 说明 |
@@ -356,7 +386,7 @@ opencode models zai-coding-plan  # 只看 z.ai 模型
 - **Schema 获取**：oracledb 7.x thin mode（可选依赖，有 db.xml 时自动启用）
 - **Schema 校验**：Zod ^3.23.0
 - **Agent 定义**：Markdown（按 `## Phase: xxx` 分节，位于 `.opencode/agent/`）
-- **代码规约**：`docs/java-code-spec.md`（自动注入 agent system prompt）
+- **代码规约**：`docs/java-code-spec.md`（自动注入 agent system prompt），支持 `--spec` 用户自定义覆盖
 - **LLM**：Claude API
 - **目标框架**：Spring Boot + MyBatis + Lombok + Maven
 
