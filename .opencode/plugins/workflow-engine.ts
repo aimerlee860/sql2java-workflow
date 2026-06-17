@@ -49,6 +49,13 @@ let activeCollector: PhaseMetricsCollector | null = null
 /** 编排 session ID 集合 — chat.params hook 中记录，system.transform hook 中用于跳过编排 session 的 prompt 注入 */
 const orchestratorSessionIds = new Set<string>()
 
+/** 生成 run-YYYYMMDD-HHMMSS 格式的 runId */
+function formatRunId(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `run-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+}
+
 /** 从 agentFile 路径提取 agent 短名 (e.g. "agent/sql-analyst.md" → "sql-analyst") */
 function agentFileToName(agentFile: string): string {
   return agentFile.replace(/^agent\//, "").replace(/\.md$/, "")
@@ -657,6 +664,9 @@ function buildSharedInstructions(run: WorkflowRun): string {
 
 - **JSON artifact**（plan.json、scaffold.json、translation.json 等元数据文件）使用 \`write\` 工具写入 \`\${artifactsDir}/\` 下的指定路径
 - **Java 源文件**（.java、.xml、.yml、pom.xml 等）必须写入 Runtime Context 中 \`projectRoot\` 指定的目录（绝对路径），**绝不能**写入 \`\${artifactsDir}/\` 下
+- **禁止写入以下目录**：.git/、.claude/、node_modules/（引擎会拦截并阻止）
+- **sourcePath 目录是只读的**，禁止向其中写入任何文件
+- 如果写入路径被引擎拦截重定向，请使用重定向后的路径继续工作
 - 写入前确保 JSON 格式合法（无尾逗号、引号闭合）
 - 逐包持久化：每处理完一个包立即写入 per-package artifact，避免中途崩溃丢失
 - 写入后不需要读回验证（引擎 advance 时会做 Zod 校验）
@@ -1366,10 +1376,207 @@ function truncateStringsDeep(obj: unknown, maxLength: number): unknown {
   }
 }
 
-/** 判断文件路径是否为 Java/项目文件（用于 write 工具路径拦截） */
+// ── 文件写入路径拦截：类型、常量、辅助函数 ──────────────────────────────────
+
+/** 禁止写入的敏感目录名 */
+const SENSITIVE_DIR_NAMES = new Set([".git", ".claude", ".svn", ".hg", "node_modules"])
+
+/** 项目文件扩展名 — 应写入 projectRoot */
+const PROJECT_FILE_EXTS = /\.(java|xml|yml|yaml|properties|sql)$/i
+
+/** Artifact 文件扩展名 — 应写入 artifactsDir */
+const ARTIFACT_FILE_EXTS = /\.(json|md)$/i
+
+type FileType = 'project' | 'artifact' | 'unknown'
+type WriteZone = 'artifacts' | 'project' | 'source' | 'sensitive' | 'outside'
+
+interface PathClassification {
+  zone: WriteZone
+  fileType: FileType
+  shouldRedirect: boolean
+  correctedPath: string | null
+  shouldBlock: boolean
+  blockReason?: string
+}
+
+/** 判断文件路径类型：项目文件 / artifact / 未知 */
+function classifyFileType(filePath: string): FileType {
+  if (PROJECT_FILE_EXTS.test(filePath)) return 'project'
+  if (ARTIFACT_FILE_EXTS.test(filePath)) return 'artifact'
+  return 'unknown'
+}
+
+/** 向后兼容：buildSharedInstructions / dispatch 文本中引用的旧函数 */
 function isProjectFile(path: string): boolean {
-  return /\.(java|xml|yml|yaml|properties|sql)$/i.test(path)
-    && !path.endsWith(".json")
+  return classifyFileType(path) === 'project'
+}
+
+/** artifactsDir 下已知子目录前缀，重定向时需剥除 */
+const ARTIFACT_PREFIX_RE = /^(?:translations|analysis-packages|inventory-packages|status|metrics|fsd|reports)\/[^/]+\//
+
+/**
+ * 从 artifactsDir 下的相对路径中剥除 artifact 子目录前缀，提取项目文件路径。
+ *
+ * "translations/ORDER_PKG/src/main/java/.../Order.java" → "src/main/java/.../Order.java"
+ * "analysis-packages/ORDER_PKG/src/main/..."             → "src/main/..."
+ * "src/main/java/.../Order.java" (无前缀)               → "src/main/java/.../Order.java"
+ */
+function stripArtifactPrefixes(relPath: string): string {
+  let cleaned = relPath.replace(ARTIFACT_PREFIX_RE, '')
+  const srcIdx = cleaned.indexOf('src/')
+  if (srcIdx > 0) cleaned = cleaned.substring(srcIdx)
+  if (!cleaned.startsWith('src/')) return cleaned.split('/').pop() ?? cleaned
+  return cleaned
+}
+
+/**
+ * 从 run 元数据解析 sourcePath 的绝对路径。
+ * plan 前阶段或未设置时返回空字符串。
+ */
+function resolveSourcePath(runId: string): string {
+  const run = engine.status(runId)
+  if (!run) return ''
+  const raw = (run.metadata as Record<string, unknown>).sourcePath
+  if (!raw || typeof raw !== 'string') return ''
+  return resolve(raw)
+}
+
+/**
+ * 统一路径分类：判断写入路径应归属哪个 zone，以及是否需要重定向或阻止。
+ *
+ * 所有路径须先通过 resolve() 转为绝对路径。
+ * projectRoot 为空时（plan 前阶段），只做 sensitive block，不 redirect。
+ *
+ * Zone 优先级：sensitive > artifacts > project > source > outside
+ *
+ * | Zone      | 项目文件         | Artifact 文件   |
+ * |-----------|-----------------|-----------------|
+ * | artifacts | → redirect projectRoot | ✅ allow    |
+ * | project   | ✅ allow        | → redirect artifactsDir |
+ * | source    | 🚫 block        | 🚫 block       |
+ * | sensitive | 🚫 block        | 🚫 block       |
+ * | outside   | → redirect projectRoot | → redirect artifactsDir |
+ */
+function classifyWritePath(
+  filePath: string,
+  artifactsDir: string,
+  projectRoot: string,
+  sourcePath: string,
+): PathClassification {
+  const fileType = classifyFileType(filePath)
+  const normalized = filePath.replace(/\\/g, '/')
+
+  // 1. Sensitive 目录检查（优先级最高，始终 block）
+  for (const seg of normalized.split('/')) {
+    if (SENSITIVE_DIR_NAMES.has(seg)) {
+      return {
+        zone: 'sensitive',
+        fileType,
+        shouldRedirect: false,
+        correctedPath: null,
+        shouldBlock: true,
+        blockReason: `写入敏感目录 "${seg}" 被禁止`,
+      }
+    }
+  }
+
+  // 2. Zone 判定（按路径前缀匹配，most specific first）
+  const normArtifacts = artifactsDir.replace(/\\/g, '/')
+  const normProject = projectRoot.replace(/\\/g, '/')
+  const normSource = sourcePath.replace(/\\/g, '/')
+
+  let zone: WriteZone
+  if (normArtifacts && normalized.startsWith(normArtifacts + '/')) {
+    zone = 'artifacts'
+  } else if (normProject && normalized.startsWith(normProject + '/')) {
+    zone = 'project'
+  } else if (normSource && normalized.startsWith(normSource + '/')) {
+    zone = 'source'
+  } else {
+    zone = 'outside'
+  }
+
+  // 3. Source zone：只读，一律 block
+  if (zone === 'source') {
+    return {
+      zone,
+      fileType,
+      shouldRedirect: false,
+      correctedPath: null,
+      shouldBlock: true,
+      blockReason: `sourcePath 目录是只读的，禁止写入`,
+    }
+  }
+
+  // 4. Artifacts zone：项目文件 → redirect 到 projectRoot；artifact 文件 → allow
+  if (zone === 'artifacts') {
+    if (fileType === 'project' && projectRoot) {
+      const relPath = normalized.substring(normArtifacts.length + 1)
+      const cleanedRel = stripArtifactPrefixes(relPath)
+      return {
+        zone,
+        fileType,
+        shouldRedirect: true,
+        correctedPath: normProject + '/' + cleanedRel,
+        shouldBlock: false,
+      }
+    }
+    return { zone, fileType, shouldRedirect: false, correctedPath: null, shouldBlock: false }
+  }
+
+  // 5. Project zone：项目文件 → allow；artifact 文件 → redirect 到 artifactsDir
+  if (zone === 'project') {
+    if (fileType === 'artifact' && artifactsDir) {
+      const relPath = normalized.substring(normProject.length + 1)
+      return {
+        zone,
+        fileType,
+        shouldRedirect: true,
+        correctedPath: normArtifacts + '/' + relPath,
+        shouldBlock: false,
+      }
+    }
+    return { zone, fileType, shouldRedirect: false, correctedPath: null, shouldBlock: false }
+  }
+
+  // 6. Outside zone：按文件类型 redirect 到对应目录
+  if (zone === 'outside') {
+    if (fileType === 'project' && projectRoot) {
+      // 尝试从路径中提取 src/ 段
+      const srcIdx = normalized.indexOf('/src/')
+      let correctedPath: string
+      if (srcIdx > 0) {
+        const relFromSrc = normalized.substring(srcIdx + 1) // "src/main/..."
+        correctedPath = normProject + '/' + relFromSrc
+      } else {
+        // fallback: 只取文件名
+        const fileName = normalized.split('/').pop() ?? 'unknown'
+        correctedPath = normProject + '/' + fileName
+      }
+      return {
+        zone,
+        fileType,
+        shouldRedirect: true,
+        correctedPath,
+        shouldBlock: false,
+      }
+    }
+    if (fileType === 'artifact' && artifactsDir) {
+      const fileName = normalized.split('/').pop() ?? 'unknown'
+      return {
+        zone,
+        fileType,
+        shouldRedirect: true,
+        correctedPath: normArtifacts + '/' + fileName,
+        shouldBlock: false,
+      }
+    }
+    // 未知文件类型在 outside zone：允许（不拦截 .txt, .log 等）
+    return { zone, fileType, shouldRedirect: false, correctedPath: null, shouldBlock: false }
+  }
+
+  // 不可达，TypeScript 兜底
+  return { zone: 'outside', fileType, shouldRedirect: false, correctedPath: null, shouldBlock: false }
 }
 
 // ── 插件导出 ──────────────────────────────────────────────────────────────────
@@ -1450,7 +1657,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         switch (args.action) {
           // ── start ──
           case "start": {
-            const runId = args.runId ?? `run-${Date.now()}`
+            const runId = args.runId ?? formatRunId()
             initLogger(runId)
 
             // 加载用户自定义规约（--spec）
@@ -2306,9 +2513,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 ``,
                 `## 📂 文件写入路径（强制）`,
                 `- JSON artifact（scaffold.json、translation.json 等）→ saveArtifact 工具 → artifactsDir`,
-                `- Java/.xml/.yml/.properties/.sql 等 Spring Boot 项目文件 → write 工具 → projectRoot（${projectRoot}）`,
-                `- ❌ 禁止将项目文件写入 artifactsDir/translations/`,
-                `- scaffold.json 的 projectRoot 字段必须使用上方注入值，不可自行编造`,
+                `- Java/.xml/.yml/.properties/.sql 项目文件 → write 工具 → projectRoot（${projectRoot}）`,
+                `- ❌ 禁止将项目文件写入 artifactsDir/（任何子目录，包括 translations/、analysis-packages/ 等）`,
+                `- ❌ 禁止写入 .git/、.claude/、node_modules/ 等敏感目录`,
+                `- ❌ 禁止写入 sourcePath 目录（只读）`,
+                `- scaffold.json 的 projectRoot 必须使用注入值，不可自行编造`,
+                `- 引擎会自动拦截错误路径写入并重定向到正确位置`,
               )
             }
 
@@ -2466,51 +2676,74 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
     }),
   },
 
-  // ── Hook: tool.execute.before — 文件写入路径拦截（P3a） ──
-  // 当 LLM 用 write 工具写 Java/项目文件到错误位置时，拦截并重定向到 projectRoot
+  // ── Hook: tool.execute.before — 文件写入路径拦截（P3a v2: zone 分类统一拦截） ──
+  // 统一拦截 write/bash 工具的文件写入，按 zone × fileType 决定 redirect/block/allow
   "tool.execute.before": async (input: any, output: any) => {
-    if (!currentWorkflowContext || input.tool !== "write") return
+    if (!currentWorkflowContext) return
 
-    const filePath = resolve(output.args?.file_path ?? "")
-    if (!filePath) return
+    // ── Branch A: write 工具路径拦截 ──
+    if (input.tool === "write") {
+      const filePath = resolve(output.args?.file_path ?? "")
+      if (!filePath) return
 
-    // 只拦截项目文件（.java/.xml/.yml/.properties/.sql），不拦截 .json/.md 等
-    if (!isProjectFile(filePath)) return
+      const runId = currentWorkflowContext.runId
+      const artifactsDir = resolve(join(ARTIFACT_DIR, runId))
 
-    const artifactsDir = resolve(join(ARTIFACT_DIR, currentWorkflowContext.runId))
+      // 计算 projectRoot（plan 阶段之后才存在）
+      const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${runId}`, "plan")
+      let projectRoot = ''
+      if (planArtifact) {
+        const artifactId = (planArtifact.targetProject as any)?.artifactId
+        if (artifactId) projectRoot = resolve(join(resolveProjectRoot(), "generated", artifactId))
+      }
 
-    // 计算 projectRoot（plan 阶段之后才存在）
-    const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${currentWorkflowContext.runId}`, "plan")
-    if (!planArtifact) return
-    const artifactId = (planArtifact.targetProject as any)?.artifactId
-    if (!artifactId) return
-    const projectRoot = resolve(join(resolveProjectRoot(), "generated", artifactId))
+      const sourcePath = resolveSourcePath(runId)
+      const cls = classifyWritePath(filePath, artifactsDir, projectRoot, sourcePath)
 
-    // 规则1: 项目文件写到 artifactsDir/translations/ → 重定向到 projectRoot
-    if (filePath.startsWith(artifactsDir + sep) && filePath.includes(sep + "translations" + sep)) {
-      const srcIdx = filePath.indexOf(sep + "src" + sep)
-      if (srcIdx > 0) {
-        const relativePath = filePath.substring(srcIdx + 1)
-        const correctedPath = join(projectRoot, relativePath)
-        output.args = { ...output.args, file_path: correctedPath }
-        getLogger().warn("[write-intercept]", `Redirected: ${filePath} → ${correctedPath}`)
+      if (cls.shouldBlock) {
+        // 阻止写入：记录到 artifactsDir/_blocked-writes/ 并替换目标
+        getLogger().error("[write-intercept]", `BLOCKED: ${filePath} — ${cls.blockReason}`)
+        try {
+          const blockedDir = join(artifactsDir, "_blocked-writes")
+          mkdirSync(blockedDir, { recursive: true })
+          const blockedEntry = join(blockedDir, `blocked-${Date.now()}.log`)
+          safeWriteFile(blockedEntry,
+            `Blocked: ${filePath}\nReason: ${cls.blockReason}\n`)
+          output.args = { ...output.args, file_path: blockedEntry, content: `[blocked] ${cls.blockReason}` }
+        } catch {
+          // blocked-writes 日志写入失败也不影响主流程，静默忽略
+        }
         return
       }
-      // 无法提取 src/ 路径时，至少移出 artifactsDir
-      const relFromArtifacts = filePath.substring(artifactsDir.length + 1)
-      // 移除 translations/{pkg}/ 前缀
-      const cleaned = relFromArtifacts.replace(/^[^/]+\/translations\/[^/]+\//, "")
-      const correctedPath = join(projectRoot, cleaned)
-      output.args = { ...output.args, file_path: correctedPath }
-      getLogger().warn("[write-intercept]", `Redirected (fallback): ${filePath} → ${correctedPath}`)
+
+      if (cls.shouldRedirect && cls.correctedPath) {
+        getLogger().warn("[write-intercept]",
+          `Redirected (${cls.zone}/${cls.fileType}): ${filePath} → ${cls.correctedPath}`)
+        output.args = { ...output.args, file_path: cls.correctedPath }
+        return
+      }
+
       return
     }
 
-    // 规则2: pom.xml 写到错误位置 → 重定向到 projectRoot
-    if (filePath.endsWith("pom.xml") && !filePath.startsWith(projectRoot)) {
-      const correctedPath = join(projectRoot, "pom.xml")
-      output.args = { ...output.args, file_path: correctedPath }
-      getLogger().warn("[write-intercept]", `Redirected pom.xml → ${correctedPath}`)
+    // ── Branch B: bash 写入检查（仅告警，不拦截） ──
+    if (input.tool === "bash") {
+      const command = output.args?.command ?? ''
+      if (typeof command !== 'string' || !command) return
+
+      const runId = currentWorkflowContext.runId
+      const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${runId}`, "plan")
+      if (!planArtifact) return
+      const artifactId = (planArtifact.targetProject as any)?.artifactId
+      if (!artifactId) return
+      const projectRoot = resolve(join(resolveProjectRoot(), "generated", artifactId))
+
+      // 扫描常见写入模式，检测是否往项目文件路径写入
+      const writeRe = /(?:>|\btee\b|\bcp\b|\bmv\b)\s.*\.(java|xml|yml|yaml|properties|sql)\b/i
+      if (writeRe.test(command)) {
+        getLogger().warn("[bash-write-inspect]",
+          `Bash 写入项目文件检测，期望目标在 projectRoot 下: ${projectRoot}`)
+      }
     }
   },
 
