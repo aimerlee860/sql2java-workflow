@@ -1683,6 +1683,66 @@ function classifyWritePath(
   return { zone: 'outside', fileType, shouldRedirect: false, correctedPath: null, shouldBlock: false }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// 分片模式 upstream 收窄（dispatch 用，纯函数便于测试）
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 分片模式下收窄 worker 的 upstream artifact 列表。
+ *
+ * 一个分片的 worker 只需读自己分片 targetPackages 的 per-package 文件 + 已完成分片的
+ * translation.json（跨包调用）。全量 per-package glob 若不收窄，worker 会读所有包的
+ * per-package 文件，顺手写出其他包的产物（analyze 的 FSD、translate/review 的 per-package
+ * 文件）——这是分片隔离的漏洞。
+ *
+ * 规则：
+ *  - translations 通配（translations 下所有 translation.json）→ 展开为已完成分片各包
+ *  - inventory-packages 通配  → 收窄为本分片 targetPackages 各包
+ *  - analysis-packages 通配   → 收窄为本分片 targetPackages 各包
+ *  - translate 阶段额外追加已完成分片的 translation.json（跨包调用依赖，translator.md 承诺）
+ *  - 全局只读 artifact（analysis.json、plan.json 等）原样保留
+ *
+ * 跨包调用关系不需要读别的包的 inventory-packages/analysis-packages：analyze 从 analysis.json
+ * 的 callGraph 取，translate 从已完成分片的 translation.json.subprogramMethods 取。
+ */
+export function narrowUpstreamForShard(
+  upstream: readonly string[],
+  phase: string,
+  targetPkgs: readonly string[],
+  completedPkgs: readonly string[],
+): string[] {
+  // 1) translations/* glob → 已完成分片各包的 translation.json
+  let result = upstream.flatMap(a =>
+    a === "translations/*/translation.json" && completedPkgs.length > 0
+      ? completedPkgs.map(pkg => `translations/${pkg}/translation.json`)
+      : [a],
+  )
+  // 2) per-package glob → 收窄到本分片 targetPackages
+  if (targetPkgs.length > 0) {
+    result = result.flatMap(a => {
+      if (a === "inventory-packages/*.json") {
+        return targetPkgs.map(pkg => `inventory-packages/${pkg}.json`)
+      }
+      if (a === "analysis-packages/*.json") {
+        return targetPkgs.map(pkg => `analysis-packages/${pkg}.json`)
+      }
+      return [a]
+    })
+  }
+  // 3) translate：追加已完成分片的 translation.json（跨包调用依赖）
+  if (phase === "translate" && completedPkgs.length > 0) {
+    const existing = new Set(result)
+    for (const pkg of completedPkgs) {
+      const p = `translations/${pkg}/translation.json`
+      if (!existing.has(p)) {
+        result.push(p)
+        existing.add(p)
+      }
+    }
+  }
+  return result
+}
+
 // ── 插件导出 ──────────────────────────────────────────────────────────────────
 
 export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
@@ -2816,29 +2876,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   : "review-summary.json"
                 upstream = upstream.filter(a => a !== excludeSummary)
               }
-              // 分片模式：处理 translations/*/translation.json 通配符 + 追加依赖包路径
+              // 分片模式：收窄 upstream（per-package glob 限定到本分片包 + 已完成分片 translation.json）
               if (activeShardPlan && currentEntry?.incrementalContext?.shardIndex !== undefined) {
                 const completedPkgs = activeShardPlan.completedShards
                   .flatMap(i => activeShardPlan.shards[i] ?? [])
-                // 1) 通配符替换（dedup/review/verify 等含 translations/* 的阶段）
-                upstream = upstream.flatMap(a =>
-                  a === "translations/*/translation.json" && completedPkgs.length > 0
-                    ? completedPkgs.map(pkg => `translations/${pkg}/translation.json`)
-                    : [a],
-                )
-                // 2) translate 的上游列表本身不含 translations/*（见 UPSTREAM_ARTIFACTS），
-                //    但分片 N 依赖分片 0..N-1 已翻译包的 translation.json（translator.md:131
-                //    承诺“路径已在 upstreamArtifacts 给出”）。显式追加，兑现该契约。
-                if (run.currentPhase === "translate" && completedPkgs.length > 0) {
-                  const existing = new Set(upstream)
-                  for (const pkg of completedPkgs) {
-                    const p = `translations/${pkg}/translation.json`
-                    if (!existing.has(p)) {
-                      upstream.push(p)
-                      existing.add(p)
-                    }
-                  }
-                }
+                const shardTargetPkgs = currentEntry?.incrementalContext?.targetPackages ?? []
+                upstream = narrowUpstreamForShard(upstream, run.currentPhase ?? "", shardTargetPkgs, completedPkgs)
               }
               workOrderParts.push(`- upstreamArtifacts:`)
               for (const a of upstream) {
