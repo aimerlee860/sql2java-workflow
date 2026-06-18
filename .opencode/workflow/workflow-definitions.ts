@@ -140,7 +140,9 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   analyze: ["inventory.json", "inventory-packages/*.json", "analysis.json"],
   plan: [..._INV_BASE, ..._ANALYSIS, ..._FSD],
   scaffold: [..._PLAN, ..._INV_BASE],
-  translate: [..._INV_BASE, ..._PLAN, ..._ANALYSIS, ..._SCAFFOLD, ..._FSD],
+  // translate 同样不注入 inventory-index.json（同 analyze 理由：避免全量包源码路径泄漏）。
+  // fsd/*/*.md 会在分片模式下被 narrowUpstreamForShard 收窄到 fsd/{pkg}/*.md（本包 FSD）。
+  translate: ["inventory.json", "inventory-packages/*.json", ..._PLAN, ..._ANALYSIS, ..._SCAFFOLD, ..._FSD],
   dedup: [..._PLAN, ..._SCAFFOLD, ..._INV_BASE, ..._ANALYSIS, ..._TRANSLATIONS],
   // TODO (F9): translations/*/translation.json 在 dedup/review/verify 三阶段重复读取，
   // artifactCache 每次 advance 清空导致无法跨阶段缓存。考虑支持只读 artifact 的跨阶段缓存。

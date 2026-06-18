@@ -29,19 +29,19 @@ describe("narrowUpstreamForShard", () => {
     expect(result).not.toContain("inventory-packages/PKG_C.json")
   })
 
-  it("translate: inventory-packages + analysis-packages 都收窄到本分片包", () => {
+  it("translate: inventory-packages + analysis-packages + fsd 都收窄到本分片包", () => {
     const upstream = [
-      "inventory-index.json", "inventory.json", "inventory-packages/*.json",
+      "inventory.json", "inventory-packages/*.json",
       "plan.json", "analysis.json", "analysis-packages/*.json", "scaffold.json",
       "fsd/*/*.md",
     ]
     const result = narrowUpstreamForShard(upstream, "translate", ["PKG_A"], [])
     expect(result).toContain("inventory-packages/PKG_A.json")
     expect(result).toContain("analysis-packages/PKG_A.json")
+    expect(result).toContain("fsd/PKG_A/*.md")
     expect(result).not.toContain("inventory-packages/*.json")
     expect(result).not.toContain("analysis-packages/*.json")
-    // fsd glob 不在收窄范围（translator 可选参考），原样保留
-    expect(result).toContain("fsd/*/*.md")
+    expect(result).not.toContain("fsd/*/*.md")
     // 全局只读 artifact 保留
     expect(result).toContain("plan.json")
     expect(result).toContain("scaffold.json")

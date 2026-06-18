@@ -170,6 +170,13 @@ describe("UPSTREAM_ARTIFACTS", () => {
     // 本包源码路径来源仍在
     expect(UPSTREAM_ARTIFACTS.analyze).toContain("inventory-packages/*.json")
   })
+
+  it("translate 不注入 inventory-index.json（同 analyze 理由）", () => {
+    expect(UPSTREAM_ARTIFACTS.translate).not.toContain("inventory-index.json")
+    expect(UPSTREAM_ARTIFACTS.translate).toContain("inventory-packages/*.json")
+    // fsd/*/*.md 在分片模式下由 narrowUpstreamForShard 收窄到 fsd/{pkg}/*.md
+    expect(UPSTREAM_ARTIFACTS.translate).toContain("fsd/*/*.md")
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════

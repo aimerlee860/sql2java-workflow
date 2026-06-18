@@ -1699,6 +1699,7 @@ function classifyWritePath(
  *  - translations 通配（translations 下所有 translation.json）→ 展开为已完成分片各包
  *  - inventory-packages 通配  → 收窄为本分片 targetPackages 各包
  *  - analysis-packages 通配   → 收窄为本分片 targetPackages 各包
+ *  - fsd 通配（fsd 下所有 .md）→ 收窄为本分片 targetPackages 各包的 fsd/{pkg}/*.md
  *  - translate 阶段额外追加已完成分片的 translation.json（跨包调用依赖，translator.md 承诺）
  *  - 全局只读 artifact（analysis.json、plan.json 等）原样保留
  *
@@ -1725,6 +1726,11 @@ export function narrowUpstreamForShard(
       }
       if (a === "analysis-packages/*.json") {
         return targetPkgs.map(pkg => `analysis-packages/${pkg}.json`)
+      }
+      // fsd/*/*.md → 本包 FSD 目录 fsd/{pkg}/*.md。FSD 是聚合文档、translate 按它实施，
+      // 应只读本包对应的 FSD；需要其他包 FSD 时由 worker 显式指明具体文件（见 translator.md）。
+      if (a === "fsd/*/*.md") {
+        return targetPkgs.map(pkg => `fsd/${pkg}/*.md`)
       }
       return [a]
     })
