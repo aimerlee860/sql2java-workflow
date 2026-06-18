@@ -180,7 +180,7 @@ workflow({ action: "generateAnalysis", runId: "<runId>" })
 
 - **analysis.json**：`${artifactsDir}/analysis.json`（含 callGraph、translationOrder、refName 规范、complexity）——**只读，不修改**
 - **逐包 inventory**：`${artifactsDir}/inventory-packages/{PKG}.json`（子程序列表 + 参数类型 + lineRange）
-- **源码文件**：本分片包的 spec + body（按 inventory-index 的 specFile/bodyFile 路径）
+- **源码文件**：本分片包的 spec + body（按 `inventory-packages/{PKG}.json` 的 specFile/bodyFile 路径——不要读 inventory-index.json，它含全量包路径）
 
 ### 输出
 
@@ -209,7 +209,7 @@ workflow({ action: "generateAnalysis", runId: "<runId>" })
 对本分片每个有子程序的包，执行以下循环：
 
 **1a. 读取本分片包的源码文件**
-- 只读取本分片 targetPackages 中包的 spec + body 文件（按 inventory-index 的 specFile/bodyFile 路径）
+- 只读取本分片 targetPackages 中包的 spec + body 文件（路径取自 `inventory-packages/{PKG}.json` 的 specFile/bodyFile，不要读 inventory-index.json）
 - 禁止读取其他分片的文件
 
 **1b. 逐包解析子程序内部结构**
