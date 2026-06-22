@@ -126,13 +126,17 @@ sql2java-workflow/
 - **fix 循环**：review/verify failed → fix → review → verify（fix 修改翻译后直接回到 review 审查）
 - **exhausted 策略**：globalMax=5, phaseMax=5, 任一达限 → `completed_with_issues`
 
+### 分片
+
+analyze / translate / review 按 package 分片（`maxPackagesPerShard=1`，每分片 1 包），基于 `analysis.json.translationOrder`（Tarjan SCC 拓扑序）。analyze/review 拍平 SCC 每包独立分片；translate 保留 SCC 组共处（互依赖包同 session 拿到对方 Java 签名）。分片模式下上游 artifact 收窄到本分片包（`narrowUpstreamForShard`），review 阶段 `translations/*` 收窄到 targetPackages（本分片包），避免 worker 读到全部包越界处理。
+
 ## 设计决策
 
 | ID | 决策 | 说明 |
 |----|------|------|
 | D1 | advance condition | LLM 传入 result，引擎匹配 TransitionRule |
 | D2 | fix exhausted | 双层策略：globalMax=5, phaseMax=5 |
-| D3 | fix 增量重做 | fix 后只重审修改过的包；fix 失败未 exhausted 返回 fixFailed=true（区别于 rejected），LLM 调 retry 重试 |
+| D3 | fix 增量重做 | fix 后只重审修改过的包；fix 失败未 exhausted 返回 fixFailed=true（区别于 rejected），LLM 调 retry 重试。fix→review 增量回环注入 previousFindings（上次 mustFix），reviewer 先逐项核对旧问题是否修复，未修复的须再次列入 mustFix |
 | D4 | confirm 时序 | waitingForConfirmation=true 时不激活 agent |
 | D5 | artifact 写入 | agent 自己写 artifact，advance 时从磁盘做 Zod 校验；fix-failed 时跳过 Zod 校验 |
 | D6 | 持久化 | run.json 全量单文件存储 |
@@ -262,7 +266,8 @@ opencode models zai-coding-plan  # 只看 z.ai 模型
 ├── inventory-index.json                 # 预扫描索引（machine-generated，start 时生成）
 ├── inventory-packages/                  # 逐包 inventory（LLM enriched）
 │   ├── PKG_ORDER.json
-│   └── PKG_UTIL.json
+│   ├── PKG_UTIL.json
+│   └── __STANDALONE_FN_ABC_CLASS__.json # standalone 过程虚拟包
 ├── inventory.json                       # 索引 + DDL 数据（tables/triggers/views/sequences）
 ├── analysis-packages/                   # 逐包子程序结构
 │   ├── exc_pkg.json
@@ -307,11 +312,17 @@ opencode models zai-coding-plan  # 只看 z.ai 模型
 | **AST** | `@griffithswaite/ts-plsql-parser`（ANTLR4） | parser 安装成功 |
 | **Regex 降级** | Node.js fs + 正则 + 行号追踪 | parser 安装失败 |
 
-**提取内容**：Package spec/body 结构、procedure/function 签名、DDL 对象（table/trigger/view/sequence）、调用关系图（PKG.PROC 模式）。
+**提取内容**：Package spec/body 结构、procedure/function 签名、DDL 对象（table/trigger/view/sequence）、调用关系图（PKG.PROC 模式）、standalone 过程（独立 CREATE PROCEDURE/FUNCTION）。
+
+**standalone 虚拟包**：独立存储过程/函数（不属于任何 package）注入为 `__STANDALONE_{NAME}__` 虚拟包加入 packages，复用 per-package 流水线全链路处理（每过程一包规避爆上下文，不引入通用包拆分）。`standaloneProcedures` 字段保留作 metrics。Java 包名映射归入 `standalone` 子包。
 
 **Regex 模式已知处理**：
 - BEGIN/END 深度追踪排除 `END IF` / `END LOOP` / `END CASE`
 - 支持无参过程检测（`PROCEDURE init IS`）
+- 多 CREATE 语句 matchAll 全量提取（一个 .sql 多个 standalone）
+- 跨行块注释 `/* */` 剥离，避免污染 BEGIN/END 深度计数
+- 过程嵌套栈：局部过程不截断外层 lineRange
+- 超长参数列表过程识别（不设行数上限）
 
 ## Schema 预获取
 
