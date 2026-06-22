@@ -48,6 +48,7 @@ permission:
 当 `incrementalContext.targetPackages` 存在时（fix 增量回环 或 按包分片）：
 - **只处理指定包**，未涉及包的 per-package artifact 保持不变
 - **summary 不手写**：写完本批 review.json 后调 `generateReviewSummary`，由代码聚合所有 per-package review.json（含未涉及包的已有结果）生成 review-summary.json，确保 `allPassed` 反映全部包的真实状态
+- **增量回环时核对旧问题**（`incrementalContext.previousFindings` 存在）：先逐项核对 previousFindings 列出的上次 mustFix 是否已修复，再全包重审找新问题。未修复的旧问题必须再次列入本次 mustFix（不能因"上次报过"就略过）；已修复的不再列入。这保证 fix 没修好的问题不会被遗忘。
 
 ## 20 类审查清单
 

@@ -698,6 +698,13 @@ function buildRuntimeContext(run: WorkflowRun): string {
       lines.push(`  shardIndex: ${currentEntry.incrementalContext.shardIndex}`)
       lines.push(`  totalShards: ${currentEntry.incrementalContext.totalShards ?? "?"}`)
     }
+    const pf = currentEntry.incrementalContext.previousFindings
+    if (pf && pf.length > 0) {
+      lines.push(`  previousFindings: 上次 review 的 mustFix，请先逐项核对是否已修复（未修复的须再次列入本次 mustFix）`)
+      for (const f of pf) {
+        lines.push(`    - { packageName: ${f.packageName}, file: ${f.file}, line: ${f.line ?? "null"}, issue: ${JSON.stringify(f.issue)} }`)
+      }
+    }
   }
 
   // projectStructure: 自定义目录结构覆盖

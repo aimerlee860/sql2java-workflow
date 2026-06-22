@@ -115,6 +115,12 @@ export interface PhaseHistoryEntry {
     targetPackages: string[]                    // 增量模式：只处理这些包
     shardIndex?: number                         // 分片模式：当前分片序号（0-based）
     totalShards?: number                        // 分片模式：总分片数
+    previousFindings?: Array<{                  // 增量 review：上次 review 的 mustFix，供 reviewer 核对是否已修复
+      packageName: string
+      file: string
+      line?: number | null
+      issue: string
+    }>
   }
 }
 
@@ -166,6 +172,12 @@ const PhaseHistoryEntrySchema = z.object({
     targetPackages: z.array(z.string()),
     shardIndex: z.number().optional(),
     totalShards: z.number().optional(),
+    previousFindings: z.array(z.object({
+      packageName: z.string(),
+      file: z.string(),
+      line: z.number().nullable().optional(),
+      issue: z.string(),
+    })).optional(),
   }).optional(),
 })
 
@@ -1493,6 +1505,32 @@ export class WorkflowEngine {
         crossSchemaWarnings,
       }
     }
+    // B-minimal: 增量 review 时把上次 review 的 mustFix 注入 previousFindings，
+    // 让 reviewer 先核对旧问题是否修复（机制化核对，保证 fix 没修好的问题不被遗忘）。
+    let previousFindings: Array<{ packageName: string; file: string; line?: number | null; issue: string }> | undefined
+    if (nextPhase === "review" && triggerPhase === "review") {
+      const collected: Array<{ packageName: string; file: string; line?: number | null; issue: string }> = []
+      for (const pkg of fixedPackages) {
+        const reviewPath = join(artifactsDir, "translations", pkg, "review.json")
+        try {
+          const raw = JSON.parse(readFileSync(reviewPath, "utf-8")) as {
+            mustFix?: Array<{ file?: unknown; line?: unknown; issue?: unknown }>
+          }
+          for (const f of raw.mustFix ?? []) {
+            if (f && typeof f.file === "string" && typeof f.issue === "string") {
+              collected.push({
+                packageName: pkg,
+                file: f.file,
+                line: typeof f.line === "number" ? f.line : null,
+                issue: f.issue,
+              })
+            }
+          }
+        } catch { /* review.json 不存在或解析失败：跳过该包，无 previousFindings 不阻断 */ }
+      }
+      previousFindings = collected.length > 0 ? collected : undefined
+    }
+
     const newEntry: PhaseHistoryEntry = {
       phase: nextPhase,
       status: "in_progress",
@@ -1501,6 +1539,7 @@ export class WorkflowEngine {
       branchedFrom: triggerPhase, // 记录原始触发阶段(review/verify)，而非 "fix"
       incrementalContext: {
         targetPackages: fixedPackages,
+        ...(previousFindings ? { previousFindings } : {}),
       },
     }
     run.phaseHistory.push(newEntry)
