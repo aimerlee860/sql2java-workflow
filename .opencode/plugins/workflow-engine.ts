@@ -1774,12 +1774,21 @@ export function narrowUpstreamForShard(
   targetPkgs: readonly string[],
   completedPkgs: readonly string[],
 ): string[] {
-  // 1) translations/* glob → 已完成分片各包的 translation.json
-  let result = upstream.flatMap(a =>
-    a === "translations/*/translation.json" && completedPkgs.length > 0
-      ? completedPkgs.map(pkg => `translations/${pkg}/translation.json`)
-      : [a],
-  )
+  // 1) translations/* glob 收窄
+  // - review：审查当前分片包的翻译 → 收窄到 targetPackages（本分片包）。原逻辑用 completedPkgs
+  //   收窄，review 第一分片 completedPkgs=[] 时 glob 保留，导致 worker 读到全部包 translation 全审了。
+  // - translate/dedup/fix：跨包对接依赖已完成包的翻译 → 收窄到 completedPkgs
+  //   （completedPkgs 为空时保留 glob；translate 第一分片时 translations/* 尚未生成，glob 匹配为空无害）
+  let result = upstream.flatMap(a => {
+    if (a !== "translations/*/translation.json") return [a]
+    if (phase === "review" && targetPkgs.length > 0) {
+      return targetPkgs.map(pkg => `translations/${pkg}/translation.json`)
+    }
+    if (completedPkgs.length > 0) {
+      return completedPkgs.map(pkg => `translations/${pkg}/translation.json`)
+    }
+    return [a]
+  })
   // 2) per-package glob → 收窄到本分片 targetPackages
   if (targetPkgs.length > 0) {
     result = result.flatMap(a => {
