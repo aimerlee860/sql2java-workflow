@@ -190,7 +190,9 @@ workflow({ action: "generateAnalysis", runId: "<runId>" })
 
 ### ⛔ 关键约束：分片处理
 
-**只处理 Runtime Context「分片信息」中列出的本分片包**，不要处理其他包，不要一次性读全部源码。每包处理完立即写盘。无子程序的包跳过。
+**只处理 Runtime Context「分片信息」中列出的本分片包（targetPackages）**，不要处理其他包，不要一次性读全部源码。每包处理完立即写盘。无子程序的包跳过。
+
+⚠️ **targetPackages 是你唯一的工作清单**。`analysis.json` 的 `packageNames` / `translationOrder` / `callGraph` / `procedureOrder` 列出了全量包/单元，那只是**参考信息**（callGraph 供 FSD 板块 3 引用客观调用关系），**绝不是你要处理的清单**——禁止遍历它们生成 FSD。处理完 targetPackages 中的包后立即输出 WORKER_SUMMARY 结束，不要"顺手"做其他包（会有别的分片做，重复 = 产物冲突）。
 
 ### refName 规范（来自 analysis.json，FSD 文件名须一致）
 
@@ -200,8 +202,8 @@ workflow({ action: "generateAnalysis", runId: "<runId>" })
 
 #### Step 0：确定本分片范围
 
-1. 读 Runtime Context「分片信息」→ 本分片包列表（targetPackages）。
-2. 读 `${artifactsDir}/analysis.json` 的 `callGraph`（FSD 板块 3 引用客观调用关系用）+ `inventory-packages/{PKG}.json`（子程序 + lineRange）。
+1. 读 Runtime Context「分片信息」→ 本分片包列表（targetPackages）。**这是你唯一要处理的包集合**。
+2. 读 `${artifactsDir}/analysis.json` 的 `callGraph`（仅用于 FSD 板块 3 引用客观调用关系，**不是工作清单**）+ `inventory-packages/{PKG}.json`（**仅 targetPackages 中的包**，子程序 + lineRange）。
 3. 创建目录 `${artifactsDir}/fsd`（如不存在）；`analysis-packages/` 已存在。
 4. 跳过 targetPackages 中无子程序的包。
 

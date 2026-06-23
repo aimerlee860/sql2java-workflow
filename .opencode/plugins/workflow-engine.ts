@@ -3229,6 +3229,18 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 `- **只处理以上列出的${targetWord}，不要处理其他${targetWord}**`,
                 `- 已完成分片: ${activeShardPlan.completedShards.map(i => i + 1).join(", ") || "无"}`,
               )
+              // 顶部 scope banner（最高优先级，置于 workOrder 最前）：分片 agent 常越界处理其他包/单元，
+              // 靠「分片信息」中段提示不够醒目，故在最前再加强约束（[[opencode-todowrite-prompt-driven]] banner 模式）。
+              const scopeBanner = [
+                `⛔⛔⛔ 分片范围硬约束（最高优先级，开始工作前先读）⛔⛔⛔`,
+                `本分片【只】处理以下 ${targetWord}: ${targetLabel}`,
+                `- 禁止处理、读源码、生成 FSD/产物 for 任何【其他】${targetWord}。`,
+                `- analysis.json / inventory.json 里列出的其他包/单元【不是】你的工作清单，仅作参考信息。`,
+                `- 处理完本分片 ${targetWord} 后立即输出 WORKER_SUMMARY 结束，不要"顺手"做其他 ${targetWord}（会有别的分片做，重复 = 产物冲突）。`,
+                `⛔⛔⛔ 违反 = 重复工作 + 产物冲突 ⛔⛔⛔`,
+                ``,
+              ].join("\n")
+              workOrderParts.unshift(scopeBanner)
             }
 
             // P3c: projectRoot + 文件写入路径映射（plan 阶段之后才有 projectRoot）
