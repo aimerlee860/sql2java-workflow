@@ -17,7 +17,7 @@
 import { toJSONSchema } from "zod/v4/core"
 import type { ZodType } from "zod"
 import {
-  getSchemaForPhase, getPerPackageSchema, getSummarySchema,
+  getSchemaForPhase, getPerPackageSchema, getPerUnitSchema, getSummarySchema,
   getArtifactFilename, getAnalysisPackageSchema,
 } from "./artifact-schemas"
 import {
@@ -294,9 +294,15 @@ export function renderSchemaHint(phase: string | null | undefined): string {
     parts.push("")
   }
 
-  // translate/review/verify：通用 per-package
-  const perPackageSchema = getPerPackageSchema(phase)
-  if (perPackageSchema) {
+  // translate：PROCEDURE 级 per-unit 产物（agent 写 translations/{pkg}/{unitRef}.json，
+  // 聚合 translation.json 由 engine merge，非 agent 手写）；review/verify：per-package 产物
+  const perUnitSchema = phase === "translate" ? getPerUnitSchema(phase) : null
+  const perPackageSchema = perUnitSchema ? null : getPerPackageSchema(phase)
+  if (perUnitSchema) {
+    parts.push("### Per-Unit: translations/{pkg}/{unitRef}.json")
+    parts.push(renderZodSchema(perUnitSchema))
+    parts.push("")
+  } else if (perPackageSchema) {
     const pkgFileName = getArtifactFilename(phase)
     parts.push(`### Per-Package: translations/{pkg}/${pkgFileName}.json`)
     parts.push(renderZodSchema(perPackageSchema))
