@@ -357,9 +357,9 @@ let _cachedUserSpecMtime: number | null = null
 let _cachedUserSpecPath: string | null = null
 
 /** 加载用户自定义规约文件（--spec 参数）。
- *  优先级：1) specConf 指定路径  2) sourcePath/project-spec.md  3) sourcePath/project-structure.md（旧格式）
+ *  优先级：1) specConf 指定路径  2) sourcePath/project-spec.md
  *
- *  旧格式检测：project-structure.md 无 ## 标题时，退化为纯目录结构文件。
+ *  无 ## 标题的文件：先尝试解析为目录结构，否则包装为单个章节。
  */
 function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | null {
   // 入口规范化为绝对路径：防御历史 run 在 metadata/run-context 中存入的相对路径，
@@ -378,15 +378,9 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
   }
   // 优先级 2: project-spec.md 自动发现
   else if (sourcePath) {
-    const newAutoPath = join(sourcePath, "project-spec.md")
-    if (existsSync(newAutoPath)) {
-      filePath = newAutoPath
-    } else {
-      // 优先级 3: project-structure.md 旧格式自动发现
-      const legacyPath = join(sourcePath, "project-structure.md")
-      if (existsSync(legacyPath)) {
-        filePath = legacyPath
-      }
+    const autoPath = join(sourcePath, "project-spec.md")
+    if (existsSync(autoPath)) {
+      filePath = autoPath
     }
   }
 
@@ -409,22 +403,7 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
     // 无 ## 标题的文件处理
     const hasHeadings = /^## /m.test(rawMarkdown)
     if (!hasHeadings) {
-      // 旧格式 project-structure.md：纯目录结构文件，无章节
-      if (filePath.endsWith("project-structure.md")) {
-        const paths = parseStructureText(rawMarkdown)
-        const result: UserSpecResult = {
-          rawMarkdown,
-          sections: new Map(),
-          projectStructure: paths.length > 0 ? paths : null,
-          sourcePath: filePath,
-        }
-        _cachedUserSpec = result
-        _cachedUserSpecMtime = mtime
-        _cachedUserSpecPath = filePath
-        getLogger().info("[workflow-engine]", `加载传统格式结构定义: ${filePath} (${paths.length} 个路径，建议迁移到 project-spec.md)`)
-        return result
-      }
-      // 其他无标题文件：先尝试解析为目录结构，否则包装为单个章节
+      // 无标题文件：先尝试解析为目录结构，否则包装为单个章节
       const paths = parseStructureText(rawMarkdown)
       if (paths.length > 0) {
         const result: UserSpecResult = {
