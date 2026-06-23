@@ -192,7 +192,7 @@ describe("plsql-scanner AST 字段抽取 (tiny fixture)", () => {
       expect(trg.level).toBe("row")
       expect(trg.events).toEqual(["update"]) // 仅 UPDATE，不含触发体内的 INSERT
       expect(trg.targetTable).toBe("T_ITEM")
-      expect(trg.condition).toBe("old.std_cost <> new.std_cost")
+      expect(trg.condition).toBe("OLD.std_cost <> NEW.std_cost")
     })
   })
 

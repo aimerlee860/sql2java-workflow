@@ -221,6 +221,58 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
   const standaloneProcedures: StandaloneProcIndex[] = []
   const callGraph: Record<string, string[]> = {}
 
+  /**
+   * AST 解析一段脚本（spec / table / sequence / standalone-proc），结构写入累加器。
+   * 闭包捕获动态导入的 parser 工厂；可对合并文件切出的 spec 段单独调用。
+   * lineRange 由 parser 的 token 位置给出，相对于传入的 segmentCode 起始行（1-based）。
+   */
+  const astParseScript = (segmentCode: string, segRelPath: string) => {
+    const parser = getParserFromInput(segmentCode) as any
+    const lexer = parser.getTokenStream()?.tokenSource
+    lexer?.removeErrorListeners()
+    parser.removeErrorListeners()
+    if (typeof parser._errHandler !== "undefined") {
+      parser._errHandler = new antlr4.BailErrorStrategy()
+    }
+    const tree = parser.sql_script()
+    const result = getParsedNodes(segmentCode, tree)
+
+    for (const scriptNode of result.nodes) {
+      if (scriptNode.type !== "Sql_scriptContext") continue
+      for (const unitNode of scriptNode.nodes) {
+        if (unitNode.type !== "Unit_statementContext") continue
+        for (const child of unitNode.nodes) {
+          switch (child.type) {
+            case "Create_packageContext":
+              extractPackageSpec(child, packages, segRelPath)
+              break
+            case "Create_package_bodyContext":
+              extractPackageBody(child, packages, segRelPath, segmentCode)
+              break
+            case "Create_procedure_bodyContext":
+              extractStandaloneProc(child, standaloneProcedures, segRelPath, "procedure")
+              break
+            case "Create_function_bodyContext":
+              extractStandaloneProc(child, standaloneProcedures, segRelPath, "function")
+              break
+            case "Create_tableContext":
+              extractTable(child, tables, segRelPath)
+              break
+            case "Create_triggerContext":
+              extractTrigger(child, triggers, segRelPath)
+              break
+            case "Create_viewContext":
+              extractView(child, views, segRelPath)
+              break
+            case "Create_sequenceContext":
+              extractSequence(child, sequences, segRelPath)
+              break
+          }
+        }
+      }
+    }
+  }
+
   for (const filePath of files) {
     const rawCode = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
     const relPath = relative(sourcePath, filePath)
@@ -234,10 +286,51 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
     //   body         → regex 取 lineRange（签名由 spec 提供）
     //   trigger/view → 文本提取（元数据在头部 / SELECT，不进 AST 体）
     //   type / dml   → 跳过（inventory 不建模对象类型 / DML）
+    //
+    // spec+body 合并文件（pkg/<name>.sql 同时含包头与包体）：classifyFile 命中 "body"，
+    // 但其中 spec 段仍需走 AST 拿参数/类型/变量/常量。故在 body 分支内检测是否含 spec：
+    //   含 spec → 在首个 PACKAGE BODY 处切开。body 段先 regex 取 lineRange（相对 bodyCode，
+    //             按 spec 行数偏移到合并文件绝对行号）；spec 段再 AST 覆盖 procedures（保留
+    //             body 的 lineRange，补 params/types/vars/consts）。先 body 后 spec 与
+    //             "spec/body 分文件时 spec 后处理覆盖 body" 语义一致，body 私有过程被丢弃。
+    //   仅 body → 整文件 regex（原行为）。
     const kind = classifyFile(code)
     try {
       if (kind === "body") {
-        regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
+        const hasSpec = /CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\b)/i.test(code)
+        if (hasSpec) {
+          const bodyMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i)
+          const bodyStartIdx = bodyMatch?.index ?? 0
+          // body 起始的 1-based 行号；lineOffset = body 之前的行数，把 bodyCode 相对行号偏移到合并文件绝对行号
+          const lineOffset = code.slice(0, bodyStartIdx).split("\n").length - 1
+          const { specCode, bodyCode } = splitPackageSpecAndBody(code)
+          const beforeNames = new Set(packages.keys())
+          if (bodyCode.trim()) {
+            regexFallbackForFile(bodyCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
+            // 仅偏移本次 body 段新建包的过程行号（合并文件中包首次出现于 body 段）
+            for (const pkg of packages.values()) {
+              if (!beforeNames.has(pkg.name) && pkg.bodyFile === relPath) {
+                for (const proc of pkg.procedures) {
+                  if (proc.lineRange) {
+                    proc.lineRange = [proc.lineRange[0] + lineOffset, proc.lineRange[1] + lineOffset]
+                  }
+                }
+              }
+            }
+          }
+          if (specCode.trim()) {
+            try {
+              astParseScript(specCode, relPath)
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e)
+              getLogger().warn("[plsql-scanner]", `AST 解析 spec 段失败，降级到 regex: ${relPath} — ${errMsg}`)
+              regexFallbackForFile(specCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
+            }
+          }
+        } else {
+          regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
+        }
+        extractCallGraph(code, relPath, callGraph)
       } else if (kind === "trigger") {
         extractTriggerFromText(code, triggers, relPath)
         extractCallGraph(code, relPath, callGraph)
@@ -249,50 +342,7 @@ export async function scanWithAST(sourcePath: string): Promise<InventoryIndex> {
         extractCallGraph(code, relPath, callGraph)
       } else {
         // AST：spec / table / sequence / standalone-proc
-        const parser = getParserFromInput(code) as any
-        const lexer = parser.getTokenStream()?.tokenSource
-        lexer?.removeErrorListeners()
-        parser.removeErrorListeners()
-        if (typeof parser._errHandler !== "undefined") {
-          parser._errHandler = new antlr4.BailErrorStrategy()
-        }
-        const tree = parser.sql_script()
-        const result = getParsedNodes(code, tree)
-
-        for (const scriptNode of result.nodes) {
-          if (scriptNode.type !== "Sql_scriptContext") continue
-          for (const unitNode of scriptNode.nodes) {
-            if (unitNode.type !== "Unit_statementContext") continue
-            for (const child of unitNode.nodes) {
-              switch (child.type) {
-                case "Create_packageContext":
-                  extractPackageSpec(child, packages, relPath)
-                  break
-                case "Create_package_bodyContext":
-                  extractPackageBody(child, packages, relPath, code)
-                  break
-                case "Create_procedure_bodyContext":
-                  extractStandaloneProc(child, standaloneProcedures, relPath, "procedure")
-                  break
-                case "Create_function_bodyContext":
-                  extractStandaloneProc(child, standaloneProcedures, relPath, "function")
-                  break
-                case "Create_tableContext":
-                  extractTable(child, tables, relPath)
-                  break
-                case "Create_triggerContext":
-                  extractTrigger(child, triggers, relPath)
-                  break
-                case "Create_viewContext":
-                  extractView(child, views, relPath)
-                  break
-                case "Create_sequenceContext":
-                  extractSequence(child, sequences, relPath)
-                  break
-              }
-            }
-          }
-        }
+        astParseScript(code, relPath)
         extractCallGraph(code, relPath, callGraph)
       }
     } catch (e) {
@@ -826,6 +876,19 @@ function classifyFile(code: string): "body" | "trigger" | "view" | "type" | "spe
   if (/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\b/i.test(code)) return "spec"
   if (/\bCREATE\b/i.test(code)) return "create" // table / sequence / standalone proc/func
   return "dml" // 纯 DML / 匿名块 / SQL*Plus 脚本
+}
+
+/**
+ * 拆分 spec+body 合并文件：在首个 PACKAGE BODY 声明处切开。
+ * 返回 { specCode: body 之前的部分（含包头 spec 及其它 DDL）, bodyCode: 从首个 PACKAGE BODY 到末尾 }。
+ * 无 PACKAGE BODY 时 bodyCode 为空串（spec-only 或非包文件）。
+ * 约定：合并文件中 spec 在 body 之前（与 pkg/<name>.sql 的"先包头后包体"顺序一致）；
+ *       单文件多包交错（spec1/body1/spec2/body2）不支持——项目按一包一文件组织。
+ */
+function splitPackageSpecAndBody(code: string): { specCode: string; bodyCode: string } {
+  const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i)
+  if (!m || m.index === undefined) return { specCode: code, bodyCode: "" }
+  return { specCode: code.slice(0, m.index), bodyCode: code.slice(m.index) }
 }
 
 /** 计算子串在全文中的起止行号（1-based） */
