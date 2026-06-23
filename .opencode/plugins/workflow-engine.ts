@@ -1940,8 +1940,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               }
             }
 
-            // ── 前置步骤：schema 获取（有 db.xml 配置时触发，无论是否已有 SQL 文件）──
-            // fetchSchemaIfNeeded 内部自行判断 db.xml 是否存在，无配置时静默返回 { fetched: false }
+            // ── 前置步骤：schema 获取（有 db.properties 配置时触发，无论是否已有 SQL 文件）──
+            // fetchSchemaIfNeeded 内部自行判断 db.properties 是否存在，无配置时静默返回 { fetched: false }
             let fetchStatus = "skipped"
             if (args.sourcePath) {
               const srcPath = args.sourcePath as string
