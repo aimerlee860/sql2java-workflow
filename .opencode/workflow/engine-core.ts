@@ -20,7 +20,7 @@ import { readFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdi
 import { safeWriteFile } from "./cross-platform"
 import { join } from "node:path"
 import { z } from "zod"
-import { validRefNameSet, parseQualified } from "./refname"
+import { validRefNameSet, parseQualified, pkgOf, refOf } from "./refname"
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
@@ -903,9 +903,8 @@ export class WorkflowEngine {
         // 每个 targetUnit 的 per-unit 文件须 status=completed，且 subprogramMethods 覆盖其 completedSubprograms。
         if (targetUnits && targetUnits.length > 0) {
           for (const u of targetUnits) {
-            const i = u.indexOf(".")
-            const pkg = i < 0 ? u : u.slice(0, i)
-            const ref = i < 0 ? u : u.slice(i + 1)
+            const pkg = pkgOf(u)
+            const ref = refOf(u)
             const unit = this.loadArtifactJson(join(artifactsDir, "translations", pkg), ref) as any
             if (!unit) continue // 缺失由 validateArtifactOnDisk 完整性检查覆盖
             const completed = (unit.completedSubprograms as string[]) ?? []
@@ -1181,17 +1180,18 @@ export class WorkflowEngine {
    */
 
   /**
-   * 按阶段决定分片所用的序列：analyze/review 拍平 SCC 组（每包一层，真正一包一分片），
+   * 按阶段决定分片所用的序列：analyze/review 拍平 SCC 组（每元素一层，真正一元素一分片），
    * translate 保留入参原貌（SCC 互依赖组必须共处）。
    *
-   * 入参语义随阶段而异：analyze/review 传包级 translationOrder；translate 传单元级 procedureOrder
-   *（`PKG.refName`，PROCEDURE 为 unit，FUNCTION 跟随属主）。两者都是 string[][] 拓扑层，本函数
-   * 仅按阶段决定是否拍平，不关心元素是包名还是 unit id。
+   * 入参语义随阶段而异：analyze 传单元级 procedureOrder（`PKG.refName`，PROCEDURE 为 unit，
+   * FUNCTION 跟随属主——下沉到 PROCEDURE 级后由 dispatch 注入）；review 传包级 translationOrder；
+   * translate 传单元级 procedureOrder。三者都是 string[][] 拓扑层，本函数仅按阶段决定是否拍平，
+   * 不关心元素是包名还是 unit id。
    *
-   * 为什么 analyze/review 可拆 SCC：每包的子程序结构 / FSD / 审查独立产出，跨包调用关系
-   * （callGraph）已由 inventory 代码预算，不依赖同组其它包的在 session 产物。
-   * 为什么 translate 不可拆：互依赖 unit 翻译时需同 session 拿到对方的 Java 方法签名，拆开会让
-   * 循环引用沦为 TODO 占位。
+   * 为什么 analyze/review 可拆 SCC：analyze 现下沉到 PROCEDURE 级，每 procedure 的子程序结构 / FSD
+   * 独立产出，跨包/跨单元调用关系（callGraph）已由 inventory 代码预算，不依赖同组其它单元的在 session
+   * 产物；review 每包审查独立。为什么 translate 不可拆：互依赖 unit 翻译时需同 session 拿到对方的
+   * Java 方法签名，拆开会让循环引用沦为 TODO 占位。
    */
   shardOrderForPhase(translationOrder: string[][], phase: string): string[][] {
     if (phase === "analyze" || phase === "review") {

@@ -274,9 +274,27 @@ export const AnalysisMetaSchema = z.object({
   functionOwnership: z.record(z.string(), z.string()).optional(),
 }).passthrough()
 
-/** analysis-packages/{pkg}.json — 逐包子程序结构 */
+/** analysis-packages/{pkg}.json — 逐包子程序结构（聚合，由 engine mergeUnitAnalysis 产出） */
 export const AnalysisPackageSchema = z.object({
   packageName: z.string(),
+  subprograms: z.array(SubprogramSchema),
+}).passthrough()
+
+/**
+ * analysis-packages/{pkg}/{unitRef}.json — PROCEDURE 级 analyze 产物（per-unit）。
+ *
+ * analyze 下沉到 PROCEDURE 级后，一个 unit = 一个 PROCEDURE（或孤儿 FUNCTION）+ 其 cargo FUNCTION。
+ * agent 只写本 unit 的 per-procedure 文件（根 + cargo 的 subprogram 结构）；engine 在每个 analyze
+ * 分片 advance 后 merge 同包所有 per-unit 文件 → 聚合 `analysis-packages/{pkg}.json`
+ * （AnalysisPackageSchema），下游 plan/review/translator 读聚合，形状不变。
+ *
+ * 与 [[translate-procedure-level]] 的 UnitTranslationSchema 同模式（per-unit + engine merge）。
+ */
+export const UnitAnalysisSchema = z.object({
+  /** unit 根子程序的 refName（PROCEDURE 或孤儿 FUNCTION），与文件名 {unitRef}.json 一致 */
+  unitRefName: z.string(),
+  packageName: z.string(),
+  /** 本单元子程序结构（根 + cargo FUNCTION），merge 后并入聚合 subprograms */
   subprograms: z.array(SubprogramSchema),
 }).passthrough()
 
@@ -780,6 +798,7 @@ export function getPerPackageSchema(phase: string): ZodType | null {
  */
 export function getPerUnitSchema(phase: string): ZodType | null {
   const schemaMap: Record<string, ZodType> = {
+    analyze: UnitAnalysisSchema,
     translate: UnitTranslationSchema,
   }
   return schemaMap[phase] ?? null

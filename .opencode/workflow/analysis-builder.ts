@@ -16,7 +16,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join, isAbsolute } from "node:path"
 import { AnalysisMetaSchema, AnalysisPackageSchema } from "./artifact-schemas"
 import { formatZodIssues } from "./engine-core"
-import { refNamesForPackage } from "./refname"
+import { refNamesForPackage, pkgOf } from "./refname"
 import { getLogger } from "./workflow-logger"
 
 // ── prescan inventory-index.json 形态（宽松读取）──
@@ -179,12 +179,6 @@ export function tarjanSCC(nodes: string[], edges: Map<string, Set<string>>): str
   return sccs
 }
 
-/** 从 `PKG.refName` 取包名（refName 不含 '.'，包名为单标识符，按首个 '.' 切分） */
-function pkgOfKey(key: string): string {
-  const i = key.indexOf(".")
-  return i < 0 ? key : key.slice(0, i)
-}
-
 /**
  * 计算 FUNCTION 属主归属（同包内，确定性）。见 plan「FUNCTION 属主归属」。
  *
@@ -211,9 +205,9 @@ export function assignFunctionOwnership(
       reverse.set(full, [])
     }
     for (const [s, callees] of Object.entries(callGraph)) {
-      if (pkgOfKey(s) !== pkg) continue
+      if (pkgOf(s) !== pkg) continue
       for (const t of callees) {
-        if (pkgOfKey(t) !== pkg) continue // 跨包边不参与同包属主
+        if (pkgOf(t) !== pkg) continue // 跨包边不参与同包属主
         const arr = reverse.get(t)
         if (arr) arr.push(s)
       }

@@ -18,7 +18,7 @@ import { toJSONSchema } from "zod/v4/core"
 import type { ZodType } from "zod"
 import {
   getSchemaForPhase, getPerPackageSchema, getPerUnitSchema, getSummarySchema,
-  getArtifactFilename, getAnalysisPackageSchema,
+  getArtifactFilename,
 } from "./artifact-schemas"
 import {
   REFINE_CONSTRAINTS, NON_ZOD_VALIDATION_RULES,
@@ -282,24 +282,19 @@ export function renderSchemaHint(phase: string | null | undefined): string {
     parts.push("")
   }
 
-  // ── Per-package schema ──
-  // hint 只渲染 worker 手写的 per-package 产物：
-  //   - analyze：analysis-packages/{pkg}.json（worker 读源码后手写，是本阶段主体产出）
-  //   - inventory 的 inventory-packages/{PKG}.json 由 generateInventory 代码生成（非 worker 手写），
-  //     不渲染——被拒时 workOrder 已注入精确 Zod 报错，无需预载该 schema。
-  if (phase === "analyze") {
-    const analysisPkgSchema = getAnalysisPackageSchema()
-    parts.push("### Per-Package: analysis-packages/{pkg}.json")
-    parts.push(renderZodSchema(analysisPkgSchema))
-    parts.push("")
-  }
-
-  // translate：PROCEDURE 级 per-unit 产物（agent 写 translations/{pkg}/{unitRef}.json，
-  // 聚合 translation.json 由 engine merge，非 agent 手写）；review/verify：per-package 产物
-  const perUnitSchema = phase === "translate" ? getPerUnitSchema(phase) : null
+  // ── Per-unit / per-package schema ──
+  // hint 只渲染 worker 手写的产物：
+  //   - analyze：PROCEDURE 级 per-unit analysis-packages/{pkg}/{unitRef}.json（UnitAnalysisSchema）；
+  //     聚合 analysis-packages/{pkg}.json 由 engine merge（非 agent 手写），不渲染。
+  //   - translate：PROCEDURE 级 per-unit translations/{pkg}/{unitRef}.json（UnitTranslationSchema）；
+  //     聚合 translation.json 由 engine merge，不渲染。
+  //   - inventory 的 inventory-packages/{PKG}.json 由 generateInventory 代码生成（非 worker 手写），不渲染。
+  //   - review/verify：per-package 产物。
+  const perUnitSchema = (phase === "translate" || phase === "analyze") ? getPerUnitSchema(phase) : null
   const perPackageSchema = perUnitSchema ? null : getPerPackageSchema(phase)
   if (perUnitSchema) {
-    parts.push("### Per-Unit: translations/{pkg}/{unitRef}.json")
+    const unitDir = phase === "analyze" ? "analysis-packages" : "translations"
+    parts.push(`### Per-Unit: ${unitDir}/{pkg}/{unitRef}.json`)
     parts.push(renderZodSchema(perUnitSchema))
     parts.push("")
   } else if (perPackageSchema) {
