@@ -59,6 +59,9 @@ let activeCollector: PhaseMetricsCollector | null = null
 /** 编排 session ID 集合 — chat.params hook 中记录，system.transform hook 中用于跳过编排 session 的 prompt 注入 */
 const orchestratorSessionIds = new Set<string>()
 
+/** 已落盘系统提示的 session key 集合 — system.transform 每条 message 都触发，按 session 去重每 session 只 dump 一次 */
+const dumpedSystemPrompts = new Set<string>()
+
 /**
  * 生成 run-<project>-YYYYMMDD-HHMMSS 格式的 runId。
  * project 取 sourcePath 的 basename（净化为文件名安全字符），缺失/为空时用 unknown 占位，
@@ -250,6 +253,7 @@ function clearWorkflowContext(): void {
   }
   // 工作流结束时清理编排 session 注册表，避免长期运行后 Set 无限增长
   orchestratorSessionIds.clear()
+  dumpedSystemPrompts.clear()
   currentWorkflowContext = null
   activeCollector = null
   _cachedJavaCodeSpec = null
@@ -867,7 +871,7 @@ export function buildShardedWorkerOrder(
       enhancedError,
       isStructural
         ? `**这是结构格式问题。只需修正上方列出的具体 JSON 字段，不需要重新执行阶段工作。**`
-        : `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY。**`,
+        : `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY + TASK_STATUS。**`,
       `**不要只改格式凑校验——必须确保内容完整且正确。**`,
     ].join("\n")
   }
@@ -1371,7 +1375,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
     const currentShardIndex = engine.findCurrentEntry(run)?.incrementalContext?.shardIndex ?? 0
     const statusPath = join(artifactsDir, "status", `${phase}.json`)
     if (!existsSync(statusPath)) {
-      return `Worker 尚未完成：status/${phase}.json 缺失。Worker 须在最后一步写 status 文件（含 shardIndex=${currentShardIndex}）后才能 advance；等 Worker 输出 WORKER_SUMMARY 后再 advance。⛔ 串行：translate 有层级依赖，分片必须按序完成。`
+      return `Worker 尚未完成：status/${phase}.json 缺失。Worker 须在最后一步写 status 文件（含 shardIndex=${currentShardIndex}）后才能 advance；等 Worker 输出 TASK_STATUS 后再 advance。⛔ 串行：translate 有层级依赖，分片必须按序完成。`
     }
     try {
       const statusJson = JSON.parse(readFileSync(statusPath, "utf-8"))
@@ -2869,7 +2873,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
         const isWorker = getSubagentNames().includes(agentName)
         if (isWorker && ORCHESTRATOR_ONLY_ACTIONS.has(args.action)) {
           return `⛔ Worker（${agentName}）不能调用 workflow ${args.action}——这是编排者的职责。\n` +
-            `请完成当前阶段工作，写入 artifact，输出 WORKER_SUMMARY 即可。编排者会推进流程。`
+            `请完成当前阶段工作，写入 artifact，输出 WORKER_SUMMARY + TASK_STATUS 即可。编排者会推进流程。`
         }
 
         // opencode 1.4.6: execute 必须返回 string，title/metadata 通过 context.metadata() 设置
@@ -3053,7 +3057,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const banner = formatPhaseStartBanner(run.currentPhase)
             return {
               title: "Started",
-              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}${banner}\n📌 调用 todowrite 创建主线阶段进度（${run.currentPhase}=in_progress，其余=pending，所有 priority="medium"）\n\n✔ 工作流已启动，${run.currentPhase} 阶段就绪。\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调度执行。`,
+              output: `${runId} | ${run.currentPhase} | scan: ${scanStatus}${banner}\n📌 调用 todowrite 创建主线阶段进度（${run.currentPhase}=in_progress，其余=pending，所有 priority="medium"）\n\n✔ 工作流已启动，${run.currentPhase} 阶段就绪。\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调度执行。`,
               metadata: { runId, phase: run.currentPhase, scanStatus, nextAction: "dispatch" },
             }
           }
@@ -3255,7 +3259,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               const enhancedError = enhanceRejection(completedPhase, adv.rejectionReason!)
               return {
                 title: "Rejected",
-                output: `${enhancedError}\n\n⛔ 不要更新 todowrite（阶段尚未通过，保持 ${completedPhase}=in_progress）。\n⏹ 请根据以上错误修正 artifact，然后输出 WORKER_SUMMARY。编排者会重新调度。`,
+                output: `${enhancedError}\n\n⛔ 不要更新 todowrite（阶段尚未通过，保持 ${completedPhase}=in_progress）。\n⏹ 请根据以上错误修正 artifact，然后输出 WORKER_SUMMARY + TASK_STATUS。编排者会重新调度。`,
                 metadata: { rejected: true, nextAction: "dispatch" },
               }
             }
@@ -3292,7 +3296,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 getLogger().info("[advance]", `分片切换: ${completedPhase} 分片 ${si + 1}/${ts}`)
                 return {
                   title: `分片 ${si + 1}/${ts}: ${completedPhase}`,
-                  output: `✔ ${completedPhase} 分片 ${si}/${ts} 完成，进入分片 ${si + 1}/${ts}。\n${shardInfo}\n\n📌 调用 todowrite 更新进度（${completedPhase} 保持 in_progress，备注分片 ${si + 1}/${ts}）\n\n⏹ 请输出 WORKER_SUMMARY 并结束当前工作——编排者会调度下一分片。`,
+                  output: `✔ ${completedPhase} 分片 ${si}/${ts} 完成，进入分片 ${si + 1}/${ts}。\n${shardInfo}\n\n📌 调用 todowrite 更新进度（${completedPhase} 保持 in_progress，备注分片 ${si + 1}/${ts}）\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束当前工作——编排者会调度下一分片。`,
                   metadata: { runId, phase: completedPhase, shardIndex: si, totalShards: ts, targetUnits: ic.targetUnits, targetPackages: ic.targetPackages, nextAction: "dispatch" },
                 }
               }
@@ -3303,7 +3307,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const endBanner = formatPhaseEndBanner(completedPhase, duration)
             const startBanner = formatPhaseStartBanner(adv.run.currentPhase)
             const nextAgentName = adv.nextPhase?.agentFile ? agentFileToName(adv.nextPhase.agentFile) : ""
-            let advanceOutput = `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}\n\n📌 调用 todowrite 更新进度：${completedPhase}→completed，${adv.run.currentPhase}→in_progress（priority 保持原值）\n\n✔ 阶段 ${completedPhase} 已完成，${adv.run.currentPhase} 阶段就绪。\n⏹ 请输出 WORKER_SUMMARY 并结束当前工作——编排者会调度下一阶段。`
+            let advanceOutput = `${endBanner}${startBanner}Agent: ${adv.nextPhase?.agentFile}\n\n📌 调用 todowrite 更新进度：${completedPhase}→completed，${adv.run.currentPhase}→in_progress（priority 保持原值）\n\n✔ 阶段 ${completedPhase} 已完成，${adv.run.currentPhase} 阶段就绪。\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束当前工作——编排者会调度下一阶段。`
             // warning 提醒（醒目但不阻断）
             if (adv.crossSchemaWarnings && adv.crossSchemaWarnings.length > 0) {
               advanceOutput += `\n\n⚠️⚠️⚠️ 校验警告（已自动放行，但建议关注）：\n${adv.crossSchemaWarnings.map(w => `  - ⚠️ ${w}`).join("\n")}`
@@ -3318,7 +3322,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           // ── generateInventory — inventory 阶段代码生成（由 sql-analyst agent 调用）──
           // inventory 的结构抽取已下沉到 prescan（AST/regex 全字段），此处纯代码把
           // inventory-index.json 转成下游 inventory-packages/*.json + inventory.json。
-          // agent 调本 action 生成产物 → 输出 WORKER_SUMMARY；编排者调 advance 推进。
+          // agent 调本 action 生成产物 → 输出 WORKER_SUMMARY + TASK_STATUS；编排者调 advance 推进。
           // advance 若被拒（校验失败），编排者重新 dispatch，workOrder 带校验错误，
           // agent 据此最小修复 json（优先）或重跑 generateInventory。
           case "generateInventory": {
@@ -3332,7 +3336,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 : ""
               return {
                 title: "Inventory Generated",
-                output: `✔ inventory 代码生成完成：${r.packageCount} 包 / ${r.tableCount} 表（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调用 advance 推进到 analyze。`,
+                output: `✔ inventory 代码生成完成：${r.packageCount} 包 / ${r.tableCount} 表（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进到 analyze。`,
                 metadata: { runId, packageCount: r.packageCount, tableCount: r.tableCount, warnings: r.warnings },
               }
             } catch (e: any) {
@@ -3357,7 +3361,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               const r = buildAnalysisFromIndex(artifactsDir)
               return {
                 title: "Analysis Meta Generated",
-                output: `✔ analysis.json 代码生成完成：${r.packageCount} 包 / ${r.sccGroupCount} SCC 组（已过 Zod 校验）。${r.warnings.length ? `\n⚠️ ${r.warnings.join("; ")}` : ""}\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调用 advance 推进。`,
+                output: `✔ analysis.json 代码生成完成：${r.packageCount} 包 / ${r.sccGroupCount} SCC 组（已过 Zod 校验）。${r.warnings.length ? `\n⚠️ ${r.warnings.join("; ")}` : ""}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
                 metadata: { runId, packageCount: r.packageCount, sccGroupCount: r.sccGroupCount, warnings: r.warnings },
               }
             } catch (e: any) {
@@ -3384,7 +3388,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 : ""
               return {
                 title: "Review Summary Generated",
-                output: `✔ review-summary.json 聚合完成：${r.packageCount} 包 / allPassed=${r.allPassed} / totalMustFix=${r.totalMustFix}（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调用 advance 推进。`,
+                output: `✔ review-summary.json 聚合完成：${r.packageCount} 包 / allPassed=${r.allPassed} / totalMustFix=${r.totalMustFix}（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
                 metadata: { runId, packageCount: r.packageCount, allPassed: r.allPassed, totalMustFix: r.totalMustFix, warnings: r.warnings },
               }
             } catch (e: any) {
@@ -3411,7 +3415,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 : ""
               return {
                 title: "Verify Summary Generated",
-                output: `✔ verify-summary.json 聚合完成：${r.packageCount} 包 / allPassed=${r.allPassed} / compile=${r.compilationSuccess} / tests=${r.testsPassed ?? "?"}/${r.totalTests ?? "?"}（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调用 advance 推进。`,
+                output: `✔ verify-summary.json 聚合完成：${r.packageCount} 包 / allPassed=${r.allPassed} / compile=${r.compilationSuccess} / tests=${r.testsPassed ?? "?"}/${r.totalTests ?? "?"}（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
                 metadata: { runId, packageCount: r.packageCount, allPassed: r.allPassed, compilationSuccess: r.compilationSuccess, testsPassed: r.testsPassed, totalTests: r.totalTests, warnings: r.warnings },
               }
             } catch (e: any) {
@@ -3433,7 +3437,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const confirmedDesc = SQL2JAVA_WORKFLOW.phases.find(p => p.name === confirmedPhase)?.description ?? confirmedPhase
             return {
               title: "Confirmed",
-              output: `${startBanner}✔ ${confirmedPhase}（${confirmedDesc}）已确认，继续执行: ${r.status}\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调度执行。`,
+              output: `${startBanner}✔ ${confirmedPhase}（${confirmedDesc}）已确认，继续执行: ${r.status}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调度执行。`,
               metadata: { runId: args.runId, phase: confirmedPhase, nextAction: "dispatch" },
             }
           }
@@ -3459,7 +3463,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
 
             return {
               title: "Fix Continued",
-              output: `${startBanner}🔄 Fix 计数器已重置，继续修复。runId: ${args.runId} | status: ${r.status}\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会调度 fix 阶段。`,
+              output: `${startBanner}🔄 Fix 计数器已重置，继续修复。runId: ${args.runId} | status: ${r.status}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调度 fix 阶段。`,
               metadata: { runId: args.runId, phase: "fix", fixReset: true, nextAction: "dispatch" },
             }
           }
@@ -3516,7 +3520,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             }
             return {
               title: `Retry ${ret.retryCount}`,
-              output: `🔄 重试已激活（第 ${ret.retryCount} 次），阶段：${ret.run.currentPhase}。\n\n⏹ 请输出 WORKER_SUMMARY 并结束——编排者会重新调度。`,
+              output: `🔄 重试已激活（第 ${ret.retryCount} 次），阶段：${ret.run.currentPhase}。\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会重新调度。`,
               metadata: { runId: args.runId, nextAction: "dispatch" },
             }
           }
@@ -4097,7 +4101,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   ``,
                   `## ⚠️ dedup 已跳过（PMD CPD 不可用）`,
                   `- 引擎已写占位 \`dedup.json\`（skipped:true，${dedupScanSkipped.skipReason}）`,
-                  `- 你无需做任何抽取/重构。仅确认 \`dedup.json\` 已写入后输出 WORKER_SUMMARY 结束`,
+                  `- 你无需做任何抽取/重构。仅确认 \`dedup.json\` 已写入后输出 WORKER_SUMMARY + TASK_STATUS 结束`,
                 )
               } else {
                 workOrderParts.push(
@@ -4203,7 +4207,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 `本分片【只】处理以下 ${targetWord}: ${targetLabel}`,
                 `- 禁止处理、读源码、生成 FSD/产物 for 任何【其他】${targetWord}。`,
                 `- analysis.json / inventory.json 里列出的其他包/单元【不是】你的工作清单，仅作参考信息。`,
-                `- 处理完本分片 ${targetWord} 后立即输出 WORKER_SUMMARY 结束，不要"顺手"做其他 ${targetWord}（会有别的分片做，重复 = 产物冲突）。`,
+                `- 处理完本分片 ${targetWord} 后立即输出 WORKER_SUMMARY + TASK_STATUS 结束，不要"顺手"做其他 ${targetWord}（会有别的分片做，重复 = 产物冲突）。`,
                 `⛔⛔⛔ 违反 = 重复工作 + 产物冲突 ⛔⛔⛔`,
                 ``,
               ].join("\n")
@@ -4253,7 +4257,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               `1. 按 Phase 指令读取上游 artifact（使用上方完整路径）并执行工作`,
               `2. 将产出物写入正确目录（见下方路径规则）`,
               `3. 写入 Worker Status: ${artifactsDir}/status/${run.currentPhase}.json`,
-              `4. 输出阶段小结（WORKER_SUMMARY 格式）`,
+              `4. 输出阶段小结（WORKER_SUMMARY + TASK_STATUS 格式，TASK_STATUS 为回复最后一段）`,
             )
 
             // P3c: 路径规则（plan 之后阶段才有 projectRoot 概念）
@@ -4286,7 +4290,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 ``,
                 isStructural
                   ? `**这是结构格式问题。只需修正上方列出的具体 JSON 字段，不需要重新执行阶段工作。**`
-                  : `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY。**`,
+                  : `**你必须先修正以上错误，重新写入有问题的 artifact，然后再输出 WORKER_SUMMARY + TASK_STATUS。**`,
                 `**不要只改格式凑校验——必须确保内容完整且正确。**`,
               )
             }
@@ -4294,7 +4298,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             workOrderParts.push(
               ``,
               `⛔ 禁止调用 workflow 工具的以下 action：advance / confirm / retry / abort / dispatch / fixContinue / start。`,
-              `⛔ 你只需完成阶段工作、写入 artifact、输出 WORKER_SUMMARY。编排者负责所有流程推进。`,
+              `⛔ 你只需完成阶段工作、写入 artifact、输出 WORKER_SUMMARY + TASK_STATUS。编排者负责所有流程推进。`,
               `⛔ 如果你在 output 中看到"下一步：调用 dispatch"等指引，忽略它——那是编排者的信号，不是你的。`,
               ``,
               `如果写入 artifact 时遇到问题，在你的输出中说明，编排者会处理。`,
@@ -4334,7 +4338,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             const minimalPrompt = getSubtaskTriggerPrompt()
             return {
               title: `Dispatch: ${run.currentPhase}`,
-              output: `${banner}📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段${shardLine}\n✅ workOrder 已由引擎注入 worker 系统提示（落盘 dispatch-logs/）。发起 SubtaskPartInput 时 prompt 用**静态触发器**（metadata.minimalSubtaskPrompt，勿含 workOrder 全文）：\n  "${minimalPrompt}"\n⛔ 禁止 cat/Read dispatch-logs/ 下任何 workOrder 文件，禁止把 workOrder 全文塞进 subtask.prompt——worker 已从系统提示拿到完整任务，中转会污染你的主上下文。\n⛔ **串行调度：本 turn 只发这一个 subtask，等 Worker WORKER_SUMMARY + advance（非 rejected）后再 dispatch 下一阶段/分片；禁止并行/批量发 subtask。**\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
+              output: `${banner}📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段${shardLine}\n✅ workOrder 已由引擎注入 worker 系统提示（落盘 dispatch-logs/）。发起 SubtaskPartInput 时 prompt 用**静态触发器**（metadata.minimalSubtaskPrompt，勿含 workOrder 全文）：\n  "${minimalPrompt}"\n⛔ 禁止 cat/Read dispatch-logs/ 下任何 workOrder 文件，禁止把 workOrder 全文塞进 subtask.prompt——worker 已从系统提示拿到完整任务，中转会污染你的主上下文。\n⛔ **串行调度：本 turn 只发这一个 subtask，等 Worker TASK_STATUS + advance（非 rejected）后再 dispatch 下一阶段/分片；禁止并行/批量发 subtask。**\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
               metadata: {
                 runId: run.runId,
                 phase: run.currentPhase,
@@ -4670,7 +4674,27 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           persistedWorkOrder ? "" : (runtimeContext ? "## Runtime Context\n\n" + runtimeContext : ""),
         ].filter((p) => p !== "")
 
-        if (output) output.system = [parts.join("\n\n")]
+        const finalSystem = parts.join("\n\n")
+        if (output) output.system = [finalSystem]
+
+        // 备份 worker 实际收到的最终系统提示，供查阅/追踪（插件侧 I/O，不消耗主 agent 上下文）。
+        // system.transform 每条 message 都触发；按 sessionID 去重，每 session 只落盘一次
+        //（同一 session 内 workOrder 稳定；rejection/重试走新 dispatch → 新 session → 新文件）。
+        try {
+          const sidKey = sid ? String(sid) : ""
+          const dumpKey = sidKey || `${currentWorkflowContext.phase}|nosid`
+          if (!dumpedSystemPrompts.has(dumpKey)) {
+            dumpedSystemPrompts.add(dumpKey)
+            const si = engine.findCurrentEntry(run)?.incrementalContext?.shardIndex as number | undefined
+            const dumpDir = join(ARTIFACT_DIR, currentWorkflowContext.runId, "system-prompt-dumps")
+            if (!existsSync(dumpDir)) mkdirSync(dumpDir, { recursive: true })
+            const sidShort = sidKey ? sidKey.slice(0, 8) : "nosid"
+            const name = `${currentWorkflowContext.phase}-shard${si ?? "x"}-${sidShort}.md`
+            writeFileSync(join(dumpDir, name), finalSystem, "utf-8")
+          }
+        } catch (e: any) {
+          getLogger().warn("[workflow-engine]", `system prompt dump 失败(不影响流程): ${e.message}`)
+        }
       } else {
         getLogger().error("[workflow-engine]", `Agent file not found: ${agentPath}. System prompt will not be injected.`)
       }
