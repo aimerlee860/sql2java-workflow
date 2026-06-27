@@ -45,7 +45,12 @@ import { initLogger, getLogger, destroyLogger } from "../workflow/workflow-logge
 
 const engine = new WorkflowEngine()
 engine.registerDefinition(SQL2JAVA_WORKFLOW)
-const ARTIFACT_DIR = ".workflow-artifacts"
+// 绝对路径：worker 子 agent 的 cwd 可能是 sourcePath（待转译项目目录），而非项目根。
+// workOrder 里的 artifact 路径若是相对的（.workflow-artifacts/...），worker 会解析到
+// sourcePath/.workflow-artifacts/...（不存在）。改成绝对路径，worker 不论 cwd 都能找到。
+// resolve 基于 opencode 进程 cwd（=项目根，artifacts 落盘点）。engine-core 有自己的
+// artifactsRoot（默认相对），同进程同 cwd，解析到同一磁盘位置，一致。
+const ARTIFACT_DIR = resolve(".workflow-artifacts")
 
 let currentWorkflowContext: {
   runId: string
@@ -2783,21 +2788,22 @@ export function buildUnitScopeBlock(
     const pkg = pkgOf(u)
     const rootRef = refOf(u)
     lines.push(`### unit ${u}`)
+    const sliceDir = `${artifactsDir}/shard-inputs/${pkg}/${rootRef}`
 
     if (phase === "analyze") {
-      lines.push(`- 切片目录：shard-inputs/${pkg}/${rootRef}/（source.sql + inventory-slice.json + meta.json，引擎已预切，含本 unit 根 + cargo）`)
-      const outParts = [`analysis-packages/${pkg}/${rootRef}.json（结构）`, `fsd/${pkg}/${rootRef}.md（FSD）`]
+      lines.push(`- 切片目录：${sliceDir}/（source.sql + inventory-slice.json + meta.json，引擎已预切，含本 unit 根 + cargo）`)
+      const outParts = [`${artifactsDir}/analysis-packages/${pkg}/${rootRef}.json（结构）`, `${artifactsDir}/fsd/${pkg}/${rootRef}.md（FSD）`]
       for (const [func, owner] of Object.entries(ownership)) {
-        if (owner === u) outParts.push(`fsd/${pkgOf(func)}/${refOf(func)}.md（cargo FSD）`)
+        if (owner === u) outParts.push(`${artifactsDir}/fsd/${pkgOf(func)}/${refOf(func)}.md（cargo FSD）`)
       }
       lines.push(`- 输出：${outParts.join(" + ")}`)
     } else {
       // translate
-      lines.push(`- 切片目录：shard-inputs/${pkg}/${rootRef}/（source.sql + analysis-slice.json + meta.json，引擎已预切，含本 unit 根 + cargo）`)
-      const fsdInputs = [`fsd/${pkg}/${rootRef}.md`]
-      for (const [func, owner] of Object.entries(ownership)) if (owner === u) fsdInputs.push(`fsd/${pkgOf(func)}/${refOf(func)}.md`)
+      lines.push(`- 切片目录：${sliceDir}/（source.sql + analysis-slice.json + meta.json，引擎已预切，含本 unit 根 + cargo）`)
+      const fsdInputs = [`${artifactsDir}/fsd/${pkg}/${rootRef}.md`]
+      for (const [func, owner] of Object.entries(ownership)) if (owner === u) fsdInputs.push(`${artifactsDir}/fsd/${pkgOf(func)}/${refOf(func)}.md`)
       lines.push(`- FSD 输入：${fsdInputs.join(", ")}`)
-      lines.push(`- 输出：translations/${pkg}/${rootRef}.json（per-unit 翻译产物）`)
+      lines.push(`- 输出：${artifactsDir}/translations/${pkg}/${rootRef}.json（per-unit 翻译产物）`)
       lines.push(`- 依赖签名：见 workOrder「依赖签名」预注入块（已内联跨包/同包跨单元调用签名，⛔ 勿 read translations/*/translation.json）`)
     }
   }
