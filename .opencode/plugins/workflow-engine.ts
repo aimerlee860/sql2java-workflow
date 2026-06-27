@@ -855,6 +855,7 @@ export function buildShardedWorkerOrder(
     ? [
         `## 分片信息`,
         `- 本分片序号: ${si + 1} / ${ts}`,
+        `- shardIndex: ${si + 1}（1-based，写入 status.shardIndex 用此值——advance 校验据此匹配，勿用 0-based）`,
         `- 本分片${targetWord}列表: ${targetList}`,
         `- **只处理以上列出的${targetWord}，不要处理其他${targetWord}**`,
         `- 已完成分片: ${(activeShardPlan?.completedShards ?? []).map((i: number) => i + 1).join(", ") || "无"}`,
@@ -945,7 +946,7 @@ function buildSharedInstructions(run: WorkflowRun): string {
 \`\`\`json
 {
   "phase": "{currentPhase}",
-  "shardIndex": <Runtime Context 的 shardIndex>,
+  "shardIndex": <分片信息里的 shardIndex，1-based>,
   "status": "completed",
   "startedAt": "...",
   "completedAt": "...",
@@ -954,7 +955,7 @@ function buildSharedInstructions(run: WorkflowRun): string {
 }
 \`\`\`
 
-**分片阶段（analyze/translate）必填 \`shardIndex\`**（取 Runtime Context 的 \`shardIndex\`），advance 据此确认当前分片 Worker 已完成；shardIndex 缺失或不匹配当前分片 → advance 拒绝。非分片阶段省略 \`shardIndex\`。
+**分片阶段（analyze/translate）必填 \`shardIndex\`**（取分片信息里的 \`shardIndex\`，1-based，与「本分片序号」一致），advance 据此确认当前分片 Worker 已完成；shardIndex 缺失或不匹配当前分片 → advance 拒绝。非分片阶段省略 \`shardIndex\`。
 
 ### 阶段完成输出（重要：主 agent 只收你回复的最后一段文本）
 
@@ -4179,6 +4180,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 ``,
                 `## 分片信息`,
                 `- 本分片序号: ${si + 1} / ${ts}`,
+                `- shardIndex: ${si + 1}（1-based，写入 status.shardIndex 用此值——advance 校验据此匹配，勿用 0-based）`,
                 `- 本分片${targetWord}列表: ${targetLabel}`,
                 `- **只处理以上列出的${targetWord}，不要处理其他${targetWord}**`,
                 `- 已完成分片: ${activeShardPlan.completedShards.map(i => i + 1).join(", ") || "无"}`,
