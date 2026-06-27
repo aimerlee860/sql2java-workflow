@@ -175,6 +175,29 @@ function formatPhaseStartBanner(phaseName: string | null | undefined): string {
   ].join("\n")
 }
 
+/** 权威进度摘要（一行）：已完成阶段✓ + 当前阶段分片 N/M。注入 dispatch/advance 输出，
+ *  防止编排者长上下文后凭记忆 confabulate 进度（如误报 analyze 7/13 实则 13/13 已完成）。
+ *  引擎状态为唯一真相源——编排者以此为准，禁止凭记忆回顾。 */
+function formatProgressSummary(run: WorkflowRun): string {
+  const parts: string[] = []
+  for (const p of SQL2JAVA_WORKFLOW.phases) {
+    if (p.isFixPhase) continue // fix 是条件分支，不计入主线进度
+    if (p.name === run.currentPhase) {
+      const sp = engine.getShardPlan(run)
+      if (sp && sp.shards.length > 1) {
+        // completedShards 紧凑 [0..k]，当前分片 1-based = k+1
+        parts.push(`${p.name} ${sp.completedShards.length + 1}/${sp.shards.length}`)
+      } else {
+        parts.push(`${p.name}▶`)
+      }
+    } else {
+      const done = run.phaseHistory.some(h => h.phase === p.name && h.status === "completed")
+      if (done) parts.push(`${p.name}✓`)
+    }
+  }
+  return `📊 进度: ${parts.join(" | ")}`
+}
+
 /** 格式化阶段完成 banner */
 function formatPhaseEndBanner(phaseName: string, duration?: string): string {
   if (!phaseName) return ""
@@ -3307,7 +3330,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                 getLogger().info("[advance]", `分片切换: ${completedPhase} 分片 ${si + 1}/${ts}`)
                 return {
                   title: `分片 ${si + 1}/${ts}: ${completedPhase}`,
-                  output: `✔ ${completedPhase} 分片 ${si}/${ts} 完成，进入分片 ${si + 1}/${ts}。\n${shardInfo}\n\n📌 调用 todowrite 更新进度（${completedPhase} 保持 in_progress，备注分片 ${si + 1}/${ts}）\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束当前工作——编排者会调度下一分片。`,
+                  output: `${formatProgressSummary(adv.run)}\n✔ ${completedPhase} 分片 ${si}/${ts} 完成，进入分片 ${si + 1}/${ts}。\n${shardInfo}\n\n📌 调用 todowrite 更新进度（${completedPhase} 保持 in_progress，备注分片 ${si + 1}/${ts}）\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束当前工作——编排者会调度下一分片。`,
                   metadata: { runId, phase: completedPhase, shardIndex: si, totalShards: ts, targetUnits: ic.targetUnits, targetPackages: ic.targetPackages, nextAction: "dispatch" },
                 }
               }
@@ -4348,9 +4371,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             // 所有阶段：workOrder 已由引擎注入 worker 系统提示（system.transform 读 dispatch-logs/ 持久化文件），
             // 编排者无需中转 workOrder 全文——发最小 subtask 触发器即可。避免 workOrder 堆积污染主上下文。
             const minimalPrompt = getSubtaskTriggerPrompt()
+            const progressSummary = formatProgressSummary(run)
             return {
               title: `Dispatch: ${run.currentPhase}`,
-              output: `${banner}📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段${shardLine}\n✅ workOrder 已由引擎注入 worker 系统提示（落盘 dispatch-logs/）。发起 SubtaskPartInput 时 prompt 用**静态触发器**（metadata.minimalSubtaskPrompt，勿含 workOrder 全文）：\n  "${minimalPrompt}"\n⛔ 禁止 cat/Read dispatch-logs/ 下任何 workOrder 文件，禁止把 workOrder 全文塞进 subtask.prompt——worker 已从系统提示拿到完整任务，中转会污染你的主上下文。\n⛔ **串行调度：本 turn 只发这一个 subtask，等 Worker TASK_STATUS + advance（非 rejected）后再 dispatch 下一阶段/分片；禁止并行/批量发 subtask。**\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
+              output: `${banner}${progressSummary}\n📋 调度 ${agentName} 执行 ${run.currentPhase} 阶段${shardLine}\n✅ workOrder 已由引擎注入 worker 系统提示（落盘 dispatch-logs/）。发起 SubtaskPartInput 时 prompt 用**静态触发器**（metadata.minimalSubtaskPrompt，勿含 workOrder 全文）：\n  "${minimalPrompt}"\n⛔ 禁止 cat/Read dispatch-logs/ 下任何 workOrder 文件，禁止把 workOrder 全文塞进 subtask.prompt——worker 已从系统提示拿到完整任务，中转会污染你的主上下文。\n⛔ **串行调度：本 turn 只发这一个 subtask，等 Worker TASK_STATUS + advance（非 rejected）后再 dispatch 下一阶段/分片；禁止并行/批量发 subtask。**\n📌 调用 todowrite 更新进度（${run.currentPhase}=in_progress，priority 保持原值）${dedupSkipNotice}`,
               metadata: {
                 runId: run.runId,
                 phase: run.currentPhase,
