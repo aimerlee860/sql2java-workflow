@@ -353,6 +353,22 @@ msgpackr saves all JavaScript `Date`s using the standard MessagePack date extens
 ### Structured Cloning
 With structured cloning enabled, msgpackr will also use extensions to store Set, Map, Error, RegExp, ArrayBufferView objects and preserve their types.
 
+## Upgrading to 2.0
+
+msgpackr 2.0 removes the `randomAccessStructure` option and the internal `struct.js` module that implemented random-access struct encoding. This feature was previously undocumented and intended for internal use.
+
+If you were using `randomAccessStructure: true`, the functionality is now available as the standalone [`structon`](https://github.com/HarperFast/structon) package. Structon provides the same random-access encoding with a more explicit API:
+
+```js
+import { Packr } from 'msgpackr';
+import { createStructon } from 'structon';
+
+const Structon = createStructon(Packr);
+const codec = new Structon({ structures: [] });
+```
+
+Data encoded with `randomAccessStructure: true` in earlier msgpackr versions is fully readable by structon, and vice versa—the binary format is identical.
+
 ## Alternate Encoding/Package
 The high-performance serialization and deserialization algorithms in the msgpackr package are also available in the [cbor-x](https://github.com/kriszyp/cbor-x) for the CBOR format, with the same API and design. A quick summary of the pros and cons of using MessagePack vs CBOR are:
 * MessagePack has wider adoption, and, at least with this implementation is slightly more efficient (by roughly 1%).
