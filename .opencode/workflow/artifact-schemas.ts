@@ -146,37 +146,18 @@ export const InventoryPackageSchema = z.object({
   { message: "有 procedures 的包必须有 bodyFile（procedure 实现体在 body 中）" }
 )
 // ============================================================================
-// Inventory Schema（索引模式：packages 拆分为 per-package 文件，DDL 保留在此）
+// Inventory Schema（顶层轻量索引：packageNames + tableNames + triggers/views/sequences + 元信息）
+// tables 列结构拆到 tables/{TABLE}.json（TableArtifactSchema）；包过程详情拆到 packages/+subprograms/
 // ============================================================================
 
 export const InventorySchema = z.object({
   sourcePath: z.string(),
+  scannedAt: z.string().optional(),
+  scannerUsed: ciEnumLower(["ast", "regex"]).optional(),
+  warnings: z.array(z.string()).default([]),
+
   packageNames: z.array(z.string()),
-
-  tables: z.array(z.object({
-    name: z.string(),
-    ddlFile: z.string().nullable().optional(),
-    columns: z.array(z.object({
-      name: z.string(),
-      oracleType: z.string(),
-      nullable: z.boolean(),
-      isPrimaryKey: z.boolean(),
-      defaultValue: z.string().nullable().optional(),
-    })),
-  })),
-
-  standaloneProcedures: z.array(z.object({
-    name: z.string(),
-    type: ciEnumLower(["procedure", "function"]),
-    params: z.array(z.object({
-      name: z.string(),
-      oracleType: z.string(),
-      direction: ciEnumUpper(["IN", "OUT", "IN OUT"]),
-    })),
-    returnType: z.string().nullable().optional(),
-    sourceFile: z.string(),
-    lineRange: z.tuple([z.number(), z.number()]),
-  })),
+  tableNames: z.array(z.string()),
 
   triggers: z.array(z.object({
     name: z.string(),
@@ -206,6 +187,80 @@ export const InventorySchema = z.object({
     maxValue: z.number().nullable().optional(),
     cycle: z.boolean().nullable().optional(),
   })),
+}).passthrough()
+
+// ============================================================================
+// 新版按实体落盘 schema（packages/{PKG}.json + subprograms/{PKG.METHOD}.json + tables/{TABLE}.json）
+// ============================================================================
+
+const LocationInfoSchema = z.object({
+  absolutePath: z.string(),
+  lineRange: z.tuple([z.number(), z.number()]),
+})
+
+/** packages/{PKG}.json — 包容器（procedures/functions 仅名字索引，详情在 subprograms/） */
+export const PackageArtifactSchema = z.object({
+  packageName: z.string(),                         // 大写、保留点（FM.XXX）
+  absolutePaths: z.array(z.string()),
+  headerPath: z.string().nullable(),
+  bodyPath: z.string().nullable(),
+  constants: z.array(z.object({ name: z.string(), type: z.string(), value: z.string() })).default([]),
+  variables: z.array(z.object({ name: z.string(), type: z.string(), defaultValue: z.string().nullable() })).default([]),
+  exceptions: z.array(z.object({ name: z.string() })).default([]),
+  types: z.array(z.object({ name: z.string(), kind: z.string(), definition: z.string() })).default([]),
+  functions: z.array(z.string()).default([]),
+  procedures: z.array(z.string()).default([]),
+  estimatedLoc: z.number().default(0),
+  complexity: z.object({
+    score: z.number().min(1).max(10),
+    patterns: z.array(z.string()),
+    riskLevel: ciEnumLower(["low", "medium", "high"]),
+  }).optional(),
+}).passthrough()
+
+/** subprograms/{PKG.METHOD}.json — 原子子程序（header/body 双定位 + per-method directCalls） */
+export const SubprogramArtifactSchema = z.object({
+  name: z.string(),
+  type: z.enum(["PROCEDURE", "FUNCTION"]),
+  belongToPackage: z.string(),
+  overloadIndex: z.number().nullable(),
+  isPrivate: z.boolean(),
+  headerLocation: LocationInfoSchema.nullable(),
+  bodyLocation: LocationInfoSchema.nullable(),
+  parameters: z.array(z.object({
+    name: z.string(),
+    type: z.string(),
+    mode: ciEnumUpper(["IN", "OUT", "IN OUT"]),
+    defaultExpression: z.string().nullable(),
+  })).default([]),
+  returnType: z.string().nullable(),
+  loc: z.number().default(0),
+  directCalls: z.array(z.object({
+    package: z.string(),
+    name: z.string(),
+    line: z.number(),
+    kind: z.enum(["function", "procedure"]),
+  })).default([]),
+}).passthrough()
+
+/** tables/{TABLE}.json — 单表列结构 + 主键 + 外键 */
+export const TableArtifactSchema = z.object({
+  name: z.string(),
+  ddlFile: z.string().nullable().optional(),
+  columns: z.array(z.object({
+    name: z.string(),
+    oracleType: z.string(),
+    nullable: z.boolean(),
+    isPrimaryKey: z.boolean(),
+    defaultValue: z.string().nullable().optional(),
+  })).default([]),
+  primaryKey: z.array(z.string()).optional(),
+  foreignKeys: z.array(z.object({
+    name: z.string(),
+    columns: z.array(z.string()),
+    refTable: z.string(),
+    refColumns: z.array(z.string()),
+  })).optional(),
 }).passthrough()
 
 // ============================================================================

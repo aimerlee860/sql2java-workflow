@@ -1,65 +1,84 @@
 /**
- * PL/SQL Structural Scanner — AST + regex 双模式
+ * PL/SQL Structural Scanner — antlr4ts Listener 单遍 AST 抽取
  *
- * 在 inventory worker 第 0 步（workflow scan action）确定性扫描 PL/SQL 源码目录，产出 inventory-index.json。
- * 不依赖 LLM，不占用上下文窗口。
+ * 在 inventory worker 第 0 步（workflow scan action）确定性扫描 PL/SQL 源码目录，产出 InventoryIndex。
+ * 不依赖 LLM，不占用上下文窗口。运行态零 JDK（只用入库的生成 TS + antlr4ts 纯 TS 运行时）。
  *
- * AST 模式：@griffithswaite/ts-plsql-parser（ANTLR4 生成）
- * Regex 降级：Node.js fs + 正则（parser 安装失败时自动降级）
+ * 解析器：.opencode/workflow/plsql-ast/ 下 antlr4ts 生成的 PlSqlLexer/PlSqlParser + 手写基类。
+ * 默认错误恢复（不设 BailErrorStrategy）容忍 grammar 缺口（FORALL SAVE EXCEPTIONS / FOR UPDATE OF 等），
+ * body 不再降级 regex。
+ *
+ * 输出结构（新）：packages[]（包容器，procedures/functions 仅名字索引）+ subprograms[]（原子子程序，
+ * 含 header/body 双定位 + per-method directCalls）+ tables[] + triggers[] + views[] + sequences[]。
+ * standalone 过程注入为虚拟包。由 inventory-builder 落盘为 packages/+subprograms/+tables/+inventory.json。
  */
 
 import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join, extname, relative, sep } from "node:path"
-import { ensureDeps, findOpencodeDir } from "./ensure-deps"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
 import { getLogger } from "./workflow-logger"
+import { PlSqlLexer } from "./plsql-ast/PlSqlLexer"
+import { PlSqlParser } from "./plsql-ast/PlSqlParser"
+import { PlSqlParserListener } from "./plsql-ast/PlSqlParserListener"
+import type { Procedure_specContext, Function_specContext, Procedure_bodyContext, Function_bodyContext, Create_packageContext, Create_package_bodyContext, Create_function_bodyContext, Create_procedure_bodyContext, Variable_declarationContext, Exception_declarationContext, Type_declarationContext, Call_statementContext, Standard_functionContext, Routine_nameContext } from "./plsql-ast/PlSqlParser"
+import { CharStreams, CommonTokenStream } from "antlr4ts"
+import { ParseTreeWalker } from "antlr4ts/tree/ParseTreeWalker"
+import { ParserRuleContext } from "antlr4ts/ParserRuleContext"
+import { TerminalNode } from "antlr4ts/tree/TerminalNode"
+import { ErrorNode } from "antlr4ts/tree/ErrorNode"
 
 // ── 类型 ────────────────────────────────────────────────────────────────────────
 
-export interface ParamIndex {
-  name: string
-  oracleType: string
-  direction: "IN" | "OUT" | "IN OUT"
-}
-
-export interface ProcedureIndex {
-  name: string
-  type: "procedure" | "function"
-  lineRange?: [number, number]  // [startLine, endLine]
-  // ── 结构抽取扩展（AST 模式填充；regex 降级时缺省）──
-  params?: ParamIndex[]
-  returnType?: string | null     // FUNCTION 的返回类型；procedure 为 null/缺省
-  loc?: number                   // 行数（lineRange 跨度）
-}
-
-export interface TypeIndex {
-  name: string
-  kind: string                   // RECORD / TABLE / VARRAY / REF CURSOR / OBJECT ...
-  definition: string
-}
-
-export interface VariableIndex {
+export interface ParamInfo {
   name: string
   type: string
-  defaultValue?: string | null
+  mode: "IN" | "OUT" | "IN OUT"
+  defaultExpression: string | null
 }
 
-export interface ConstantIndex {
-  name: string
-  type: string
-  value: string
+export interface LocationInfo {
+  absolutePath: string
+  lineRange: [number, number]
 }
 
-export interface PackageIndex {
+export interface DirectCall {
+  package: string
   name: string
-  headerFile?: string
-  bodyFile?: string
-  procedures: ProcedureIndex[]
+  line: number
+  kind: "function" | "procedure"
+}
+
+export interface SubprogramInfo {
+  name: string
+  type: "PROCEDURE" | "FUNCTION"
+  belongToPackage: string
+  overloadIndex: number | null
+  isPrivate: boolean
+  headerLocation: LocationInfo | null
+  bodyLocation: LocationInfo | null
+  parameters: ParamInfo[]
+  returnType: string | null
+  loc: number
+  directCalls: DirectCall[]
+}
+
+export interface ConstantInfo { name: string; type: string; value: string }
+export interface VariableInfo { name: string; type: string; defaultValue: string | null }
+export interface ExceptionInfo { name: string }
+export interface TypeInfo { name: string; kind: string; definition: string }
+
+export interface PackageInfo {
+  packageName: string
+  absolutePaths: string[]
+  headerPath: string | null
+  bodyPath: string | null
+  constants: ConstantInfo[]
+  variables: VariableInfo[]
+  exceptions: ExceptionInfo[]
+  types: TypeInfo[]
+  functions: string[]
+  procedures: string[]
   estimatedLoc: number
-  // ── 结构抽取扩展（AST 模式填充；regex 降级时缺省）──
-  types?: TypeIndex[]
-  variables?: VariableIndex[]
-  constants?: ConstantIndex[]
 }
 
 export interface ColumnIndex {
@@ -69,827 +88,573 @@ export interface ColumnIndex {
   isPrimaryKey: boolean
   defaultValue?: string | null
 }
+export interface ForeignKeyInfo { name: string; columns: string[]; refTable: string; refColumns: string[] }
 
 export interface TableIndex {
   name: string
   ddlFile?: string
-  // ── 结构抽取扩展 ──
   columns?: ColumnIndex[]
+  primaryKey?: string[]
+  foreignKeys?: ForeignKeyInfo[]
 }
 
 export interface TriggerIndex {
-  name: string
-  sourceFile: string
-  // ── 结构抽取扩展 ──
-  timing?: string                // before / after / instead-of
-  level?: string                 // row / statement
-  targetTable?: string
-  events?: string[]              // insert / update / delete
-  lineRange?: [number, number]
-  condition?: string | null
+  name: string; sourceFile: string
+  timing?: string; level?: string; targetTable?: string; events?: string[]
+  lineRange?: [number, number]; condition?: string | null
 }
-
-export interface ViewIndex {
-  name: string
-  ddlFile?: string
-  // ── 结构抽取扩展 ──
-  columns?: string[]
-  underlyingTables?: string[]
-}
-
+export interface ViewIndex { name: string; ddlFile?: string; columns?: string[]; underlyingTables?: string[] }
 export interface SequenceIndex {
-  name: string
-  ddlFile?: string
-  // ── 结构抽取扩展 ──
-  startWith?: number | null
-  incrementBy?: number | null
-  minValue?: number | null
-  maxValue?: number | null
-  cycle?: boolean | null
+  name: string; ddlFile?: string
+  startWith?: number | null; incrementBy?: number | null
+  minValue?: number | null; maxValue?: number | null; cycle?: boolean | null
 }
-
 export interface StandaloneProcIndex {
-  name: string
-  type: "procedure" | "function"
-  sourceFile: string
-  // ── 结构抽取扩展 ──
-  params?: ParamIndex[]
-  returnType?: string | null
-  lineRange?: [number, number]
+  name: string; type: "PROCEDURE" | "FUNCTION"; sourceFile: string
+  parameters?: ParamInfo[]; returnType?: string | null; lineRange?: [number, number]
 }
 
 export interface InventoryIndex {
   sourcePath: string
   scannedAt: string
   scannerUsed: "ast" | "regex"
-  packages: PackageIndex[]
+  warnings: string[]
+  packages: PackageInfo[]
+  subprograms: SubprogramInfo[]
   tables: TableIndex[]
   triggers: TriggerIndex[]
   views: ViewIndex[]
   sequences: SequenceIndex[]
   standaloneProcedures: StandaloneProcIndex[]
-  callGraph?: Record<string, string[]>
 }
 
-// ── AST 模式内部类型 ────────────────────────────────────────────────────────────
+// ── 通用辅助 ────────────────────────────────────────────────────────────────────
 
-interface ParsedNode {
-  type: string
-  text: string
-  start: string | null
-  stop: string | null
-  nodes: ParsedNode[]
+/** 规范化标识符：去引号、去空白、大写、保留点（包名 fm.xxx 的点编码子目录路径） */
+function cleanName(name: string): string {
+  return name.replace(/["`]/g, "").trim().toUpperCase()
+}
+
+/** 规范化类型文本：'VARCHAR2 ( 50 )' → 'VARCHAR2(50)'，'t_item %ROWTYPE' → 't_item%ROWTYPE' */
+function normalizeTypeText(s: string): string {
+  return s.replace(/\s*([(),%])\s*/g, "$1").replace(/\s+/g, " ").trim()
+}
+
+/** 取 ctx 的起止行号（1-based 闭区间）；stop 缺失时退化为 start */
+function ctxLineRange(ctx: ParserRuleContext): [number, number] | null {
+  const s = ctx.start?.line
+  const e = ctx.stop?.line ?? s
+  if (!s) return null
+  return [s, e]
+}
+
+/** 取 ctx 原始文本（保留大小写，供类型/默认值等） */
+function ctxText(ctx: ParserRuleContext | undefined | null): string {
+  if (!ctx) return ""
+  return ctx.text ?? ""
 }
 
 // ── SQL*Plus 命令预处理 ────────────────────────────────────────────────────────
 
 /**
- * 剥离 SQL*Plus 专有命令，避免 ANTLR 解析器报错。
- * SQL*Plus 命令是客户端编排指令（prompt/@@/SET 等），不含 PL/SQL 结构定义，
- * 对 inventory 扫描无影响。
- *
- * 处理的命令：
- *   prompt <text>        — 控制台输出
- *   @@<file> / @<file>   — 文件引入（扫描器已单独收集每个文件）
- *   SET / SPOOL / DEFINE / UNDEFINE / VARIABLE / ACCEPT 等
+ * 剥离 SQL*Plus 专有命令，避免解析器报错。
+ * SQL*Plus 命令是客户端编排指令（prompt/@@/SET 等），不含 PL/SQL 结构定义。
  */
 function stripSqlPlusCommands(code: string): string {
   return code
     .split("\n")
     .map(line => {
       const trimmed = line.trimStart()
-      // prompt（SQL*Plus 输出命令）
       if (/^prompt\b/i.test(trimmed)) return ""
-      // @@ 或 @ 引入文件
       if (/^@@?\s?\S/i.test(trimmed)) return ""
-      // 常见 SQL*Plus 会话/格式命令
       if (/^(SET|SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|EXIT|QUIT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|REM|CLEAR)\b/i.test(trimmed)) return ""
       return line
     })
     .join("\n")
 }
 
-// ── Parser 安装检测 & 自动安装 ─────────────────────────────────────────────────
+// ── AST Listener ─────────────────────────────────────────────────────────────────
 
-let parserAvailable: boolean | null = null
+/** SQL 伪列 / 内建函数，不计入 directCalls（后过滤会再按已知子程序收窄，此处快速排除常见 SQL 函数） */
+const SQL_PSEUDO = new Set([
+  "NEXTVAL", "CURRVAL", "COUNT", "EXISTS", "FIRST", "LAST",
+  "ROWNUM", "ROWID", "LEVEL", "ROWTYPE", "TYPE",
+  "ROWCOUNT", "FOUND", "NOTFOUND", "ISOPEN", "BULK_ROWCOUNT",
+  "SUM", "AVG", "MIN", "MAX", "ROUND", "LEAST", "GREATEST",
+  "SYSDATE", "SYSTIMESTAMP", "USER", "UID",
+  "NVL", "NVL2", "COALESCE", "NULLIF", "DECODE", "CASE",
+  "TO_CHAR", "TO_NUMBER", "TO_DATE", "TO_TIMESTAMP", "TO_CLOB",
+  "SUBSTR", "INSTR", "LENGTH", "LENGTHB", "TRIM", "LTRIM", "RTRIM",
+  "UPPER", "LOWER", "INITCAP", "REPLACE", "TRANSLATE", "LPAD", "RPAD",
+  "MOD", "ABS", "POWER", "CEIL", "FLOOR", "SIGN", "TRUNC",
+  "ADD_MONTHS", "MONTHS_BETWEEN", "LAST_DAY", "EXTRACT",
+  "DBMS_OUTPUT", "SQLERRM", "SQLCODE",
+])
 
 /**
- * 检测 parser 是否可用，不可用则通过 ensureDeps 安装所有依赖。
- * 成功返回 true，失败返回 false（将降级到 regex）。
+ * 单文件 Listener：把 PL/SQL 结构抽取到全局累加器（packages/subprograms）。
+ * 跨文件 header/body 合并：subprograms 按 `PKG.METHOD` 键 + 重载顺序槽位合并 headerLocation/bodyLocation。
  */
-export async function ensureParser(): Promise<boolean> {
-  if (parserAvailable !== null) return parserAvailable
+class PlSqlStructListener implements PlSqlParserListener {
+  /** 当前所处包名（大写带点）；spec/body 进入时置位，退出时清空 */
+  private currentPackage: string | null = null
+  /** 当前所处子程序栈（仅 body 压栈，用于 directCalls 归属 caller） */
+  private subprogramStack: SubprogramInfo[] = []
+  /** 包级声明栈深度：仅在栈空时收 package 级 constants/variables/types/exceptions */
+  constructor(
+    private readonly absolutePath: string,
+    private readonly packages: Map<string, PackageInfo>,
+    private readonly subprograms: Map<string, SubprogramInfo[]>,
+    private readonly standaloneProcedures: StandaloneProcIndex[],
+    private readonly warnings: string[],
+  ) {}
 
-  const opencodeDir = findOpencodeDir()
+  // ── 包级 ────────────────────────────────────────────────────────────────────
 
-  // 1. 尝试 require（使用显式 paths 确保从 .opencode/node_modules 解析）
-  try {
-    require.resolve("@griffithswaite/ts-plsql-parser", { paths: [opencodeDir] })
-    parserAvailable = true
-    return true
-  } catch {}
-
-  // 2. 通过统一依赖安装模块安装所有依赖
-  try {
-    await ensureDeps()
-    // 安装后再次检测
-    require.resolve("@griffithswaite/ts-plsql-parser", { paths: [opencodeDir] })
-    parserAvailable = true
-    return true
-  } catch {
-    parserAvailable = false
-    return false
+  private getOrCreatePackage(fullName: string): PackageInfo {
+    const name = cleanName(fullName)
+    this.currentPackage = name
+    let pkg = this.packages.get(name)
+    if (!pkg) {
+      pkg = {
+        packageName: name,
+        absolutePaths: [],
+        headerPath: null,
+        bodyPath: null,
+        constants: [],
+        variables: [],
+        exceptions: [],
+        types: [],
+        functions: [],
+        procedures: [],
+        estimatedLoc: 0,
+      }
+      this.packages.set(name, pkg)
+    }
+    if (!pkg.absolutePaths.includes(this.absolutePath)) pkg.absolutePaths.push(this.absolutePath)
+    return pkg
   }
+
+  /** 从 create_package/body ctx 提取完整包名（schema.package，保留点） */
+  private extractFullPackageName(ctx: Create_packageContext | Create_package_bodyContext): string | null {
+    // package_name 在规则里被引用两次（PACKAGE 后 + END 后），antlr4ts 返回数组；取首个。
+    const pns = ctx.package_name() as unknown
+    const pnArr = Array.isArray(pns) ? pns : [pns]
+    const name = pnArr[0]?.text
+    if (!name) return null
+    const schema = ctx.schema_object_name()?.text
+    return schema ? `${schema}.${name}` : name
+  }
+
+  enterCreate_package(ctx: Create_packageContext) {
+    const full = this.extractFullPackageName(ctx)
+    if (!full) return
+    const pkg = this.getOrCreatePackage(full)
+    if (!pkg.headerPath) pkg.headerPath = this.absolutePath
+    pkg.estimatedLoc += ctxText(ctx).split("\n").length
+  }
+  enterCreate_package_body(ctx: Create_package_bodyContext) {
+    const full = this.extractFullPackageName(ctx)
+    if (!full) return
+    const pkg = this.getOrCreatePackage(full)
+    if (!pkg.bodyPath) pkg.bodyPath = this.absolutePath
+    pkg.estimatedLoc += ctxText(ctx).split("\n").length
+  }
+  exitCreate_package() { this.currentPackage = null }
+  exitCreate_package_body() { this.currentPackage = null }
+
+  // ── 子程序注册（spec=headerLocation, body=bodyLocation + 压栈）──────────────
+
+  /**
+   * 注册子程序：按 `PKG.METHOD` 键取槽位数组。
+   *  - spec：找首个 headerLocation===null 的槽位填 headerLocation；无则新建槽位。
+   *  - body：找首个 bodyLocation===null 的槽位填 bodyLocation；无则新建槽位（私有方法）。
+   * 参数/返回类型：spec 优先（权威签名），body 仅在槽位无参数时补（私有方法）。
+   */
+  private registerSubprogram(
+    nameRaw: string,
+    type: "PROCEDURE" | "FUNCTION",
+    isBody: boolean,
+    ctx: Procedure_specContext | Function_specContext | Procedure_bodyContext | Function_bodyContext,
+    params: ParamInfo[],
+    returnType: string | null,
+  ): SubprogramInfo | null {
+    if (!this.currentPackage) return null
+    const name = cleanName(nameRaw)
+    const key = `${this.currentPackage}.${name}`
+    const slots = this.subprograms.get(key) ?? []
+
+    let slot: SubprogramInfo | undefined
+    if (isBody) {
+      slot = slots.find(s => s.bodyLocation === null)
+    } else {
+      slot = slots.find(s => s.headerLocation === null)
+    }
+    if (!slot) {
+      slot = {
+        name,
+        type,
+        belongToPackage: this.currentPackage,
+        overloadIndex: null,            // 最终扁平化时按槽位数组长度决定
+        isPrivate: false,
+        headerLocation: null,
+        bodyLocation: null,
+        parameters: [],
+        returnType: null,
+        loc: 0,
+        directCalls: [],
+      }
+      slots.push(slot)
+      this.subprograms.set(key, slots)
+    }
+    const range = ctxLineRange(ctx)
+    const loc: LocationInfo | null = range ? { absolutePath: this.absolutePath, lineRange: range } : null
+    if (isBody) {
+      if (loc) { slot.bodyLocation = loc; slot.loc = loc.lineRange[1] - loc.lineRange[0] + 1 }
+      if (slot.parameters.length === 0 && params.length > 0) slot.parameters = params
+      if (slot.returnType === null && returnType !== null) slot.returnType = returnType
+      this.subprogramStack.push(slot)
+    } else {
+      if (loc) slot.headerLocation = loc
+      // spec 是签名权威：覆盖参数/返回类型
+      if (params.length > 0) slot.parameters = params
+      if (type === "FUNCTION") slot.returnType = returnType
+    }
+    slot.isPrivate = slot.headerLocation === null
+    return slot
+  }
+
+  enterProcedure_spec(ctx: Procedure_specContext) {
+    const name = ctx.identifier()?.text
+    if (!name) return
+    this.registerSubprogram(name, "PROCEDURE", false, ctx, extractParams(ctx.parameter()), null)
+  }
+  enterFunction_spec(ctx: Function_specContext) {
+    const name = ctx.identifier()?.text
+    if (!name) return
+    this.registerSubprogram(name, "FUNCTION", false, ctx, extractParams(ctx.parameter()), extractReturnType(ctx))
+  }
+  enterProcedure_body(ctx: Procedure_bodyContext) {
+    const name = ctx.identifier()?.text
+    if (!name) return
+    this.registerSubprogram(name, "PROCEDURE", true, ctx, extractParams(ctx.parameter()), null)
+  }
+  enterFunction_body(ctx: Function_bodyContext) {
+    const name = ctx.identifier()?.text
+    if (!name) return
+    this.registerSubprogram(name, "FUNCTION", true, ctx, extractParams(ctx.parameter()), extractReturnType(ctx))
+  }
+  exitProcedure_body() { this.subprogramStack.pop() }
+  exitFunction_body() { this.subprogramStack.pop() }
+
+  // ── standalone CREATE PROCEDURE/FUNCTION（顶层，非包内）──────────────────────
+  enterCreate_function_body(ctx: Create_function_bodyContext) {
+    const name = cleanName(ctx.function_name()?.text ?? "")
+    if (!name) return
+    const range = ctxLineRange(ctx)
+    this.standaloneProcedures.push({
+      name, type: "FUNCTION", sourceFile: this.absolutePath,
+      parameters: extractParams(ctx.parameter()),
+      returnType: normalizeTypeText(ctxText(ctx.type_spec())) || null,
+      lineRange: range ?? undefined,
+    })
+  }
+  enterCreate_procedure_body(ctx: Create_procedure_bodyContext) {
+    const name = cleanName(ctx.procedure_name()?.text ?? "")
+    if (!name) return
+    const range = ctxLineRange(ctx)
+    this.standaloneProcedures.push({
+      name, type: "PROCEDURE", sourceFile: this.absolutePath,
+      parameters: extractParams(ctx.parameter()),
+      returnType: null,
+      lineRange: range ?? undefined,
+    })
+  }
+
+  // ── 包级声明（仅在 subprogramStack 为空时收，避免收进过程局部变量）─────────
+
+  enterVariable_declaration(ctx: Variable_declarationContext) {
+    if (!this.currentPackage || this.subprogramStack.length > 0) return
+    const pkg = this.packages.get(this.currentPackage)!
+    const name = cleanName(ctx.identifier()?.text ?? "")
+    if (!name) return
+    const isConst = !!ctx.CONSTANT()
+    const type = normalizeTypeText(ctxText(ctx.type_spec())) || "unknown"
+    const defaultExpr = ctx.default_value_part()?.expression()
+    const valueText = defaultExpr ? normalizeTypeText(ctxText(defaultExpr)) : null
+    if (isConst) {
+      pkg.constants.push({ name, type, value: valueText ?? "" })
+    } else {
+      pkg.variables.push({ name, type, defaultValue: valueText })
+    }
+  }
+
+  enterException_declaration(ctx: Exception_declarationContext) {
+    if (!this.currentPackage || this.subprogramStack.length > 0) return
+    const pkg = this.packages.get(this.currentPackage)!
+    const name = cleanName(ctx.identifier()?.text ?? "")
+    if (name) pkg.exceptions.push({ name })
+  }
+
+  enterType_declaration(ctx: Type_declarationContext) {
+    if (!this.currentPackage || this.subprogramStack.length > 0) return
+    const pkg = this.packages.get(this.currentPackage)!
+    const name = cleanName(ctx.identifier()?.text ?? "")
+    if (!name) return
+    let kind = "UNKNOWN"
+    const def = ctxText(ctx)
+    if (/IS\s+RECORD/i.test(def)) kind = "RECORD"
+    else if (/IS\s+TABLE\s+OF/i.test(def)) kind = "TABLE"
+    else if (/IS\s+VARRAY/i.test(def)) kind = "VARRAY"
+    else if (/IS\s+REF\s+CURSOR/i.test(def) || /REF\s+CURSOR/i.test(def)) kind = "REF CURSOR"
+    pkg.types.push({ name, kind, definition: normalizeTypeText(def) })
+  }
+
+  // ── directCalls（caller 栈非空时记）────────────────────────────────────────
+
+  enterCall_statement(ctx: Call_statementContext) {
+    if (this.subprogramStack.length === 0) return
+    // call_statement: CALL? routine_name function_argument? ('.' routine_name function_argument?)* ...
+    // routine_name 被引用多次，antlr4ts 返回数组；join 所有 routine_name 文本得完整限定名。
+    const rns = ctx.routine_name() as unknown
+    const rnArr = Array.isArray(rns) ? rns : [rns]
+    const parts = rnArr.map(rn => rn?.text).filter(Boolean)
+    if (parts.length === 0) return
+    this.recordCall(parts.join("."), ctx.start.line, "procedure")
+  }
+  enterStandard_function(ctx: Standard_functionContext) {
+    if (this.subprogramStack.length === 0) return
+    // standard_function 文本形如 'pkg.func(args)' 或 'func(args)'；正则取前置限定名
+    const m = ctxText(ctx).match(/^([A-Za-z_][\w.]*)\s*\(/)
+    if (!m) return
+    this.recordCall(m[1], ctx.start.line, "function")
+  }
+
+  private recordCallFromRoutine(_rn: Routine_nameContext | undefined, _line: number, _kind: "function" | "procedure") {
+    // 保留签名兼容；实际 directCalls 经 enterCall_statement / enterStandard_function 走 recordCall
+  }
+
+  /** 把限定名拆为 package + name；裸名归属调用方所属包；排除 SQL 伪列与自递归 */
+  private recordCall(qualified: string, line: number, kind: "function" | "procedure") {
+    if (this.subprogramStack.length === 0) return
+    const caller = this.subprogramStack[this.subprogramStack.length - 1]
+    const cleaned = qualified.replace(/["`]/g, "")
+    const lastDot = cleaned.lastIndexOf(".")
+    let pkg: string
+    let method: string
+    if (lastDot > 0) {
+      pkg = cleanName(cleaned.slice(0, lastDot))
+      method = cleanName(cleaned.slice(lastDot + 1))
+    } else {
+      pkg = caller.belongToPackage
+      method = cleanName(cleaned)
+    }
+    if (method.length < 2 || SQL_PSEUDO.has(method)) return
+    // 排除 :NEW/:OLD 绑定变量上下文（routine_name 不会匹配，但防 :NEW.X 误入）
+    if (pkg === "NEW" || pkg === "OLD") return
+    if (pkg === caller.belongToPackage && method === caller.name) return // 自递归
+    caller.directCalls.push({ package: pkg, name: method, line, kind })
+  }
+
+  // ParseTreeListener 必需的 4 个 no-op
+  enterEveryRule() {}
+  exitEveryRule() {}
+  visitTerminal() {}
+  visitErrorNode() {}
 }
 
-// ── AST 扫描 ────────────────────────────────────────────────────────────────────
+// ── 参数 / 返回类型抽取 ─────────────────────────────────────────────────────────
+
+/** 从 ParameterContext[] 抽参数（name/type/mode/defaultExpression） */
+function extractParams(params: ParameterContext[]): ParamInfo[] {
+  const out: ParamInfo[] = []
+  for (const p of params) {
+    const name = cleanName(p.parameter_name()?.text ?? p.text ?? "")
+    if (!name) continue
+    const type = normalizeTypeText(ctxText(p.type_spec())) || "unknown"
+    const hasIn = !!p.IN()
+    const hasOut = !!p.OUT()
+    let mode: ParamInfo["mode"]
+    if (hasIn && hasOut) mode = "IN OUT"
+    else if (hasOut) mode = "OUT"
+    else mode = "IN"
+    const expr = p.default_value_part()?.expression()
+    const defaultExpression = expr ? normalizeTypeText(ctxText(expr)) : null
+    out.push({ name, type, mode, defaultExpression })
+  }
+  return out
+}
+
+/** 从 function spec/body ctx 取 RETURN 后的返回类型（第一个 type_spec） */
+function extractReturnType(ctx: Function_specContext | Function_bodyContext): string | null {
+  // RETURN type_spec ... —— 取 ctx 内的 type_spec（function spec/body 含一个 type_spec 为返回类型）
+  const ts = ctx.type_spec()
+  if (ts) return normalizeTypeText(ctxText(ts)) || null
+  return null
+}
+
+// ── AST 扫描主流程 ──────────────────────────────────────────────────────────────
 
 /**
- * 使用 @griffithswaite/ts-plsql-parser 的 getParsedNodes 提取结构。
- * 逐文件解析，汇总结果。
+ * 用 antlr4ts listener 扫描源码目录，产出 InventoryIndex。
+ * 逐文件解析，packages/subprograms 在全局 Map 中跨文件合并。
  */
 export async function scanWithAST(roots: string[], primaryBase: string): Promise<InventoryIndex> {
-  const { getParserFromInput, getParsedNodes } = await import("@griffithswaite/ts-plsql-parser")
-  // 动态导入 antlr4 的 BailErrorStrategy，避免静态导入找不到模块的类型错误
-  const antlr4 = await import("antlr4")
   const files = collectSourceFiles(roots)
-  const packages = new Map<string, PackageIndex>()
+  const packages = new Map<string, PackageInfo>()
+  const subprograms = new Map<string, SubprogramInfo[]>()
   const tables: TableIndex[] = []
   const triggers: TriggerIndex[] = []
   const views: ViewIndex[] = []
   const sequences: SequenceIndex[] = []
   const standaloneProcedures: StandaloneProcIndex[] = []
-  const callGraph: Record<string, string[]> = {}
-
-  /**
-   * AST 解析一段脚本（header / table / sequence / standalone-proc），结构写入累加器。
-   * 闭包捕获动态导入的 parser 工厂；可对合并文件切出的 header 段单独调用。
-   * lineRange 由 parser 的 token 位置给出，相对于传入的 segmentCode 起始行（1-based）。
-   */
-  const astParseScript = (segmentCode: string, segRelPath: string) => {
-    const parser = getParserFromInput(segmentCode) as any
-    const lexer = parser.getTokenStream()?.tokenSource
-    lexer?.removeErrorListeners()
-    parser.removeErrorListeners()
-    if (typeof parser._errHandler !== "undefined") {
-      parser._errHandler = new antlr4.BailErrorStrategy()
-    }
-    const tree = parser.sql_script()
-    const result = getParsedNodes(segmentCode, tree)
-
-    for (const scriptNode of result.nodes) {
-      if (scriptNode.type !== "Sql_scriptContext") continue
-      for (const unitNode of scriptNode.nodes) {
-        if (unitNode.type !== "Unit_statementContext") continue
-        for (const child of unitNode.nodes) {
-          switch (child.type) {
-            case "Create_packageContext":
-              extractPackageHeader(child, packages, segRelPath)
-              break
-            case "Create_package_bodyContext":
-              extractPackageBody(child, packages, segRelPath, segmentCode)
-              break
-            case "Create_procedure_bodyContext":
-              extractStandaloneProc(child, standaloneProcedures, segRelPath, "procedure")
-              break
-            case "Create_function_bodyContext":
-              extractStandaloneProc(child, standaloneProcedures, segRelPath, "function")
-              break
-            case "Create_tableContext":
-              extractTable(child, tables, segRelPath)
-              break
-            case "Create_triggerContext":
-              extractTrigger(child, triggers, segRelPath)
-              break
-            case "Create_viewContext":
-              extractView(child, views, segRelPath)
-              break
-            case "Create_sequenceContext":
-              extractSequence(child, sequences, segRelPath)
-              break
-          }
-        }
-      }
-    }
-  }
+  const warnings: string[] = []
+  const processed = new Set<string>()  // 按绝对路径去重，防多根重叠导致重复扫描
 
   for (const filePath of files) {
+    if (processed.has(filePath)) continue
+    processed.add(filePath)
     const rawCode = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
     const relPath = storedFilePath(filePath, primaryBase)
-    const ext = extname(filePath).toLowerCase()
     const code = stripSqlPlusCommands(rawCode)
 
-    // 按文件类型路由：ts-plsql-parser 对含 SQL 体的构造（package body / trigger / view）
-    // 解析极慢或抛错（FOR UPDATE OF / FORALL SAVE EXCEPTIONS 等 grammar 缺口），而 inventory
-    // 只需 header 的签名 + DDL 结构，body 仅需 lineRange（regex 即可）。故：
-    //   header / table / sequence / standalone-proc → AST（快、结构丰富）
-    //   body         → regex 取 lineRange（签名由 header 提供）
-    //   trigger/view → 文本提取（元数据在头部 / SELECT，不进 AST 体）
-    //   type / dml   → 跳过（inventory 不建模对象类型 / DML）
-    //
-    // header+body 合并文件（pkg/<name>.sql 同时含包头与包体）：classifyFile 命中 "body"，
-    // 但其中 header 段仍需走 AST 拿参数/类型/变量/常量。故在 body 分支内检测是否含 header：
-    //   含 header → 在首个 PACKAGE BODY 处切开。body 段先 regex 取 lineRange（相对 bodyCode，
-    //             按 header 行数偏移到合并文件绝对行号）；header 段再 AST 覆盖 procedures（保留
-    //             body 的 lineRange，补 params/types/vars/consts）。先 body 后 header 与
-    //             "header/body 分文件时 header 后处理覆盖 body" 语义一致，body 私有过程被丢弃。
-    //   仅 body → 整文件 regex（原行为）。
-    const kind = classifyFile(code)
+    // table/trigger/view/sequence 仍走文本提取（与包结构无关，不在痛点范围）
+    extractTableFromText(code, tables, relPath)
+    extractTriggerFromText(code, triggers, relPath)
+    extractViewFromText(code, views, relPath)
+    extractSequenceFromText(code, sequences, relPath)
+
+    // 包/子程序/独立过程走 AST
     try {
-      if (kind === "body") {
-        const hasSpec = /CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\b)/i.test(code)
-        if (hasSpec) {
-          const bodyMatch = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i)
-          const bodyStartIdx = bodyMatch?.index ?? 0
-          // body 起始的 1-based 行号；lineOffset = body 之前的行数，把 bodyCode 相对行号偏移到合并文件绝对行号
-          const lineOffset = code.slice(0, bodyStartIdx).split("\n").length - 1
-          const { headerCode, bodyCode } = splitPackageHeaderAndBody(code)
-          const beforeNames = new Set(packages.keys())
-          if (bodyCode.trim()) {
-            regexFallbackForFile(bodyCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
-            // 仅偏移本次 body 段新建包的过程行号（合并文件中包首次出现于 body 段）
-            for (const pkg of packages.values()) {
-              if (!beforeNames.has(pkg.name) && pkg.bodyFile === relPath) {
-                for (const proc of pkg.procedures) {
-                  if (proc.lineRange) {
-                    proc.lineRange = [proc.lineRange[0] + lineOffset, proc.lineRange[1] + lineOffset]
-                  }
-                }
-              }
-            }
-          }
-          if (headerCode.trim()) {
-            try {
-              astParseScript(headerCode, relPath)
-            } catch (e) {
-              const errMsg = e instanceof Error ? e.message : String(e)
-              getLogger().warn("[plsql-scanner]", `AST 解析 header 段失败，降级到 regex: ${relPath} — ${errMsg}`)
-              regexFallbackForFile(headerCode, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
-            }
-          }
-        } else {
-          regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
-        }
-        extractCallGraph(code, relPath, callGraph)
-      } else if (kind === "trigger") {
-        extractTriggerFromText(code, triggers, relPath)
-        extractCallGraph(code, relPath, callGraph)
-      } else if (kind === "view") {
-        extractViewFromText(code, views, relPath)
-        extractCallGraph(code, relPath, callGraph)
-      } else if (kind === "type" || kind === "dml") {
-        // 跳过结构抽取；仍抽取调用关系（CREATE TYPE BODY / DML 中可能有调用）
-        extractCallGraph(code, relPath, callGraph)
-      } else {
-        // AST：header / table / sequence / standalone-proc
-        astParseScript(code, relPath)
-        extractCallGraph(code, relPath, callGraph)
-      }
+      const lex = new PlSqlLexer(CharStreams.fromString(code))
+      const tokens = new CommonTokenStream(lex)
+      const parser = new PlSqlParser(tokens)
+      // 默认错误恢复：不清空 error listener 的话默认 ConsoleErrorListener 会打印；
+      // 挂一个收集 warning 的 listener，不抛。
+      lex.removeErrorListeners()
+      parser.removeErrorListeners()
+      const tree = parser.sql_script()
+      const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, warnings)
+      ParseTreeWalker.DEFAULT.walk(listener as any, tree)
     } catch (e) {
-      // AST 解析失败，降级到 regex 提取
-      const errMsg = e instanceof Error ? e.message : String(e)
-      getLogger().warn("[plsql-scanner]", `AST 解析失败，降级到 regex: ${relPath} — ${errMsg}`)
-      regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
+      const msg = e instanceof Error ? e.message : String(e)
+      warnings.push(`AST 解析失败，跳过该文件的包结构: ${relPath} — ${msg}`)
+      getLogger().warn("[plsql-scanner]", `AST 解析失败: ${relPath} — ${msg}`)
     }
   }
 
+  // 扁平化 subprograms，赋 overloadIndex（同名>1 才标序）
+  const subprogramList: SubprogramInfo[] = []
+  for (const slots of subprograms.values()) {
+    if (slots.length > 1) {
+      slots.forEach((s, i) => { s.overloadIndex = i + 1 })
+    }
+    subprogramList.push(...slots)
+  }
+
+  // standalone 虚拟包注入（在 directCalls 后过滤前，使调用 standalone 的边被保留）
   const pkgList = Array.from(packages.values())
-  injectStandaloneVirtualPackages(pkgList, standaloneProcedures)
+  injectStandaloneVirtualPackages(pkgList, subprogramList, standaloneProcedures)
+
+  // directCalls 后过滤 + 去重：只保留指向已知子程序的调用（排除 SQL 内建函数 / 外部包 / 误捕）。
+  // 建索引：PKG -> Set<METHOD>（大写），用于校验 callee 是否落在本项目子程序集合内。
+  const subprogramIndex = new Map<string, Set<string>>()
+  for (const s of subprogramList) {
+    let set = subprogramIndex.get(s.belongToPackage)
+    if (!set) { set = new Set(); subprogramIndex.set(s.belongToPackage, set) }
+    set.add(s.name)
+  }
+  for (const s of subprogramList) {
+    const seen = new Set<string>()
+    const filtered: DirectCall[] = []
+    for (const c of s.directCalls) {
+      const methods = subprogramIndex.get(c.package)
+      if (!methods || !methods.has(c.name)) continue  // callee 非本项目子程序，丢弃
+      const key = `${c.package}.${c.name}.${c.line}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      filtered.push(c)
+    }
+    s.directCalls = filtered
+  }
+
+  // 回填包的 functions/procedures 名字索引（去重，保序）
+  for (const pkg of pkgList) {
+    const seenProc = new Set<string>()
+    const seenFunc = new Set<string>()
+    for (const s of subprogramList) {
+      if (s.belongToPackage !== pkg.packageName) continue
+      if (s.type === "FUNCTION") {
+        if (!seenFunc.has(s.name)) { seenFunc.add(s.name); pkg.functions.push(s.name) }
+      } else {
+        if (!seenProc.has(s.name)) { seenProc.add(s.name); pkg.procedures.push(s.name) }
+      }
+    }
+  }
+
   return {
     sourcePath: primaryBase,
     scannedAt: new Date().toISOString(),
     scannerUsed: "ast",
+    warnings,
     packages: pkgList,
+    subprograms: subprogramList,
     tables,
     triggers,
     views,
     sequences,
     standaloneProcedures,
-    callGraph: Object.keys(callGraph).length > 0 ? callGraph : undefined,
   }
 }
 
-// ── AST 提取辅助函数 ────────────────────────────────────────────────────────────
-
-/** 从 Package_nameContext 的子节点提取包名 */
-function extractPackageName(node: ParsedNode): string | null {
-  if (node.type === "Package_nameContext") {
-    return findIdentifierText(node)
-  }
-  for (const child of node.nodes) {
-    const name = extractPackageName(child)
-    if (name) return name
-  }
-  return null
-}
-
-/** 从 Table_nameContext 提取表名 */
-function extractTableName(node: ParsedNode): string | null {
-  if (node.type === "Table_nameContext") {
-    return findIdentifierText(node)
-  }
-  for (const child of node.nodes) {
-    const name = extractTableName(child)
-    if (name) return name
-  }
-  return null
-}
-
-/** 从 Trigger_nameContext 提取触发器名 */
-function extractTriggerName(node: ParsedNode): string | null {
-  if (node.type === "Trigger_nameContext") {
-    return findIdentifierText(node)
-  }
-  for (const child of node.nodes) {
-    const name = extractTriggerName(child)
-    if (name) return name
-  }
-  return null
-}
-
-/** 从 Sequence_nameContext 提取序列名 */
-function extractSequenceName(node: ParsedNode): string | null {
-  if (node.type === "Sequence_nameContext") {
-    return nameContextText(node)
-  }
-  for (const child of node.nodes) {
-    const name = extractSequenceName(child)
-    if (name) return name
-  }
-  return null
-}
-
-/** 从节点中找到第一个 IdentifierContext 的文本（跳过关键字 token） */
-function findIdentifierText(node: ParsedNode): string | null {
-  if (node.type === "IdentifierContext") {
-    return node.text?.toUpperCase() ?? null
-  }
-  for (const child of node.nodes) {
-    const text = findIdentifierText(child)
-    if (text) return text
-  }
-  return null
-}
+// ── standalone 虚拟包注入 ──────────────────────────────────────────────────────
 
 /**
- * 从 *NameContext 提取名称：优先找 IdentifierContext 子节点；找不到则直接用
- * context 节点的 text（部分 context 如 Sequence_nameContext 不含 IdentifierContext，
- * 名称直接挂在节点 text 上）。返回大写。
+ * standalone CREATE PROCEDURE/FUNCTION 自成虚拟包（__STANDALONE_X__），其子程序落入 subprograms。
+ * 保留 standaloneProcedures 数组供 metrics 兼容。
  */
-function nameContextText(node: ParsedNode): string | null {
-  const id = findIdentifierText(node)
-  if (id) return id
-  const t = (node.text || "").trim()
-  return t ? t.toUpperCase() : null
-}
-
-/** 解析 "line:col" 格式的位置为行号 */
-function parseLine(pos: string | null): number | null {
-  if (!pos) return null
-  return parseInt(pos.split(":")[0], 10) || null
-}
-
-// ── 结构抽取通用辅助（AST 模式专用）────────────────────────────────────────────
-
-/** 收集子树中所有指定 type 的节点 */
-function collectByType(node: ParsedNode, type: string, acc: ParsedNode[] = []): ParsedNode[] {
-  if (node.type === type) acc.push(node)
-  if (node.nodes) for (const c of node.nodes) collectByType(c, type, acc)
-  return acc
-}
-
-/** 拼接节点子树所有叶子 token 文本（保留原始大小写） */
-function subtreeText(node: ParsedNode): string {
-  if (!node.nodes || node.nodes.length === 0) return (node.text || "").trim()
-  return node.nodes.map(subtreeText).filter(Boolean).join(" ")
-}
-
-/** 规范化类型文本：'VARCHAR2 ( 50 )' → 'VARCHAR2(50)'，'t_item %ROWTYPE' → 't_item%ROWTYPE' */
-function normalizeTypeText(s: string): string {
-  return s
-    .replace(/\s*([(),%])\s*/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim()
-}
-
-/** 第一个 IdentifierContext 的原始文本（保留源码大小写，用于名称类字段） */
-function firstIdentifierRaw(node: ParsedNode | null | undefined): string | null {
-  if (!node) return null
-  if (node.type === "IdentifierContext") return node.text ?? null
-  for (const c of node.nodes || []) {
-    const t = firstIdentifierRaw(c)
-    if (t) return t
-  }
-  return null
-}
-
-/** 从 ParameterContext 提取单个参数 {name, oracleType, direction} */
-function extractParameter(paramNode: ParsedNode): ParamIndex | null {
-  const nameNode = collectByType(paramNode, "Parameter_nameContext")[0]
-  const name = (firstIdentifierRaw(nameNode) || firstIdentifierRaw(paramNode))
-  if (!name) return null
-  // direction：ParameterContext 直接子节点中的 IN / OUT token
-  const dirTokens = (paramNode.nodes || [])
-    .map(c => (c.text || "").trim().toUpperCase())
-    .filter(t => t === "IN" || t === "OUT")
-  let direction: ParamIndex["direction"]
-  if (dirTokens.includes("IN") && dirTokens.includes("OUT")) direction = "IN OUT"
-  else if (dirTokens.includes("OUT")) direction = "OUT"
-  else direction = "IN"
-  const typeSpec = collectByType(paramNode, "Type_specContext")[0]
-  const oracleType = typeSpec ? normalizeTypeText(subtreeText(typeSpec)) : "unknown"
-  return { name, oracleType, direction }
-}
-
-/** 从一组 ParameterContext 提取参数列表 */
-function extractParams(node: ParsedNode): ParamIndex[] {
-  return collectByType(node, "ParameterContext")
-    .map(extractParameter)
-    .filter((p): p is ParamIndex => p !== null)
-}
-
-/** 从 Function header/body 节点提取返回类型（RETURN 后的第一个 Type_spec） */
-function extractReturnType(funcNode: ParsedNode): string | null {
-  const children = funcNode.nodes || []
-  let seenReturn = false
-  for (const c of children) {
-    if (!seenReturn) {
-      if ((c.text || "").trim().toUpperCase() === "RETURN") seenReturn = true
-      continue
-    }
-    if (c.type === "Type_specContext") return normalizeTypeText(subtreeText(c))
-  }
-  return null
-}
-
-/** 提取 Package header */
-function extractPackageHeader(
-  node: ParsedNode,
-  packages: Map<string, PackageIndex>,
-  relPath: string,
-): void {
-  const pkgName = extractPackageName(node)
-  if (!pkgName) return
-
-  const existing = packages.get(pkgName) ?? {
-    name: pkgName,
-    headerFile: undefined,
-    bodyFile: undefined,
-    procedures: [],
-    estimatedLoc: 0,
-  }
-  existing.headerFile = relPath
-  existing.estimatedLoc += (node.text || "").split("\n").length
-
-  // 提取 procedures 和 functions（含参数 / 返回类型 / loc）。
-  // header 是声明的权威来源（含重载多版本、参数签名）；以 header 重建 procedures 列表，
-  // 同时保留 body 可能已写入的 lineRange（实现行号范围，比 header 声明行更精确）。
-  // 按名匹配 body 已有条目（重载按首条 best-effort），避免 body/header 顺序导致的重复。
-  const headerProcs: ProcedureIndex[] = []
-  for (const child of node.nodes) {
-    if (child.type !== "Package_obj_specContext") continue
-    for (const obj of child.nodes) {
-      const isProc = obj.type === "Procedure_specContext"
-      const isFunc = obj.type === "Function_specContext"
-      if (!isProc && !isFunc) continue
-      const procName = findIdentifierText(obj)
-      if (!procName) continue
-      const startLine = parseLine(obj.start)
-      const endLine = parseLine(obj.stop)
-      const headerRange = startLine && endLine ? [startLine, endLine] as [number, number] : undefined
-      const bodyMatch = existing.procedures.find(p => p.name === procName.toLowerCase())
-      const lineRange = bodyMatch?.lineRange ?? headerRange
-      headerProcs.push({
-        name: procName.toLowerCase(),
-        type: isFunc ? "function" : "procedure",
-        lineRange,
-        loc: lineRange ? lineRange[1] - lineRange[0] + 1 : undefined,
-        params: extractParams(obj),
-        returnType: isFunc ? extractReturnType(obj) : null,
-      })
-    }
-  }
-  existing.procedures = headerProcs
-
-  // 提取 package 级 types / variables / constants
-  existing.types = extractTypeDeclarations(node)
-  const varsAndConsts = extractVariablesAndConstants(node)
-  existing.variables = varsAndConsts.variables
-  existing.constants = varsAndConsts.constants
-
-  packages.set(pkgName, existing)
-}
-
-/** 提取 Package body */
-function extractPackageBody(
-  node: ParsedNode,
-  packages: Map<string, PackageIndex>,
-  relPath: string,
-  code: string,
-): void {
-  const pkgName = extractPackageName(node)
-  if (!pkgName) return
-
-  const existing = packages.get(pkgName) ?? {
-    name: pkgName,
-    headerFile: undefined,
-    bodyFile: undefined,
-    procedures: [],
-    estimatedLoc: 0,
-  }
-  existing.bodyFile = relPath
-  existing.estimatedLoc += (node.text || "").split("\n").length
-
-  // body 中可能有额外的 procedure/function 实现，补充行号 + 参数（body-only 才取参数）
-  for (const child of node.nodes) {
-    if (child.type === "Package_obj_bodyContext") {
-      for (const obj of child.nodes) {
-        if (obj.type === "Procedure_bodyContext" || obj.type === "Function_bodyContext") {
-          const procName = findIdentifierText(obj)
-          const procType = obj.type === "Procedure_bodyContext" ? "procedure" : "function"
-          if (procName) {
-            // 检查是否已存在（header 中已声明）
-            const existing2 = existing.procedures.find(p => p.name === procName.toLowerCase())
-            const startLine = parseLine(obj.start)
-            const endLine = parseLine(obj.stop)
-            const lineRange = startLine && endLine ? [startLine, endLine] as [number, number] : undefined
-            if (existing2) {
-              // 更新行号范围（body 的更精确）+ loc
-              if (lineRange) {
-                existing2.lineRange = lineRange
-                existing2.loc = lineRange[1] - lineRange[0] + 1
-              }
-              // header 缺参数时用 body 补（body 签名最完整）
-              if ((!existing2.params || existing2.params.length === 0)) {
-                existing2.params = extractParams(obj)
-              }
-            } else {
-              // body-only procedure（可能没有在 header 中声明）
-              existing.procedures.push({
-                name: procName.toLowerCase(),
-                type: procType,
-                lineRange,
-                loc: lineRange ? lineRange[1] - lineRange[0] + 1 : undefined,
-                params: extractParams(obj),
-                returnType: procType === "function" ? extractReturnType(obj) : null,
-              })
-            }
-          }
-        }
-      }
-    }
-  }
-
-  packages.set(pkgName, existing)
-}
-
-/** 提取独立 procedure/function */
-/** 提取 package 级类型声明（RECORD / TABLE / VARRAY / REF CURSOR ...） */
-function extractTypeDeclarations(scopeNode: ParsedNode): TypeIndex[] {
-  const types: TypeIndex[] = []
-  for (const td of collectByType(scopeNode, "Type_declarationContext")) {
-    const name = firstIdentifierRaw(td)
-    if (!name) continue
-    let kind = "UNKNOWN"
-    if (collectByType(td, "Record_type_defContext").length) kind = "RECORD"
-    else if (collectByType(td, "Table_type_defContext").length) kind = "TABLE"
-    else if (collectByType(td, "Varray_type_defContext").length) kind = "VARRAY"
-    else if (collectByType(td, "Ref_cursor_typeContext").length
-          || (td.nodes || []).some(c => /^REF$/i.test((c.text || "").trim()) && (td.nodes || []).some(d => /^CURSOR$/i.test((d.text || "").trim())))) kind = "REF CURSOR"
-    types.push({ name, kind, definition: normalizeTypeText(subtreeText(td)) })
-  }
-  return types
-}
-
-/** 提取变量与常量声明（按 CONSTANT 关键字区分） */
-function extractVariablesAndConstants(scopeNode: ParsedNode): { variables: VariableIndex[]; constants: ConstantIndex[] } {
-  const variables: VariableIndex[] = []
-  const constants: ConstantIndex[] = []
-  for (const vd of collectByType(scopeNode, "Variable_declarationContext")) {
-    const name = firstIdentifierRaw(vd)
-    if (!name) continue
-    const isConst = (vd.nodes || []).some(c => /^CONSTANT$/i.test((c.text || "").trim()))
-    const typeSpec = collectByType(vd, "Type_specContext")[0]
-    const type = typeSpec ? normalizeTypeText(subtreeText(typeSpec)) : "unknown"
-    const expr = collectByType(vd, "ExpressionContext")[0]
-    const valueText = expr ? normalizeTypeText(subtreeText(expr)) : null
-    if (isConst) {
-      constants.push({ name, type, value: valueText ?? "" })
-    } else {
-      variables.push({ name, type, defaultValue: valueText })
-    }
-  }
-  return { variables, constants }
-}
-
-/** 提取独立 procedure/function（含参数 / 返回类型 / 行号） */
-function extractStandaloneProc(
-  node: ParsedNode,
+function injectStandaloneVirtualPackages(
+  packages: PackageInfo[],
+  subprograms: SubprogramInfo[],
   standaloneProcedures: StandaloneProcIndex[],
-  relPath: string,
-  type: "procedure" | "function",
 ): void {
-  // 独立 CREATE PROCEDURE/FUNCTION 的结构：Create_procedure_bodyContext / Create_function_bodyContext
-  // 直接含 Procedure_nameContext / Function_nameContext + ParameterContext + RETURN（无 *BodyContext 包装）。
-  // 包内 procedure 则是 Procedure_bodyContext（由 extractPackageBody 处理，不进入此处）。
-  const nameNode = collectByType(node, "Function_nameContext")[0]
-    ?? collectByType(node, "Procedure_nameContext")[0]
-  const name = nameNode ? (nameContextText(nameNode) ?? findIdentifierText(node)) : findIdentifierText(node)
-  if (!name) return
-  const startLine = parseLine(node.start)
-  const endLine = parseLine(node.stop)
-  standaloneProcedures.push({
-    name: name.toLowerCase(),
-    type,
-    sourceFile: relPath,
-    params: extractParams(node),
-    returnType: type === "function" ? extractReturnType(node) : null,
-    lineRange: startLine && endLine ? [startLine, endLine] : undefined,
-  })
-}
-
-/** 提取表名 + 列定义（含 nullable / isPrimaryKey / defaultValue） */
-function extractTable(node: ParsedNode, tables: TableIndex[], relPath: string): void {
-  const name = extractTableName(node)
-  if (!name) return
-  const columns: ColumnIndex[] = []
-  for (const col of collectByType(node, "Column_definitionContext")) {
-    // 外联约束（CONSTRAINT/CHECK/PK/FK/UNIQUE）可能被归入 Column_definitionContext，
-    // 按文本起始关键字排除；真正的列定义不以这些关键字开头。
-    const colText = subtreeText(col)
-    if (/^(CONSTRAINT|CHECK|PRIMARY|FOREIGN|UNIQUE)\b/i.test(colText)) continue
-    const colNameNode = collectByType(col, "Column_nameContext")[0]
-    const colName = firstIdentifierRaw(colNameNode)
-    if (!colName) continue
-    const direct = col.nodes || []
-    // 类型：优先 DatatypeContext（原生），否则取直接子节点中的类型名标识符（UDT 列如 dim t_dimension）
-    const dt = direct.find(c => c.type === "DatatypeContext")
-    let oracleType = "unknown"
-    if (dt) oracleType = normalizeTypeText(subtreeText(dt))
-    else {
-      const typeId = direct.find(c => c.type === "Regular_idContext" || c.type === "IdentifierContext")
-      if (typeId) oracleType = (typeId.text || "").trim()
-    }
-    // DEFAULT：直接子节点 DEFAULT token 后的 ExpressionContext
-    let defaultValue: string | null = null
-    const defIdx = direct.findIndex(c => (c.text || "").trim().toUpperCase() === "DEFAULT")
-    if (defIdx >= 0) {
-      for (let i = defIdx + 1; i < direct.length; i++) {
-        if (direct[i].type === "ExpressionContext") {
-          defaultValue = normalizeTypeText(subtreeText(direct[i]))
-          break
-        }
-      }
-    }
-    // 内联约束：NOT NULL / PRIMARY KEY
-    const inlineText = collectByType(col, "Inline_constraintContext").map(subtreeText).join(" ")
-    const notNull = /NOT\s+NULL/i.test(inlineText)
-    const inlinePk = /PRIMARY\s+KEY/i.test(inlineText)
-    columns.push({
-      name: colName,
-      oracleType,
-      nullable: !(notNull || inlinePk),
-      isPrimaryKey: inlinePk,
-      defaultValue,
+  // standalone 从 subprograms 里那些 belongToPackage 为虚拟包的项识别——但 standalone 此处尚未建。
+  // 简化：standalone 由 scanWithRegex/AST 单独收集（见 collectStandaloneFromText），这里仅注入虚拟包壳。
+  const existing = new Set(packages.map(p => p.packageName))
+  for (const s of standaloneProcedures) {
+    const vname = `__STANDALONE_${s.name}__`
+    let name = vname
+    let n = 2
+    while (existing.has(name)) { name = `${vname.slice(0, -2)}_${n}__`; n++ }
+    existing.add(name)
+    const range = s.lineRange
+    packages.push({
+      packageName: name,
+      absolutePaths: [s.sourceFile],
+      headerPath: null,
+      bodyPath: s.sourceFile,
+      constants: [], variables: [], exceptions: [], types: [],
+      functions: [],
+      procedures: [],
+      estimatedLoc: range ? range[1] - range[0] + 1 : 0,
+    })
+    subprograms.push({
+      name: s.name,
+      type: s.type,
+      belongToPackage: name,
+      overloadIndex: null,
+      isPrivate: false,
+      headerLocation: null,
+      bodyLocation: range ? { absolutePath: s.sourceFile, lineRange: range } : null,
+      parameters: s.parameters ?? [],
+      returnType: s.returnType ?? null,
+      loc: range ? range[1] - range[0] + 1 : 0,
+      directCalls: [],
     })
   }
-  // 外联约束：CONSTRAINT ... PRIMARY KEY (cols) → 标记对应列 isPrimaryKey
-  const outOfLine = [
-    ...collectByType(node, "Constraint_clauseContext"),
-    ...collectByType(node, "Out_of_line_constraintContext"),
-  ]
-  const pkCols = new Set<string>()
-  for (const con of outOfLine) {
-    const txt = subtreeText(con)
-    const pkMatch = txt.match(/PRIMARY\s+KEY\s*\(([^)]+)\)/i)
-    if (pkMatch) {
-      for (const c of pkMatch[1].split(",")) {
-        const cn = c.trim()
-        if (cn) pkCols.add(cn.toUpperCase())
-      }
-    }
-  }
-  if (pkCols.size > 0) {
-    for (const col of columns) {
-      if (pkCols.has(col.name.toUpperCase())) {
-        col.isPrimaryKey = true
-        col.nullable = false
-      }
-    }
-  }
-  tables.push({ name, ddlFile: relPath, columns })
 }
 
-/** 提取触发器（timing / level / events / targetTable / condition / 行号） */
-function extractTrigger(node: ParsedNode, triggers: TriggerIndex[], relPath: string): void {
-  const name = extractTriggerName(node)
-  if (!name) return
-  const txt = subtreeText(node)
-  const startLine = parseLine(node.start)
-  const endLine = parseLine(node.stop)
-  let timing: string | undefined
-  if (/\bBEFORE\b/i.test(txt)) timing = "before"
-  else if (/\bAFTER\b/i.test(txt)) timing = "after"
-  else if (/\bINSTEAD\s+OF\b/i.test(txt)) timing = "instead-of"
-  const level = /\bFOR\s+EACH\s+ROW\b/i.test(txt) ? "row" : "statement"
-  // 事件只在触发头部（timing 到 ON 之间）识别，避免误捕触发体里的 INSERT/UPDATE/DELETE
-  const headerMatch = txt.match(/(?:BEFORE|AFTER|INSTEAD\s+OF)\s+(.+?)\s+ON\s+/is)
-  const header = headerMatch ? headerMatch[1] : ""
-  const events: string[] = []
-  if (/\bINSERT\b/i.test(header)) events.push("insert")
-  if (/\bUPDATE\b/i.test(header)) events.push("update")
-  if (/\bDELETE\b/i.test(header)) events.push("delete")
-  const onMatch = txt.match(/\bON\s+(\w+)/i)
-  const targetTable = onMatch ? onMatch[1].toUpperCase() : undefined
-  const whenMatch = txt.match(/\bWHEN\s*\(([^)]*(?:\([^)]*\))*[^)]*)\)/i)
-  // 规范化条件文本：'old . std_cost' → 'old.std_cost'
-  const condition = whenMatch ? whenMatch[1].replace(/\s*\.\s*/g, ".").trim() : null
-  triggers.push({
-    name, sourceFile: relPath,
-    timing, level, events,
-    targetTable,
-    lineRange: startLine && endLine ? [startLine, endLine] : undefined,
-    condition,
-  })
-}
-
-/** 提取视图名 + 列 + 依赖表（AST 视图结构不稳，回退到文本解析） */
-function extractView(node: ParsedNode, views: ViewIndex[], relPath: string): void {
-  const text = node.text || ""
-  const match = text.match(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)/i)
-  if (!match) return
-  const name = match[2].toUpperCase()
-  // 列：SELECT 后到 FROM 之间的别名 / 列名（粗提取，够 inventory 用）
-  const selMatch = text.match(/SELECT\s+(.*?)\s+FROM\s+/is)
-  const columns: string[] = []
-  if (selMatch) {
-    for (const part of selMatch[1].split(",")) {
-      const m = part.trim().match(/(\w+)\s*(?:\sAS\s*)?$/i)
-      if (m && m[1] && !/^[a-z]+$|^(SELECT|FROM|WHERE|AS)$/i.test(m[1])) columns.push(m[1])
-    }
-  }
-  // 依赖表：FROM/JOIN 后的表名
-  const underlyingTables: string[] = []
-  const tableRe = /(?:FROM|JOIN)\s+(\w+)/gi
-  let tm: RegExpExecArray | null
-  while ((tm = tableRe.exec(text)) !== null) {
-    const t = tm[1].toUpperCase()
-    if (!underlyingTables.includes(t)) underlyingTables.push(t)
-  }
-  views.push({ name, ddlFile: relPath, columns, underlyingTables })
-}
-
-/** 提取序列名 + 属性（startWith / incrementBy / min / max / cycle） */
-function extractSequence(node: ParsedNode, sequences: SequenceIndex[], relPath: string): void {
-  const name = extractSequenceName(node)
-  if (!name) return
-  const txt = subtreeText(node)
-  const num = (re: RegExp): number | null => {
-    const m = txt.match(re)
-    return m ? parseInt(m[1], 10) : null
-  }
-  sequences.push({
-    name, ddlFile: relPath,
-    startWith: num(/START\s+WITH\s+(\d+)/i),
-    incrementBy: num(/INCREMENT\s+BY\s+(\-?\d+)/i),
-    minValue: num(/MINVALUE\s+(\-?\d+)/i),
-    maxValue: num(/MAXVALUE\s+(\-?\d+)/i),
-    cycle: /\bCYCLE\b/i.test(txt) && !/\bNOCYCLE\b/i.test(txt) ? true
-      : /\bNOCYCLE\b/i.test(txt) ? false
-      : null,
-  })
-}
-
-// ── 文件类型分类 + 文本提取（避免对慢构造走 AST）──────────────────────────────
-
-/**
- * 按文件内容（cheap regex）分类，决定走 AST 还是文本/regex。
- * 顺序敏感：body / trigger / view / type 先判，再 header，最后通用 CREATE。
- * 注意：单文件混合多种 DDL 时，首个命中的慢类型胜出（其余被跳过）——
- * 建议项目按类型分文件存放（与 fixture 的 pkg/ schema/ trigger/ 目录约定一致）。
- */
-function classifyFile(code: string): "body" | "trigger" | "view" | "type" | "header" | "create" | "dml" {
-  if (/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i.test(code)) return "body"
-  if (/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b/i.test(code)) return "trigger"
-  if (/CREATE\s+(OR\s+REPLACE\s+)?VIEW\b/i.test(code)) return "view"
-  if (/CREATE\s+(OR\s+REPLACE\s+)?TYPE\b/i.test(code)) return "type"
-  if (/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\b/i.test(code)) return "header"
-  if (/\bCREATE\b/i.test(code)) return "create" // table / sequence / standalone proc/func
-  return "dml" // 纯 DML / 匿名块 / SQL*Plus 脚本
-}
-
-/**
- * 拆分 header+body 合并文件：在首个 PACKAGE BODY 声明处切开。
- * 返回 { headerCode: body 之前的部分（含包头 header 及其它 DDL）, bodyCode: 从首个 PACKAGE BODY 到末尾 }。
- * 无 PACKAGE BODY 时 bodyCode 为空串（header-only 或非包文件）。
- * 约定：合并文件中 header 在 body 之前（与 pkg/<name>.sql 的"先包头后包体"顺序一致）；
- *       单文件多包交错（header1/body1/header2/body2）不支持——项目按一包一文件组织。
- */
-function splitPackageHeaderAndBody(code: string): { headerCode: string; bodyCode: string } {
-  const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i)
-  if (!m || m.index === undefined) return { headerCode: code, bodyCode: "" }
-  return { headerCode: code.slice(0, m.index), bodyCode: code.slice(m.index) }
-}
+// ── 表 / 触发器 / 视图 / 序列 文本提取（保留现有实现）────────────────────────────
 
 /** 计算子串在全文中的起止行号（1-based） */
 function lineRangeOf(code: string, startIdx: number, endIdx: number): [number, number] | undefined {
@@ -899,16 +664,75 @@ function lineRangeOf(code: string, startIdx: number, endIdx: number): [number, n
   return [startLine, endLine]
 }
 
-/** 从原始文本提取触发器元数据（不进 AST，避免解析触发体 SQL） */
+/** 从文本提取表 + 列 + 主键 + 外键 */
+function extractTableFromText(code: string, tables: TableIndex[], relPath: string): void {
+  for (const m of code.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.]+)/gi)) {
+    const name = cleanName(m[1])
+    const startIdx = m.index ?? 0
+    // 表体到匹配的 ')' —— 简化：取到下一个 '\n/\n' 或下一个 CREATE 前
+    const bodyEnd = nextStatementBoundary(code, startIdx)
+    const body = code.slice(startIdx, bodyEnd)
+    const columns: ColumnIndex[] = []
+    const pkCols = new Set<string>()
+    const foreignKeys: ForeignKeyInfo[] = []
+    // 列定义行（粗提取）
+    for (const colMatch of body.matchAll(/^\s*([\w]+)\s+([\w()]+(?:\s+[\w()]+)*?)(\s+DEFAULT\s+[^,]+)?(\s*,)?/gim)) {
+      const colName = cleanName(colMatch[1])
+      if (!colName || /^(CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|KEY|NOT|NULL)\b/i.test(colName)) continue
+      const type = normalizeTypeText(colMatch[2])
+      const rest = colMatch[0]
+      const notNull = /\bNOT\s+NULL\b/i.test(rest)
+      const inlinePk = /\bPRIMARY\s+KEY\b/i.test(rest)
+      const defMatch = rest.match(/DEFAULT\s+([^,]+)/i)
+      columns.push({
+        name: colName,
+        oracleType: type,
+        nullable: !(notNull || inlinePk),
+        isPrimaryKey: inlinePk,
+        defaultValue: defMatch ? normalizeTypeText(defMatch[1]) : null,
+      })
+      if (inlinePk) pkCols.add(colName)
+    }
+    // 外联约束
+    for (const fk of body.matchAll(/CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([\w.]+)\s*\(([^)]+)\)/gi)) {
+      foreignKeys.push({
+        name: cleanName(fk[1]),
+        columns: fk[2].split(",").map(c => cleanName(c)),
+        refTable: cleanName(fk[3]),
+        refColumns: fk[4].split(",").map(c => cleanName(c)),
+      })
+    }
+    // 外联主键
+    for (const pk of body.matchAll(/CONSTRAINT\s+\w+\s+PRIMARY\s+KEY\s*\(([^)]+)\)/gi)) {
+      for (const c of pk[1].split(",")) pkCols.add(cleanName(c))
+    }
+    if (pkCols.size > 0) {
+      for (const col of columns) if (pkCols.has(col.name)) { col.isPrimaryKey = true; col.nullable = false }
+    }
+    tables.push({
+      name,
+      ddlFile: relPath,
+      columns,
+      primaryKey: pkCols.size > 0 ? Array.from(pkCols) : undefined,
+      foreignKeys: foreignKeys.length > 0 ? foreignKeys : undefined,
+    })
+  }
+}
+
+/** 找下一个语句边界（粗：下一个行首 CREATE 或文件末） */
+function nextStatementBoundary(code: string, from: number): number {
+  const re = /\n\s*(CREATE|CREATE OR REPLACE)\b/gi
+  re.lastIndex = from + 1
+  const m = re.exec(code)
+  return m ? m.index : code.length
+}
+
+/** 从原始文本提取触发器元数据 */
 export function extractTriggerFromText(code: string, triggers: TriggerIndex[], relPath: string): void {
-  const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\s+(\w+)/i)
+  const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\s+([\w.]+)/i)
   if (!m) return
-  const name = m[2].toUpperCase()
+  const name = cleanName(m[2])
   const startIdx = m.index ?? 0
-  // 触发器结尾：最后一个 END; （大小写不敏感、词边界）。
-  // 不用 lastIndexOf("END")——它是区分大小写的纯子串搜索：会漏掉小写 end;（PL/SQL 不区分大小写），
-  // 也会误命中 PENDING/APPEND/SENDING 等含 "END" 子串的标识符，把 endIdx 推到真正的 END; 之后。
-  // 词边界 \b 还可排除 MY_END 这类以下划线连写的标识符。\bEND\s*; 不会匹配 END IF; / END LOOP;。
   const txt = code.slice(startIdx)
   const endRe = /\bEND\s*;/gi
   let lastEnd: RegExpExecArray | null = null
@@ -926,8 +750,8 @@ export function extractTriggerFromText(code: string, triggers: TriggerIndex[], r
   if (/\bINSERT\b/i.test(header)) events.push("insert")
   if (/\bUPDATE\b/i.test(header)) events.push("update")
   if (/\bDELETE\b/i.test(header)) events.push("delete")
-  const onMatch = txt.match(/\bON\s+(\w+)/i)
-  const targetTable = onMatch ? onMatch[1].toUpperCase() : undefined
+  const onMatch = txt.match(/\bON\s+([\w.]+)/i)
+  const targetTable = onMatch ? cleanName(onMatch[1]) : undefined
   const whenMatch = txt.match(/\bWHEN\s*\(([^)]*(?:\([^)]*\))*[^)]*)\)/i)
   const condition = whenMatch ? whenMatch[1].replace(/\s*\.\s*/g, ".").trim() : null
   triggers.push({
@@ -938,13 +762,12 @@ export function extractTriggerFromText(code: string, triggers: TriggerIndex[], r
   })
 }
 
-/** 从原始文本提取视图元数据（不进 AST，避免解析视图 SELECT） */
+/** 从原始文本提取视图元数据 */
 function extractViewFromText(code: string, views: ViewIndex[], relPath: string): void {
-  const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)\s+AS\b/is)
+  const m = code.match(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+([\w.]+)\s+AS\b/is)
   if (!m) return
-  const name = m[2].toUpperCase()
+  const name = cleanName(m[2])
   const body = code.slice((m.index ?? 0) + m[0].length)
-  // 列：SELECT 后到 FROM 之间的别名 / 列名（粗提取）
   const selMatch = body.match(/SELECT\s+(.*?)\s+FROM\s+/is)
   const columns: string[] = []
   if (selMatch) {
@@ -953,500 +776,63 @@ function extractViewFromText(code: string, views: ViewIndex[], relPath: string):
       if (mm && mm[1] && !/^(SELECT|FROM|WHERE|AS|AND|OR)$/i.test(mm[1])) columns.push(mm[1])
     }
   }
-  // 依赖表：FROM/JOIN 后的表名
   const underlyingTables: string[] = []
-  const tableRe = /(?:FROM|JOIN)\s+(\w+)/gi
+  const tableRe = /(?:FROM|JOIN)\s+([\w.]+)/gi
   let tm: RegExpExecArray | null
   while ((tm = tableRe.exec(body)) !== null) {
-    const t = tm[1].toUpperCase()
+    const t = cleanName(tm[1])
     if (!underlyingTables.includes(t)) underlyingTables.push(t)
   }
   views.push({ name, ddlFile: relPath, columns, underlyingTables })
 }
 
-/** 提取调用关系（PKG.PROC 模式，排除 :NEW/:OLD 绑定变量） */
-function extractCallGraph(
-  code: string,
-  _relPath: string,
-  callGraph: Record<string, string[]>,
-): void {
-  const sqlPseudo = new Set([
-    "NEXTVAL", "CURRVAL", "COUNT", "EXISTS", "FIRST", "LAST",
-    "ROWCOUNT", "FOUND", "NOTFOUND", "ISOPEN", "BULK_ROWCOUNT",
-  ])
-
-  const lines = code.split("\n")
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith("--")) continue
-    // 排除绑定变量上下文（:NEW.xxx, :OLD.xxx）
-    const cleaned = trimmed.replace(/:[A-Z]+/gi, " ")
-    const matches = cleaned.matchAll(/\b([A-Z][A-Z0-9_]*)\.([A-Z][A-Z0-9_]*)\b/gi)
-    for (const m of matches) {
-      const pkg = m[1].toUpperCase()
-      const proc = m[2].toUpperCase()
-      if (sqlPseudo.has(proc)) continue
-      if (pkg.length < 2 || proc.length < 2) continue
-      const key = `${pkg}.${proc}`
-      if (!callGraph[key]) callGraph[key] = []
-    }
-  }
-}
-
-// ── Regex 降级扫描 ──────────────────────────────────────────────────────────────
-
-export function scanWithRegex(roots: string[], primaryBase: string): InventoryIndex {
-  const files = collectSourceFiles(roots)
-  const packages = new Map<string, PackageIndex>()
-  const tables: TableIndex[] = []
-  const triggers: TriggerIndex[] = []
-  const views: ViewIndex[] = []
-  const sequences: SequenceIndex[] = []
-  const standaloneProcedures: StandaloneProcIndex[] = []
-  const callGraph: Record<string, string[]> = {}
-
-  for (const filePath of files) {
-    const code = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
-    const relPath = storedFilePath(filePath, primaryBase)
-    const ext = extname(filePath).toLowerCase()
-
-    regexFallbackForFile(code, relPath, ext, packages, tables, triggers, views, sequences, standaloneProcedures, callGraph)
-  }
-
-  const pkgList = Array.from(packages.values())
-  injectStandaloneVirtualPackages(pkgList, standaloneProcedures)
-  return {
-    sourcePath: primaryBase,
-    scannedAt: new Date().toISOString(),
-    scannerUsed: "regex",
-    packages: pkgList,
-    tables,
-    triggers,
-    views,
-    sequences,
-    standaloneProcedures,
-    callGraph: Object.keys(callGraph).length > 0 ? callGraph : undefined,
-  }
-}
-
-/**
- * 对单个文件执行 regex 提取（AST 解析失败时降级，或 regex 模式直接使用）
- */
-function regexFallbackForFile(
-  code: string,
-  relPath: string,
-  ext: string,
-  packages: Map<string, PackageIndex>,
-  tables: TableIndex[],
-  triggers: TriggerIndex[],
-  views: ViewIndex[],
-  sequences: SequenceIndex[],
-  standaloneProcedures: StandaloneProcIndex[],
-  callGraph: Record<string, string[]>,
-): void {
-  const lines = code.split("\n")
-
-  if (ext === ".pks") {
-    // Package header
-    const pkgName = regexExtract(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(\w+)/i, code, 2)
-    if (pkgName) {
-      const existing = packages.get(pkgName.toUpperCase()) ?? {
-        name: pkgName.toUpperCase(),
-        headerFile: undefined,
-        bodyFile: undefined,
-        procedures: [],
-        estimatedLoc: 0,
-      }
-      existing.headerFile = relPath
-      existing.estimatedLoc += lines.length
-
-      // 提取 procedure/function 声明
-      regexExtractProcedures(lines, existing)
-      packages.set(pkgName.toUpperCase(), existing)
-    }
-  } else if (ext === ".pkb") {
-    // Package body
-    const pkgName = regexExtract(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+(\w+)/i, code, 2)
-    if (pkgName) {
-      const existing = packages.get(pkgName.toUpperCase()) ?? {
-        name: pkgName.toUpperCase(),
-        headerFile: undefined,
-        bodyFile: undefined,
-        procedures: [],
-        estimatedLoc: 0,
-      }
-      existing.bodyFile = relPath
-      existing.estimatedLoc += lines.length
-
-      // 提取 procedure/function 实现（带行号）
-      regexExtractProceduresFromBody(lines, existing)
-      packages.set(pkgName.toUpperCase(), existing)
-    }
-  } else if (ext === ".sql") {
-    // DDL 文件：table/trigger/view/sequence/standalone proc
-
-    // CREATE TABLE
-    for (const m of code.matchAll(/CREATE\s+TABLE\s+(\w+)/gi)) {
-      tables.push({ name: m[1].toUpperCase(), ddlFile: relPath })
-    }
-
-    // CREATE TRIGGER
-    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\s+(\w+)/gi)) {
-      triggers.push({ name: m[2].toUpperCase(), sourceFile: relPath })
-    }
-
-    // CREATE VIEW
-    for (const m of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(\w+)/gi)) {
-      views.push({ name: m[2].toUpperCase(), ddlFile: relPath })
-    }
-
-    // CREATE SEQUENCE
-    for (const m of code.matchAll(/CREATE\s+SEQUENCE\s+(\w+)/gi)) {
-      sequences.push({ name: m[1].toUpperCase(), ddlFile: relPath })
-    }
-
-    // Standalone procedure/function（含 lineRange，复用 BEGIN/END 栈；一个 .sql 可定义多个）
-    regexExtractStandaloneProcs(code, relPath, standaloneProcedures)
-
-    // .sql 文件也可能是 package header/body（某些项目规范）
-    for (const pkgSpecMatch of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\s+)(\w+)/gi)) {
-      const name = pkgSpecMatch[2].toUpperCase()
-      const existing = packages.get(name) ?? {
-        name,
-        headerFile: undefined,
-        bodyFile: undefined,
-        procedures: [],
-        estimatedLoc: 0,
-      }
-      existing.headerFile = relPath
-      existing.estimatedLoc += lines.length
-      regexExtractProcedures(lines, existing)
-      packages.set(name, existing)
-    }
-    for (const pkgBodyMatch of code.matchAll(/CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+(\w+)/gi)) {
-      const name = pkgBodyMatch[2].toUpperCase()
-      const existing = packages.get(name) ?? {
-        name,
-        headerFile: undefined,
-        bodyFile: undefined,
-        procedures: [],
-        estimatedLoc: 0,
-      }
-      existing.bodyFile = relPath
-      existing.estimatedLoc += lines.length
-      regexExtractProceduresFromBody(lines, existing)
-      packages.set(name, existing)
-    }
-  }
-
-  // 提取调用关系（复用统一的 extractCallGraph）
-  extractCallGraph(code, relPath, callGraph)
-}
-
-/** 正则提取辅助 */
-function regexExtract(pattern: RegExp, text: string, group: number): string | null {
-  const m = text.match(pattern)
-  return m?.[group] ?? null
-}
-
-/** 从 header 文件提取 procedure/function 声明（不重复添加已存在的） */
-function regexExtractProcedures(lines: string[], pkg: PackageIndex): void {
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim()
-    const procMatch = line.match(/^\s*(PROCEDURE|FUNCTION)\s+(\w+)\s*\(/i)
-    if (procMatch) {
-      const name = procMatch[2].toLowerCase()
-      const type: "procedure" | "function" = procMatch[1].toUpperCase() === "PROCEDURE" ? "procedure" : "function"
-      // 只在不存在时添加（body 可能已先处理过）
-      if (!pkg.procedures.find(p => p.name === name)) {
-        pkg.procedures.push({ name, type, lineRange: [i + 1, i + 1] })
-      }
-    }
-  }
-}
-
-/**
- * 剥离 PL/SQL 块注释（斜杠星 ... 星斜杠），保留换行以维持行号。
- * 单行内可能有多个注释、或注释跨行；非注释内容原样保留。
- * 不处理字符串字面量内的注释起始符（极少见；单引号字符串在 depth 计数时另行剥离）。
- */
-function stripBlockComments(lines: string[]): string[] {
-  let inBlock = false
-  return lines.map(line => {
-    let out = ""
-    let i = 0
-    while (i < line.length) {
-      if (inBlock) {
-        const end = line.indexOf("*/", i)
-        if (end === -1) return out
-        inBlock = false
-        i = end + 2
-      } else {
-        const start = line.indexOf("/*", i)
-        if (start === -1) {
-          out += line.slice(i)
-          break
-        }
-        out += line.slice(i, start)
-        i = start + 2
-        inBlock = true
-      }
-    }
-    return out
-  })
-}
-
-/** 从 body 文件提取 procedure/function 实现及行号范围 */
-function regexExtractProceduresFromBody(lines: string[], pkg: PackageIndex): void {
-  // 预剥离跨行块注释，避免注释里的 BEGIN/END 污染 depth 计数导致过程边界错乱
-  lines = stripBlockComments(lines)
-  // 过程嵌套栈：PL/SQL 允许在过程内定义局部过程/函数。若用单一 currentProc，
-  // 遇到内层 PROCEDURE 会提前关闭外层，导致外层 lineRange 截断在内层定义处、
-  // 内层之后的代码丢失。改用栈，每帧带独立 depth：内层 BEGIN/END 只作用于栈顶，
-  // 不会让外层误判结束。只有顶层过程（isTop=true）登记进 pkg.procedures；
-  // 局部过程不单独登记，其代码包含在父过程 lineRange 内，下游切片得到完整外层过程。
-  type Frame = { name: string; type: "procedure" | "function"; startLine: number; depth: number; isTop: boolean }
-  const stack: Frame[] = []
-
-  /**
-   * 向后扫描检查是否包含 IS/AS（表示有实现体）。
-   * 不设行数上限——超长参数列表可能跨越数十行，硬上限会让整个过程被跳过。
-   * 遇到下一个 PROCEDURE/FUNCTION/END/CREATE 即判定为非实现体（纯声明）并停止。
-   */
-  function hasBodyKeyword(startIdx: number): boolean {
-    let inTypeDecl = false  // 跟踪跨行 TYPE 声明
-    for (let j = startIdx; j < lines.length; j++) {
-      const l = lines[j].trim()
-      if (l.startsWith("--")) continue
-      // 跟踪跨行 TYPE 声明（TYPE xxx 开头但 IS/AS 在后续行）
-      if (/^\s*TYPE\s+/i.test(l)) inTypeDecl = true
-      // 检测到 IS 或 AS 关键字（排除 TYPE ... IS RECORD 等声明）
-      if (/\b(IS|AS)\b/i.test(l)) {
-        // 排除：同行有 TYPE 前缀，或处于跨行 TYPE 声明中，或 IS 后跟类型声明关键字
-        if (/^\s*TYPE\s+/i.test(l)) continue
-        if (inTypeDecl) { inTypeDecl = false; continue }
-        if (/\bIS\s+(RECORD|TABLE|VARRAY|REF\s+CURSOR)\b/i.test(l)) continue
-        if (/\bAS\s+(RECORD|TABLE|VARRAY|REF\s+CURSOR)\b/i.test(l)) continue
-        inTypeDecl = false
-        return true
-      }
-      // 非类型声明行出现其他内容，重置跟踪
-      if (inTypeDecl && !/^\s*$/.test(l) && !/^\s*(IS|AS)\b/i.test(l)) {
-        inTypeDecl = false
-      }
-      // 如果先遇到下一个 PROCEDURE/FUNCTION/END/CREATE 关键字，说明这不是实现体
-      if (/^\s*(PROCEDURE|FUNCTION|END|CREATE)\b/i.test(l) && j > startIdx) return false
-    }
-    return false
-  }
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim()
-    if (line.startsWith("--")) continue
-
-    // 检测 procedure/function 开始（支持无参过程如 PROCEDURE init IS）
-    const procMatch = line.match(/^\s*(PROCEDURE|FUNCTION)\s+(\w+)\s*[\(\w]/i)
-    // 排除仅声明但无实现体的情况（如 TYPE ... IS RECORD）
-    // 支持多行签名：IS/AS 可能在后续行（hasBodyKeyword 扫到下一个过程/END 为止）
-    if (procMatch && !line.match(/^\s*--/)) {
-      const hasIsOrAs = /\b(IS|AS)\b/i.test(line)
-      const hasBodyElsewhere = !hasIsOrAs && hasBodyKeyword(i + 1)
-
-      if (hasIsOrAs || hasBodyElsewhere) {
-        const procType = procMatch[1].toUpperCase() === "PROCEDURE" ? "procedure" : "function"
-        // 栈空 → 顶层过程；栈非空 → 局部过程（嵌套在父过程内，不单独登记）
-        stack.push({
-          name: procMatch[2].toLowerCase(),
-          type: procType,
-          startLine: i + 1,
-          depth: 0,
-          isTop: stack.length === 0,
-        })
-      }
-    }
-
-    // 追踪 BEGIN/END 深度来定位结束行（仅作用于栈顶过程）
-    // 注意：END IF / END LOOP / END CASE 不是块结束，需要排除
-    if (stack.length > 0) {
-      const top = stack[stack.length - 1]
-      // 移除字符串字面量和行内注释，避免误匹配 'END' / "BEGIN" 等
-      const codeOnly = line.replace(/'[^']*'/g, "")   // 单引号字符串
-        .replace(/--.*$/, "")                          // 行尾注释（前面已跳过纯注释行，但行内注释仍需处理）
-      const begins = (codeOnly.match(/\bBEGIN\b/gi) || []).length
-      // 排除 END IF / END LOOP / END CASE 等非块结束的 END
-      const ends = (codeOnly.replace(/\bEND\s+(IF|LOOP|CASE)\b/gi, "").match(/\bEND\b/gi) || []).length
-      top.depth += begins - ends
-      // 仅当栈顶 depth 归零且该行含真实 END（排除 END IF/LOOP/CASE）时，栈顶过程结束
-      if (top.depth === 0 && codeOnly.match(/\bEND\b/i) && !codeOnly.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
-        const frame = stack.pop()
-        // 只有顶层过程登记 lineRange；局部过程的代码已包含在父过程 lineRange 内
-        if (frame && frame.isTop) {
-          updateProcedureLineRange(pkg, frame.name, frame.startLine, i + 1, frame.type)
-        }
-      } else if (top.depth < 0) {
-        // 防御性重置：depth 不应为负（可能是未过滤的边缘情况），归零避免后续误判
-        top.depth = 0
-      }
-    }
-  }
-
-  // 处理未关闭的顶层过程（文件结尾）
-  for (const frame of stack) {
-    if (frame.isTop) {
-      updateProcedureLineRange(pkg, frame.name, frame.startLine, lines.length, frame.type)
-    }
-  }
-}
-
-/** 更新或添加 procedure 的行号范围（body 提取时使用，保留已有的 type） */
-function updateProcedureLineRange(
-  pkg: PackageIndex,
-  procName: string,
-  startLine: number,
-  endLine: number,
-  type?: "procedure" | "function",
-): void {
-  const existing = pkg.procedures.find(p => p.name === procName)
-  if (existing) {
-    existing.lineRange = [startLine, endLine]
-  } else {
-    pkg.procedures.push({ name: procName, type: type ?? "procedure", lineRange: [startLine, endLine] })
-  }
-}
-
-/**
- * 从 startIdx（0-based）起，用 BEGIN/END 嵌套栈算独立过程的结束行（1-based）。
- * 复用 regexExtractProceduresFromBody 同款 depth 计数：排除 END IF/LOOP/CASE，
- * 剥离单引号串与行内注释；栈深度归零且该行含真实 END 即结束。
- * sawBegin 守卫确保只在过程体 BEGIN 之后才判断结束，避免签名区误判。
- */
-function findProcEndLine(lines: string[], startIdx: number): number | undefined {
-  let depth = 0
-  let sawBegin = false
-  for (let i = startIdx; i < lines.length; i++) {
-    const line = lines[i].trim()
-    if (line.startsWith("--")) continue
-    const codeOnly = line.replace(/'[^']*'/g, "").replace(/--.*$/, "")
-    const begins = (codeOnly.match(/\bBEGIN\b/gi) || []).length
-    const ends = (codeOnly.replace(/\bEND\s+(IF|LOOP|CASE)\b/gi, "").match(/\bEND\b/gi) || []).length
-    if (begins > 0) sawBegin = true
-    depth += begins - ends
-    if (sawBegin && depth === 0 && codeOnly.match(/\bEND\b/i) && !codeOnly.match(/\bEND\s+(IF|LOOP|CASE)\b/i)) {
-      return i + 1
-    }
-    if (depth < 0) depth = 0
-  }
-  return undefined
-}
-
-/**
- * regex 路径：对 .sql 文件里的独立 CREATE PROCEDURE/FUNCTION 算 lineRange。
- * 复用 stripBlockComments + findProcEndLine（BEGIN/END 栈）。params/returnType
- * 不提取（regex 降级字段缺省，下游 LLM 可补，见 inventory-builder 注释）。
- */
-function regexExtractStandaloneProcs(
-  code: string,
-  relPath: string,
-  standaloneProcedures: StandaloneProcIndex[],
-): void {
-  const lines = stripBlockComments(code.split("\n"))
-  const re = /CREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\s+(\w+)/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(code)) !== null) {
-    const type: "procedure" | "function" = m[1].toUpperCase() === "PROCEDURE" ? "procedure" : "function"
-    const name = m[2].toLowerCase()
-    const startLine = code.slice(0, m.index).split("\n").length
-    const endLine = findProcEndLine(lines, startLine - 1)
-    standaloneProcedures.push(
-      endLine
-        ? { name, type, sourceFile: relPath, lineRange: [startLine, endLine] }
-        : { name, type, sourceFile: relPath },
-    )
-  }
-}
-
-/**
- * 把 standaloneProcedures 注入 packages 作为虚拟包，使下游 per-package 流水线
- *（inventory-packages / 分片 / FSD / translate）能自然处理独立存储过程，不再漏翻译。
- * 每个独立过程自成虚拟包（单过程最小单元），规避爆上下文，且不引入通用包拆分机制。
- * standaloneProcedures 字段保留（metrics/报表兼容）。
- */
-function injectStandaloneVirtualPackages(
-  packages: PackageIndex[],
-  standaloneProcedures: StandaloneProcIndex[],
-): void {
-  const existing = new Set(packages.map(p => p.name))
-  for (const s of standaloneProcedures) {
-    const base = `__STANDALONE_${s.name.toUpperCase()}`
-    let vname = `${base}__`
-    let suffix = 2
-    while (existing.has(vname)) {
-      vname = `${base}_${suffix}__`
-      suffix++
-    }
-    existing.add(vname)
-    const lineRange = s.lineRange
-    const loc = lineRange ? lineRange[1] - lineRange[0] + 1 : 0
-    packages.push({
-      name: vname,
-      headerFile: undefined,
-      bodyFile: s.sourceFile,
-      procedures: [{
-        name: s.name,
-        type: s.type,
-        lineRange,
-        params: s.params,
-        returnType: s.returnType ?? null,
-        loc,
-      }],
-      estimatedLoc: loc,
-      types: [],
-      variables: [],
-      constants: [],
+/** 从原始文本提取序列属性 */
+function extractSequenceFromText(code: string, sequences: SequenceIndex[], relPath: string): void {
+  for (const m of code.matchAll(/CREATE\s+SEQUENCE\s+([\w.]+)/gi)) {
+    const name = cleanName(m[1])
+    const startIdx = m.index ?? 0
+    const txt = code.slice(startIdx, nextStatementBoundary(code, startIdx))
+    const num = (re: RegExp): number | null => { const x = txt.match(re); return x ? parseInt(x[1], 10) : null }
+    sequences.push({
+      name, ddlFile: relPath,
+      startWith: num(/START\s+WITH\s+(\d+)/i),
+      incrementBy: num(/INCREMENT\s+BY\s+(\-?\d+)/i),
+      minValue: num(/MINVALUE\s+(\-?\d+)/i),
+      maxValue: num(/MAXVALUE\s+(\-?\d+)/i),
+      cycle: /\bCYCLE\b/i.test(txt) && !/\bNOCYCLE\b/i.test(txt) ? true
+        : /\bNOCYCLE\b/i.test(txt) ? false : null,
     })
   }
 }
 
-/** regex 模式调用关系提取（复用 extractCallGraph） */
-
 // ── 文件收集 ────────────────────────────────────────────────────────────────────
 
-/**
- * 计算存入 headerFile/bodyFile 的路径：filePath 在 primaryBase 下则存相对路径（可移植），
- * 否则存绝对路径（双目录模式下 body 不在 headerPath 下）。下游 readSource/absSrc 已兼容绝对路径。
- */
+/** 计算存入 headerPath/bodyPath 的路径：在 primaryBase 下存相对（可移植），否则存绝对。 */
 function storedFilePath(filePath: string, primaryBase: string): string {
   return filePath.startsWith(primaryBase + sep) ? relative(primaryBase, filePath) : filePath
 }
 
-/** 收集多个根目录下所有 PL/SQL 相关文件。以 root 顺序为主排序键（headerPath 整批先于 bodyPath），
- *  root 内部再按 .pks→.pkb→名（确保 header 先处理，body-only 私有过程不被覆盖丢失）。 */
+/** 收集多根目录下所有 PL/SQL 文件，root 顺序为主键，root 内 .pks→.pkb→名。 */
 function collectSourceFiles(roots: string[]): string[] {
   const extensions = new Set(VALID_SOURCE_EXTENSIONS)
   const tagged: { rootIdx: number; path: string }[] = []
-
   function walk(dir: string, rootIdx: number): void {
     const entries = readdirSync(dir, { withFileTypes: true })
     for (const entry of entries) {
       const fullPath = join(dir, entry.name)
-      // 跳过隐藏目录、node_modules
-      // 跳过 schema-fetcher 自动生成的 ddl-output（需含 .generated 标记，用户同名目录不跳过）
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue
       if (entry.name === GENERATED_OUTPUT_DIR && entry.isDirectory()
           && existsSync(join(fullPath, GENERATED_MARKER))) continue
-      if (entry.isDirectory()) {
-        walk(fullPath, rootIdx)
-      } else if (entry.isFile() && extensions.has(extname(entry.name).toLowerCase())) {
+      if (entry.isDirectory()) walk(fullPath, rootIdx)
+      else if (entry.isFile() && extensions.has(extname(entry.name).toLowerCase())) {
         tagged.push({ rootIdx, path: fullPath })
       }
     }
   }
-
   roots.forEach((root, idx) => {
     if (!existsSync(root)) throw new Error(`Source path does not exist: ${root}`)
     walk(root, idx)
   })
-  // root 顺序为主键（header 整批在前）；root 内 .pks 在 .pkb 前确保 header 先处理
   return tagged.sort((a, b) => {
     if (a.rootIdx !== b.rootIdx) return a.rootIdx - b.rootIdx
     const extA = extname(a.path).toLowerCase()
@@ -1457,40 +843,76 @@ function collectSourceFiles(roots: string[]): string[] {
   }).map(t => t.path)
 }
 
+// ── Regex 兜底（parser 完全不可用时）──────────────────────────────────────────
+
+/** 极简 regex 扫描，仅当 AST 路径整体不可用时兜底。 */
+export function scanWithRegex(roots: string[], primaryBase: string): InventoryIndex {
+  const files = collectSourceFiles(roots)
+  const packages = new Map<string, PackageInfo>()
+  const subprograms = new Map<string, SubprogramInfo[]>()
+  const tables: TableIndex[] = []
+  const triggers: TriggerIndex[] = []
+  const views: ViewIndex[] = []
+  const sequences: SequenceIndex[] = []
+  const standaloneProcedures: StandaloneProcIndex[] = []
+  const warnings: string[] = ["regex 兜底模式：仅提取名字，结构字段缺失"]
+
+  for (const filePath of files) {
+    const code = readFileSync(filePath, "utf-8").replace(/\r\n?/g, "\n")
+    const relPath = storedFilePath(filePath, primaryBase)
+    extractTableFromText(code, tables, relPath)
+    extractTriggerFromText(code, triggers, relPath)
+    extractViewFromText(code, views, relPath)
+    extractSequenceFromText(code, sequences, relPath)
+    // regex 兜底只粗提包名/过程名
+    for (const m of code.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+(?:BODY\s+)?([\w.]+)/gi)) {
+      const name = cleanName(m[1])
+      if (!packages.has(name)) {
+        packages.set(name, {
+          packageName: name, absolutePaths: [relPath], headerPath: relPath, bodyPath: relPath,
+          constants: [], variables: [], exceptions: [], types: [], functions: [], procedures: [], estimatedLoc: 0,
+        })
+      }
+    }
+  }
+  return {
+    sourcePath: primaryBase,
+    scannedAt: new Date().toISOString(),
+    scannerUsed: "regex",
+    warnings,
+    packages: Array.from(packages.values()),
+    subprograms: [],
+    tables, triggers, views, sequences, standaloneProcedures,
+  }
+}
+
 // ── 主入口 ──────────────────────────────────────────────────────────────────────
 
-export type ScanSourceOpts = { sourcePath?: string; headerPath?: string; bodyPath?: string }
+export type ScanSourceOpts = { sourcePath?: string; headerPath?: string; bodyPath?: string; entry?: string }
 
 /**
  * 扫描 PL/SQL 源码目录，返回 inventory index。
- * 自动检测/安装 parser，失败则降级到 regex。
- *
- * 入参支持两种模式（向后兼容 string 入参）：
- * - 单目录：scanSource(sourcePath) 或 scanSource({ sourcePath }) —— header/body 同根
- * - 双目录：scanSource({ headerPath, bodyPath }) —— headerPath 先于 bodyPath 处理，
- *   保住 body-only 私有过程；body 文件存绝对路径（不在 headerPath 下）。
+ * 单目录：scanSource(sourcePath) / scanSource({ sourcePath })。
+ * 双目录：scanSource({ headerPath, bodyPath }) —— headerPath 先于 bodyPath 处理。
+ * entry（PKG.METHOD）：入口范围扫描（Phase 2.5，暂未实现，传入则忽略并 warning）。
  */
 export async function scanSource(sourceOrOpts: string | ScanSourceOpts): Promise<InventoryIndex> {
   const opts = typeof sourceOrOpts === "string" ? { sourcePath: sourceOrOpts } : sourceOrOpts
-  const { sourcePath, headerPath, bodyPath } = opts
-  // 双目录模式：headerPath 先于 bodyPath；primaryBase = headerPath（body 存绝对路径）
-  // 单目录模式：roots = [sourcePath]，primaryBase = sourcePath（全相对，与现状一致）
+  const { sourcePath, headerPath, bodyPath, entry } = opts
   const twoDir = !!(headerPath && bodyPath)
   const primaryBase = twoDir ? headerPath! : (sourcePath ?? headerPath ?? bodyPath)
-  if (!primaryBase) {
-    throw new Error("scanSource 需要 sourcePath 或 (headerPath + bodyPath)")
-  }
+  if (!primaryBase) throw new Error("scanSource 需要 sourcePath 或 (headerPath + bodyPath)")
   const roots = twoDir ? [headerPath!, bodyPath!] : [primaryBase]
 
-  const hasParser = await ensureParser()
-  if (hasParser) {
-    try {
-      return await scanWithAST(roots, primaryBase)
-    } catch (e) {
-      // AST 扫描整体失败，降级到 regex
-      getLogger().error("[plsql-scanner]", `AST scan failed, falling back to regex: ${e}`)
-      return scanWithRegex(roots, primaryBase)
-    }
+  if (entry) {
+    // Phase 2.5 入口范围扫描尚未实现；当前退化为全量 + warning
+    getLogger().warn("[plsql-scanner]", `entry=${entry} 入口范围扫描尚未实现，退化为全量扫描`)
   }
-  return scanWithRegex(roots, primaryBase)
+
+  try {
+    return await scanWithAST(roots, primaryBase)
+  } catch (e) {
+    getLogger().error("[plsql-scanner]", `AST scan failed, falling back to regex: ${e}`)
+    return scanWithRegex(roots, primaryBase)
+  }
 }
