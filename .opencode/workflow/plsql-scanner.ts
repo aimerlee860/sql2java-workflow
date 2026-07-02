@@ -21,7 +21,7 @@ import { PlSqlLexer } from "./plsql-ast/PlSqlLexer"
 import { PlSqlParser } from "./plsql-ast/PlSqlParser"
 import { PlSqlParserListener } from "./plsql-ast/PlSqlParserListener"
 import type { Procedure_specContext, Function_specContext, Procedure_bodyContext, Function_bodyContext, Create_packageContext, Create_package_bodyContext, Create_function_bodyContext, Create_procedure_bodyContext, Variable_declarationContext, Exception_declarationContext, Type_declarationContext, Call_statementContext, Standard_functionContext, Routine_nameContext } from "./plsql-ast/PlSqlParser"
-import { CharStreams, CommonTokenStream } from "antlr4ts"
+import { CharStreams, CommonTokenStream, Interval } from "antlr4ts"
 import { ParseTreeWalker } from "antlr4ts/tree/ParseTreeWalker"
 import { ParserRuleContext } from "antlr4ts/ParserRuleContext"
 import { TerminalNode } from "antlr4ts/tree/TerminalNode"
@@ -207,7 +207,19 @@ class PlSqlStructListener implements PlSqlParserListener {
     private readonly subprograms: Map<string, SubprogramInfo[]>,
     private readonly standaloneProcedures: StandaloneProcIndex[],
     private readonly warnings: string[],
+    private readonly tokens: CommonTokenStream,
   ) {}
+
+  /** 取 ctx 的原始文本（含空格）—— `ctx.text` 递归拼接子节点去空格，无法识别
+   *  `IS RECORD`/`IS TABLE OF` 等多词关键字，故用 token stream 按 sourceInterval 取原文。 */
+  private origText(ctx: ParserRuleContext | null | undefined): string {
+    if (!ctx) return ""
+    try {
+      return this.tokens.getText(ctx.sourceInterval)
+    } catch {
+      return ctxText(ctx)
+    }
+  }
 
   // ── 包级 ────────────────────────────────────────────────────────────────────
 
@@ -251,14 +263,15 @@ class PlSqlStructListener implements PlSqlParserListener {
     if (!full) return
     const pkg = this.getOrCreatePackage(full)
     if (!pkg.headerPath) pkg.headerPath = this.absolutePath
-    pkg.estimatedLoc += ctxText(ctx).split("\n").length
+    // 用原始含换行文本计 LOC（ctx.text 去空格无换行，恒 1 行/ctx）
+    pkg.estimatedLoc += this.origText(ctx).split("\n").length
   }
   enterCreate_package_body(ctx: Create_package_bodyContext) {
     const full = this.extractFullPackageName(ctx)
     if (!full) return
     const pkg = this.getOrCreatePackage(full)
     if (!pkg.bodyPath) pkg.bodyPath = this.absolutePath
-    pkg.estimatedLoc += ctxText(ctx).split("\n").length
+    pkg.estimatedLoc += this.origText(ctx).split("\n").length
   }
   exitCreate_package() { this.currentPackage = null }
   exitCreate_package_body() { this.currentPackage = null }
@@ -401,11 +414,12 @@ class PlSqlStructListener implements PlSqlParserListener {
     const pkg = this.packages.get(this.currentPackage)!
     const name = cleanName(ctx.identifier()?.text ?? "")
     if (!name) return
+    // 用原始含空格文本识别 kind（ctx.text 去空格会让 "IS RECORD" 变 "ISRECORD" 漏匹配）
+    const def = this.origText(ctx)
     let kind = "UNKNOWN"
-    const def = ctxText(ctx)
     if (/IS\s+RECORD/i.test(def)) kind = "RECORD"
     else if (/IS\s+TABLE\s+OF/i.test(def)) kind = "TABLE"
-    else if (/IS\s+VARRAY/i.test(def)) kind = "VARRAY"
+    else if (/IS\s+VARRAY/i.test(def) || /VARRAY/i.test(def)) kind = "VARRAY"
     else if (/IS\s+REF\s+CURSOR/i.test(def) || /REF\s+CURSOR/i.test(def)) kind = "REF CURSOR"
     pkg.types.push({ name, kind, definition: normalizeTypeText(def) })
   }
@@ -538,7 +552,7 @@ export async function scanWithAST(roots: string[], primaryBase: string): Promise
       lex.removeErrorListeners()
       parser.removeErrorListeners()
       const tree = parser.sql_script()
-      const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, warnings)
+      const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, warnings, tokens)
       ParseTreeWalker.DEFAULT.walk(listener as any, tree)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -693,7 +707,8 @@ function extractTableFromText(code: string, tables: TableIndex[], relPath: strin
       const rest = colMatch[0]
       const notNull = /\bNOT\s+NULL\b/i.test(rest)
       const inlinePk = /\bPRIMARY\s+KEY\b/i.test(rest)
-      const defMatch = rest.match(/DEFAULT\s+([^,]+)/i)
+      // DEFAULT 值在 NOT NULL / 逗号 / 行尾前截断（旧 [^,]+ 会把 "DEFAULT 'RAW' NOT NULL" 整段吞下）
+      const defMatch = rest.match(/DEFAULT\s+([^,]*?)(?:\s+NOT\s+NULL\b|\s*,|\s*$)/i)
       columns.push({
         name: colName,
         oracleType: type,
