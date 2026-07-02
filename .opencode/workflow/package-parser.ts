@@ -1,45 +1,59 @@
 /**
  * package-parser — 共享的 per-package artifact JSON 解析器。
  *
- * 统一「读 {inventory,analysis}-packages/{pkg}.json → refNamesForPackage(names) 推导重载 refName
- * → 回退字段」逻辑，消除 generateUnitSlices（invForPkg/subprogramsForPkg）与 review-focus
- * （buildInvRefMap/buildAnaRefMap）各自重复实现导致的 refName 不一致风险。
+ * 统一「读 packages/{pkg}.json + subprograms/{pkg}.*.json → refNamesForPackage(names) 推导重载 refName
+ * → 回退字段」逻辑，消除 generateUnitSlices（invForPkg）与 review-focus（buildInvRefMap）
+ * 各自重复实现导致的 refName 不一致风险。
  * 文件缺失或 JSON 解析失败返回 null；调用方按需自行缓存。
  */
 
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { refNamesForPackage } from "./refname"
 
-// ── inventory-packages/{pkg}.json ──────────────────────────────────────────────
+// ── packages/{pkg}.json + subprograms/{pkg}.*.json ────────────────────────────
 
-/** parseInventoryPackage 的返回结构。procs 为原始 procedures 数组（原样，含 lineRange/params 等字段）。 */
+/** parseInventoryPackage 的返回结构。subprograms 为原始子程序数组（含 bodyLocation/parameters/directCalls 等）。 */
 export interface InventoryPackageParsed {
-  /** 重载 refName 列表（refNamesForPackage 处理 {name}__序号），与 procs 一一对应。 */
+  /** 重载 refName 列表（refNamesForPackage 处理 {name}__序号），与 subprograms 一一对应。 */
   refNames: string[]
-  /** 原始 procedures 数组（顺序与 refNames 对齐）。 */
-  procs: any[]
-  /** bodyFile ?? headerFile ?? null —— 源码定位用。 */
+  /** 原始子程序数组（顺序与 refNames 对齐，来自 subprograms/{pkg}.*.json）。 */
+  subprograms: any[]
+  /** 包容器对象（来自 packages/{pkg}.json，含 headerPath/bodyPath/absolutePaths 等）。 */
+  pkgInfo: any
+  /** bodyPath ?? headerPath ?? null —— 源码定位用。 */
   bodyFile: string | null
 }
 
 /**
- * 读取并解析 inventory-packages/{pkg}.json。
- * @returns 解析结构；文件缺失或解析失败返回 null
+ * 读取 packages/{pkg}.json + 聚合 subprograms/{pkg}.*.json。
+ * 子程序文件按文件名自然序读取后，按 refNamesForPackage 重新对齐 refName（重载全部带序号）。
+ * @returns 解析结构；包文件缺失返回 null
  */
 export function parseInventoryPackage(artifactsDir: string, pkg: string): InventoryPackageParsed | null {
-  const p = join(artifactsDir, "inventory-packages", `${pkg}.json`)
+  const p = join(artifactsDir, "packages", `${pkg}.json`)
   if (!existsSync(p)) return null
-  let inv: any
+  let pkgInfo: any
   try {
-    inv = JSON.parse(readFileSync(p, "utf-8"))
+    pkgInfo = JSON.parse(readFileSync(p, "utf-8"))
   } catch {
     return null
   }
-  const procs: any[] = Array.isArray(inv.procedures) ? inv.procedures : []
-  const refNames = refNamesForPackage(procs.map((proc: any) => proc.name))
-  const bodyFile = inv.bodyFile ?? inv.headerFile ?? null
-  return { refNames, procs, bodyFile }
+  // 聚合 subprograms/{pkg}.*.json
+  const subpDir = join(artifactsDir, "subprograms")
+  const subprograms: any[] = []
+  if (existsSync(subpDir)) {
+    const prefix = `${pkg}.`
+    for (const f of readdirSync(subpDir)) {
+      if (!f.endsWith(".json") || !f.startsWith(prefix)) continue
+      try {
+        subprograms.push(JSON.parse(readFileSync(join(subpDir, f), "utf-8")))
+      } catch { /* 跳过损坏 */ }
+    }
+  }
+  const refNames = refNamesForPackage(subprograms.map((s: any) => s.name))
+  const bodyFile = pkgInfo.bodyPath ?? pkgInfo.headerPath ?? null
+  return { refNames, subprograms, pkgInfo, bodyFile }
 }
 
 // ── analysis-packages/{pkg}.json ───────────────────────────────────────────────
@@ -69,3 +83,4 @@ export function parseAnalysisPackage(artifactsDir: string, pkg: string): Analysi
   const refNames = refNamesForPackage(subprograms.map((s: any) => s.name))
   return { refNames, subprograms }
 }
+
