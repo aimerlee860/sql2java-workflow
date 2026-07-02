@@ -21,39 +21,62 @@ export interface InventoryPackageParsed {
   subprograms: any[]
   /** 包容器对象（来自 packages/{pkg}.json，含 headerPath/bodyPath/absolutePaths 等）。 */
   pkgInfo: any
-  /** bodyPath ?? headerPath ?? null —— 源码定位用。 */
-  bodyFile: string | null
+  /** headerPath ?? null —— 包头源码定位用。 */
+  headerPath: string | null
+  /** bodyPath ?? null —— 包体源码定位用。 */
+  bodyPath: string | null
 }
 
 /**
  * 读取 packages/{pkg}.json + 聚合 subprograms/{pkg}.*.json。
  * 子程序文件按文件名自然序读取后，按 refNamesForPackage 重新对齐 refName（重载全部带序号）。
+ * 包名大小写不敏感：Oracle 标识符大小写不敏感，用户给的 mainEntry 包名大小写可能与磁盘文件名
+ *（规范化大写）不一致，故精确名未命中时回退大小写不敏感扫描。
  * @returns 解析结构；包文件缺失返回 null
  */
 export function parseInventoryPackage(artifactsDir: string, pkg: string): InventoryPackageParsed | null {
-  const p = join(artifactsDir, "packages", `${pkg}.json`)
-  if (!existsSync(p)) return null
+  const pkgDir = join(artifactsDir, "packages")
+  if (!existsSync(pkgDir)) return null
+  // 1) 精确名
+  let pkgPath = join(pkgDir, `${pkg}.json`)
+  if (!existsSync(pkgPath)) {
+    // 2) 大小写不敏感兜底
+    const wantUpper = pkg.toUpperCase()
+    let match: string | null = null
+    try {
+      for (const f of readdirSync(pkgDir)) {
+        if (f.endsWith(".json") && f.slice(0, -".json".length).toUpperCase() === wantUpper) {
+          match = f
+          break
+        }
+      }
+    } catch { return null }
+    if (!match) return null
+    pkgPath = join(pkgDir, match)
+  }
   let pkgInfo: any
   try {
-    pkgInfo = JSON.parse(readFileSync(p, "utf-8"))
+    pkgInfo = JSON.parse(readFileSync(pkgPath, "utf-8"))
   } catch {
     return null
   }
-  // 聚合 subprograms/{pkg}.*.json
+  // 聚合 subprograms/{pkg}.*.json（大小写不敏感前缀匹配）
   const subpDir = join(artifactsDir, "subprograms")
   const subprograms: any[] = []
   if (existsSync(subpDir)) {
-    const prefix = `${pkg}.`
-    for (const f of readdirSync(subpDir)) {
-      if (!f.endsWith(".json") || !f.startsWith(prefix)) continue
+    const prefixUpper = `${pkg.toUpperCase()}.`
+    for (const f of readdirSync(subpDir).sort()) {
+      if (!f.endsWith(".json")) continue
+      if (!f.slice(0, -".json".length).toUpperCase().startsWith(prefixUpper)) continue
       try {
         subprograms.push(JSON.parse(readFileSync(join(subpDir, f), "utf-8")))
       } catch { /* 跳过损坏 */ }
     }
   }
   const refNames = refNamesForPackage(subprograms.map((s: any) => s.name))
-  const bodyFile = pkgInfo.bodyPath ?? pkgInfo.headerPath ?? null
-  return { refNames, subprograms, pkgInfo, bodyFile }
+  const headerPath = pkgInfo.headerPath ?? null
+  const bodyPath = pkgInfo.bodyPath ?? null
+  return { refNames, subprograms, pkgInfo, headerPath, bodyPath }
 }
 
 // ── analysis-packages/{pkg}.json ───────────────────────────────────────────────

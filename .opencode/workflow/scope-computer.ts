@@ -29,8 +29,8 @@ export interface AnalysisLike {
 
 export interface InventoryPackageLike {
   packageName: string
-  headerFile?: string | null
-  bodyFile?: string | null
+  headerPath?: string | null
+  bodyPath?: string | null
   procedures: { name: string; type: string }[]
 }
 
@@ -49,8 +49,9 @@ export interface ParsedMainEntry {
  * 解析 mainEntry 串。过程级形态：`[subdir/]PKG.refName`（location 用 `/`，调用图键用 `.`）。
  * 返回 null = 非过程级（纯包名 / 无点），调用方按旧门面包语义全量翻译。
  *
- * 拆分：先按最后一个 `/` 分 location / rest；rest 按首个 `.` 拆 pkg / refName（parseQualified）。
- * 无 `/` 时 location=null；rest 无 `.` → 非过程级 → null。
+ * 拆分：先按最后一个 `/` 分 location / rest；rest 按最后一个 `.` 拆 pkg / refName（parseQualified，
+ * 适配 dotted 包名 fm.xxx：最后一段是 refName，前面拼成包名）。无 `/` 时 location=null；
+ * rest 无 `.` → 非过程级 → null。
  */
 export function parseMainEntry(spec: unknown): ParsedMainEntry | null {
   if (typeof spec !== "string" || spec.length === 0) return null
@@ -88,10 +89,10 @@ export interface EntryError {
  * 重载消歧：用户给的 refName 段若命中唯一 refName（裸名非重载 / 显式 `name__N`）→ 取之；
  * 若是裸名且该名重载（多个 `name__N`）→ 报错要求显式 refName；若不在该包子程序集 → 报错。
  *
- * subdir 校验：入口包的 `bodyFile ?? headerFile` 须以 `subdir/` 开头（防指错/同名包）。
+ * subdir 校验：入口包的 `bodyPath ?? headerPath` 须以 `subdir/` 开头（防指错/同名包）。
  * subdir=null 时跳过。
  *
- * @param entryPkg 入口包的 inventory 数据（调用方从 inventory-packages/{pkg}.json 加载）
+ * @param entryPkg 入口包的 inventory 数据（调用方从 packages/{pkg}.json + subprograms/{pkg}.*.json 加载）
  */
 export function resolveEntry(
   entryPkg: InventoryPackageLike | undefined,
@@ -103,7 +104,7 @@ export function resolveEntry(
 
   // 大小写不敏感匹配包名（Oracle 标识符大小写不敏感）
   if (entryPkg.packageName.toUpperCase() !== parsed.pkg.toUpperCase()) {
-    return { ok: false, error: `inventory-packages 数据包名 ${entryPkg.packageName} 与入口 ${parsed.pkg} 不匹配` }
+    return { ok: false, error: `packages 数据包名 ${entryPkg.packageName} 与入口 ${parsed.pkg} 不匹配` }
   }
 
   // 计算该包真实 refName 列表（与 callGraph key / FSD 文件名同口径）
@@ -148,9 +149,9 @@ function finalize(
 ): EntryResolution | EntryError {
   // subdir 校验
   if (parsed.subdir) {
-    const file = entryPkg.bodyFile ?? entryPkg.headerFile
+    const file = entryPkg.bodyPath ?? entryPkg.headerPath
     if (!file) {
-      return { ok: false, error: `入口包 ${pkg} 无 bodyFile/headerFile，无法校验子目录 ${parsed.subdir}` }
+      return { ok: false, error: `入口包 ${pkg} 无 bodyPath/headerPath，无法校验子目录 ${parsed.subdir}` }
     }
     const prefix = parsed.subdir.endsWith("/") ? parsed.subdir : parsed.subdir + "/"
     // 归一化反斜杠（跨平台容忍）

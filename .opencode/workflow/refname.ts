@@ -61,13 +61,15 @@ export function validRefNameSet(procedureNames: string[]): Set<string> {
  */
 export function parseQualified(qualified: string): [string, string] | null {
   if (typeof qualified !== "string") return null
-  const idx = qualified.indexOf(".")
+  // 按**最后一个** `.` 拆分：refName 本身不含 `.`，而包名可能带点（项目约定 fm.xxx，
+  // 点编码子目录路径），故包名 = 最后一个点之前的所有段，refName = 最后一段。
+  const idx = qualified.lastIndexOf(".")
   if (idx <= 0 || idx >= qualified.length - 1) return null
   return [qualified.slice(0, idx), qualified.slice(idx + 1)]
 }
 
 /**
- * 从 unit id `PKG.refName` 取包名（宽松版，按首个 `.` 切分）。
+ * 从 unit id `PKG.refName` 取包名（宽松版，按最后一个 `.` 切分）。
  * 无 `.` 时返回原串（用于已保证合法的 unit id 热路径，避免 null 检查）。
  * 需要严格校验非法格式时用 parseQualified。
  *
@@ -75,12 +77,12 @@ export function parseQualified(qualified: string): [string, string] | null {
  * `const i = u.indexOf("."); return i < 0 ? u : u.slice(...)` 内联闭包（单一真相源）。
  */
 export function pkgOf(unitId: string): string {
-  const i = unitId.indexOf(".")
+  const i = unitId.lastIndexOf(".")
   return i < 0 ? unitId : unitId.slice(0, i)
 }
 
-/** 从 unit id `PKG.refName` 取 refName（宽松版，按首个 `.` 切分）。无 `.` 时返回原串。 */
+/** 从 unit id `PKG.refName` 取 refName（宽松版，按最后一个 `.` 切分）。无 `.` 时返回原串。 */
 export function refOf(unitId: string): string {
-  const i = unitId.indexOf(".")
+  const i = unitId.lastIndexOf(".")
   return i < 0 ? unitId : unitId.slice(i + 1)
 }
