@@ -201,16 +201,27 @@ function ctxText(ctx: ParserRuleContext | undefined | null): string {
 
 /**
  * 剥离 SQL*Plus 专有命令，避免解析器报错。
- * SQL*Plus 命令是客户端编排指令（prompt/@@/SET 等），不含 PL/SQL 结构定义。
+ * SQL*Plus 命令是客户端编排指令（prompt/@@/SET ECHO 等），只出现在 PL/SQL 单元之外的顶层
+ * （install.sql / schema 脚本里）。**单元内不剥**——`SET col = val`（UPDATE SET）、`EXIT WHEN`
+ * 是 PL/SQL，旧实现按行首关键字 `^SET\b`/`^EXIT\b` 误剥，导致 UPDATE 丢 SET 行 → 语法错误
+ * → 错误恢复级联 → 漏捕获跨包引用。
+ *
+ * 单元边界：`CREATE [OR REPLACE] (PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)` 起，独占一行的 `/`
+ * （SQL*Plus 终止符）止。资源里单元均以 `/` 结尾。
  */
 function stripSqlPlusCommands(code: string): string {
+  let inUnit = false
+  const unitStart = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:PACKAGE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i
+  const unitEnd = /^\s*\/\s*$/
+  const sqlPlusLine = /^(prompt|@@?\s?\S|SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|EXIT|QUIT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|REM|CLEAR|SET)\b/i
   return code
     .split("\n")
     .map(line => {
       const trimmed = line.trimStart()
-      if (/^prompt\b/i.test(trimmed)) return ""
-      if (/^@@?\s?\S/i.test(trimmed)) return ""
-      if (/^(SET|SPOOL|DEFINE|UNDEFINE|VARIABLE|ACCEPT|EXIT|QUIT|WHENEVER|HOST|COLUMN|TTITLE|BTITLE|BREAK|COMPUTE|REM|CLEAR)\b/i.test(trimmed)) return ""
+      if (unitStart.test(trimmed)) inUnit = true
+      else if (inUnit && unitEnd.test(trimmed)) inUnit = false
+      // 单元内保留（SET/EXIT 等是 PL/SQL）；单元外剥 SQL*Plus 命令
+      if (!inUnit && sqlPlusLine.test(trimmed)) return ""
       return line
     })
     .join("\n")

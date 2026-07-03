@@ -219,4 +219,39 @@ end;
       rmSync(tmp, { recursive: true, force: true })
     }
   }, 30000)
+
+  it("UPDATE 跨行 SET（行首 SET）+ EXIT WHEN 不被 SQL*Plus strip 误剥，跨包常量被捕获", async () => {
+    // 旧 stripSqlPlusCommands 按 ^SET\b 剥离行首 SET 行，导致 UPDATE 丢 SET → 语法错误 →
+    // 错误恢复级联 → 漏捕获跨包引用。EXIT WHEN 同理被 ^EXIT\b 误剥。修复后单元内不剥。
+    const tmp = mkdtempSync(join(tmpdir(), "pkg-refs-strip-"))
+    const sql = `create or replace package other_pkg as c_val constant number := 1; end;
+/
+create or replace package body other_pkg as end;
+/
+create or replace package caller_pkg as procedure p; end;
+/
+create or replace package body caller_pkg as
+procedure p is
+  i number := 0;
+begin
+  loop
+    i := i + 1;
+    exit when i > 3;
+    update t_x
+       set col = other_pkg.c_val
+     where id = i;
+  end loop;
+end;
+/`
+    try {
+      writeFileSync(join(tmp, "strip_pkg.sql"), sql, "utf-8")
+      const inv = await scanSource(tmp)
+      const p = inv.subprograms.find(s => s.name === "P" && s.belongToPackage === "CALLER_PKG")
+      expect(p, "P 子程序应被扫描").toBeDefined()
+      // UPDATE SET 行首 SET 未被误剥 → other_pkg.c_val 被捕获
+      expect(p!.packageRefs.some(r => r.package === "OTHER_PKG" && r.name === "C_VAL"), "UPDATE SET 内的跨包常量应被捕获").toBe(true)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  }, 30000)
 })
