@@ -54,17 +54,42 @@ export function makeInventory(overrides: Record<string, unknown> = {}) {
   }
 }
 
-// ── Analysis Meta ────────────────────────────────────────────
+// ── Package Artifact（逐包 inventory，新形状）─────────────────
 
-/** dependency-graph.json — 全局元数据（callGraph key 用 PKG.refName） */
-export function makeDependencyGraphMeta(overrides: Record<string, unknown> = {}) {
+/** packages/{PKG}.json — 对齐 PackageArtifactSchema（redesign 后取代旧 inventory-packages/{PKG}.json） */
+export function makePackageArtifact(overrides: Record<string, unknown> = {}) {
   return {
-    callGraph: { "CORE_PKG.GET_ITEM": [], "CORE_PKG.SET_ITEM": [] },
-    packageDependency: { CORE_PKG: [], BASE_PKG: [] },
-    translationOrder: [["BASE_PKG", "CORE_PKG"]],
-    complexity: { CORE_PKG: { score: 3, patterns: [], riskLevel: "low" as const }, BASE_PKG: { score: 1, patterns: [], riskLevel: "low" as const } },
-    sccGroups: [],
-    packageNames: ["CORE_PKG", "BASE_PKG"],
+    packageName: "CORE_PKG",
+    absolutePaths: ["pkg/core_pkg.pks", "pkg/core_pkg.pkb"],
+    headerPath: "pkg/core_pkg.pks",
+    bodyPath: "pkg/core_pkg.pkb",
+    constants: [],
+    variables: [],
+    exceptions: [],
+    types: [],
+    functions: [],
+    procedures: ["GET_ITEM"],
+    estimatedLoc: 40,
+    complexity: { score: 3, patterns: [], riskLevel: "low" as const },
+    ...overrides,
+  }
+}
+
+/** subprograms/{PKG.METHOD}.json — 对齐 SubprogramArtifactSchema（含 directCalls/packageRefs） */
+export function makeSubprogramArtifact(overrides: Record<string, unknown> = {}) {
+  return {
+    name: "GET_ITEM",
+    type: "FUNCTION" as const,
+    belongToPackage: "CORE_PKG",
+    overloadIndex: null,
+    isPrivate: false,
+    headerLocation: null,
+    bodyLocation: { absolutePath: "pkg/core_pkg.pkb", lineRange: [10, 50] as [number, number] },
+    parameters: [{ name: "P_ID", type: "NUMBER", mode: "IN" as const, defaultExpression: null }],
+    returnType: "VARCHAR2",
+    loc: 40,
+    directCalls: [] as Array<{ package: string; name: string; line: number; kind: "function" | "procedure" }>,
+    packageRefs: [] as Array<{ package: string; name: string; line: number }>,
     ...overrides,
   }
 }
@@ -140,30 +165,6 @@ export function makeScaffold(overrides: Record<string, unknown> = {}) {
       },
     },
     conventions: "Standard conventions",
-    ...overrides,
-  }
-}
-
-// ── Inventory Package（逐包）─────────────────────────────────
-
-/** inventory-packages/{PKG}.json — 对齐 InventoryPackageSchema */
-export function makeInventoryPackage(overrides: Record<string, unknown> = {}) {
-  return {
-    packageName: "CORE_PKG",
-    headerFile: "pkg/core_pkg.pks",
-    bodyFile: "pkg/core_pkg.pkb",
-    procedures: [
-      {
-        name: "GET_ITEM",
-        type: "function" as const,
-        params: [{ name: "P_ID", oracleType: "NUMBER", direction: "IN" as const }],
-        lineRange: [10, 50] as [number, number],
-        loc: 40,
-      },
-    ],
-    types: [],
-    variables: [],
-    constants: [],
     ...overrides,
   }
 }

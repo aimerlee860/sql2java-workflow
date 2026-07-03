@@ -2356,7 +2356,7 @@ function isProjectFile(path: string): boolean {
 }
 
 /** artifactsDir 下已知子目录前缀，重定向时需剥除 */
-const ARTIFACT_PREFIX_RE = /^(?:translations|analysis-packages|inventory-packages|status|metrics|fsd|reports)\/[^/]+\//
+const ARTIFACT_PREFIX_RE = /^(?:translations|analysis-packages|status|metrics|fsd|reports)\/[^/]+\//
 
 /**
  * 从 artifactsDir 下的相对路径中剥除 artifact 子目录前缀，提取项目文件路径。
