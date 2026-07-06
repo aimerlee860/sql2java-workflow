@@ -713,10 +713,23 @@ export function resolveGeneratedRoot(runId: string, artifactId: string, repoRoot
 /** scaffold 首次派发前锁定目标目录：确保目录存在并写入 runId 标记。
  *  仅 scaffold 阶段调用（projectRoot 首次确定时刻）；其余阶段用 resolveGeneratedRoot 只读解析。 */
 export function claimGeneratedRoot(runId: string, artifactId: string, repoRoot: string = resolveProjectRoot()): string {
+  const base = join(repoRoot, "generated", artifactId)
   const root = resolveGeneratedRoot(runId, artifactId, repoRoot)
-  if (!existsSync(join(root, GENERATED_RUN_ID_MARKER))) {
+  const markerPath = join(root, GENERATED_RUN_ID_MARKER)
+  if (!existsSync(markerPath)) {
     mkdirSync(root, { recursive: true })
-    try { writeFileSync(join(root, GENERATED_RUN_ID_MARKER), runId, "utf-8") } catch {}
+    try {
+      writeFileSync(markerPath, runId, "utf-8")
+    } catch {
+      // marker 写失败（磁盘满/权限/AV 拦截）：若 root 是 base，后续 resolveGeneratedRoot 会因
+      // 无标记把 base 当外来占用 → 返回 fallback，与本次 scaffold 写 base 错位。改用 fallback
+      // 保证一致。root 已是 fallback（他 run 占用 base）时无法再换，原样返回（标记缺失但路径一致）。
+      if (root === base) {
+        const fallback = join(repoRoot, "generated", `${artifactId}-${runId}`)
+        mkdirSync(fallback, { recursive: true })
+        return fallback
+      }
+    }
   }
   return root
 }
@@ -1219,6 +1232,7 @@ function validateInventoryPackages(
 
   // 3. 逐包校验 packages/{PKG}.json（大小写不敏感匹配文件名）
   const pkgDirEntries = readdirSync(pkgDir, { withFileTypes: true })
+  let declaredSubprogramCount = 0
   for (const pkgName of expectedPackages) {
     const actualFileName = findFileCaseInsensitive(pkgDir, pkgName, pkgDirEntries)
     if (!actualFileName) {
@@ -1236,15 +1250,24 @@ function validateInventoryPackages(
       if (typeof parsed.packageName !== "string" || parsed.packageName.toUpperCase() !== pkgName.toUpperCase()) {
         return `packages/${actualFileName}: packageName "${parsed.packageName}" does not match expected "${pkgName}"`
       }
+      declaredSubprogramCount += Array.isArray(parsed.procedures) ? parsed.procedures.length : 0
+      declaredSubprogramCount += Array.isArray(parsed.functions) ? parsed.functions.length : 0
     } catch (e: any) {
       return `Failed to read/parse packages/${actualFileName}: ${e.message}`
     }
   }
 
-  // 4. subprograms/ 目录须存在（子程序 per-file Zod 校验在写盘时已做）
+  // 4. subprograms/ 目录须存在且非空（当包声明了子程序时）。仅查目录存在会让空目录通过 →
+  // 依赖图空 → ensureRunScope 的 computeClosure 退化到仅入口 unit，过程级 scope 静默收窄到 1 个。
   const subpDir = join(artifactsDir, "subprograms")
   if (!existsSync(subpDir)) {
     return "subprograms/ directory not found. Agent must write per-subprogram files before advancing."
+  }
+  if (declaredSubprogramCount > 0) {
+    const subpFiles = readdirSync(subpDir).filter(f => f.endsWith(".json"))
+    if (subpFiles.length === 0) {
+      return `subprograms/ directory is empty but packages declare ${declaredSubprogramCount} subprogram(s). Agent must write per-subprogram files before advancing.`
+    }
   }
 
   // 5. tables/ 目录 + 逐表校验 tables/{TABLE}.json

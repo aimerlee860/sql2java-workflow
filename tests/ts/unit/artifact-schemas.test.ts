@@ -279,10 +279,10 @@ describe("Schema 无效数据被拒绝", () => {
     expect(result.success).toBe(false)
   })
 
-  it("InventoryIndexSchema callGraph 可选缺失通过", () => {
+  it("InventoryIndexSchema subprograms 缺失失败（新形状顶层必填）", () => {
     const data = makeInventoryIndex()
-    delete (data as any).callGraph
-    expect(InventoryIndexSchema.safeParse(data).success).toBe(true)
+    delete (data as any).subprograms
+    expect(InventoryIndexSchema.safeParse(data).success).toBe(false)
   })
 
   it("ReviewSchema passed=true + mustFix 非空 → refine 失败", () => {
@@ -578,42 +578,6 @@ describe("类型放松 — 合理 LLM 变体不再被拒", () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe("大小写 normalize — ciEnum 自动纠正 LLM 大小写变体", () => {
-  // ── type (ciEnumLower) ───────────────────────────────────
-
-  it("InventoryIndexSchema: type 大小写变体 normalize 为小写", () => {
-    const base = {
-      sourcePath: "/test", scannedAt: "2026-06-01T00:00:00.000Z", scannerUsed: "regex",
-      packages: [{
-        name: "PKG", headerFile: "a.pks", bodyFile: "a.pkb",
-        procedures: [{ name: "P", type: "PROCEDURE", lineRange: [1, 10] as [number, number] }],
-        estimatedLoc: 10,
-      }],
-      tables: [], triggers: [], views: [], sequences: [], standaloneProcedures: [],
-    }
-    const result = InventoryIndexSchema.safeParse(base)
-    expect(result.success).toBe(true)
-    if (result.success) {
-      expect(result.data.packages[0].procedures[0].type).toBe("procedure")
-    }
-  })
-
-  it("InventoryIndexSchema: type 'Function' normalize 为 'function'", () => {
-    const base = {
-      sourcePath: "/test", scannedAt: "2026-06-01T00:00:00.000Z", scannerUsed: "regex",
-      packages: [{
-        name: "PKG", headerFile: "a.pks", bodyFile: "a.pkb",
-        procedures: [{ name: "F", type: "Function", lineRange: [1, 10] as [number, number] }],
-        estimatedLoc: 10,
-      }],
-      tables: [], triggers: [], views: [], sequences: [], standaloneProcedures: [],
-    }
-    const result = InventoryIndexSchema.safeParse(base)
-    expect(result.success).toBe(true)
-    if (result.success) {
-      expect(result.data.packages[0].procedures[0].type).toBe("function")
-    }
-  })
-
   // ── scannerUsed (ciEnumLower) ────────────────────────────
 
   it("InventoryIndexSchema: scannerUsed 'AST' normalize 为 'ast'", () => {

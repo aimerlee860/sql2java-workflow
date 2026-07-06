@@ -515,7 +515,10 @@ function buildCoverage(artifactsDir: string, projectRoot: string, packages: stri
 function excludeReason(relPath: string): string | null {
   if (relPath.includes("/common/infrastructure/")) return "基础设施层（common/infrastructure，统一异常/日志/工具）"
   const base = relPath.slice(relPath.lastIndexOf("/") + 1)
-  if (relPath.includes("/beans/")) return "数据对象（beans/，纯数据载体：Bean/Dto 等）"
+  // 仅排除 beans/ 下的 *Bean.java（数据载体，与 pom jacoco exclude `**/beans/**Bean` 一致）。
+  // 旧实现 `relPath.includes("/beans/")` 误排除 beans/ 下所有 .java——若含 *Mapper/*Validator/*Helper
+  // 等逻辑类，会被静默踢出覆盖率门控，未覆盖逻辑类不再触发 allPassed=false，门控失效。
+  if (relPath.includes("/beans/") && base.endsWith("Bean.java")) return "数据对象（beans/*Bean，纯数据载体）"
   if (base.endsWith("Config.java")) return "配置类（*Config，无业务逻辑）"
   if (base.endsWith("Application.java")) return "启动类（*Application，框架入口）"
   return null

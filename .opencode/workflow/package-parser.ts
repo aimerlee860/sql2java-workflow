@@ -1,7 +1,7 @@
 /**
  * package-parser — 共享的 per-package artifact JSON 解析器。
  *
- * 统一「读 packages/{pkg}.json + subprograms/{pkg}.*.json → refNamesForPackage(names) 推导重载 refName
+ * 统一「读 packages/{pkg}.json + subprograms/{pkg}.{refName}.json → refNameOf(overloadIndex) 推导重载 refName
  * → 回退字段」逻辑，消除 generateUnitSlices（invForPkg）与 review-focus（buildInvRefMap）
  * 各自重复实现导致的 refName 不一致风险。
  * 文件缺失或 JSON 解析失败返回 null；调用方按需自行缓存。
@@ -60,14 +60,19 @@ export function parseInventoryPackage(artifactsDir: string, pkg: string): Invent
   } catch {
     return null
   }
-  // 聚合 subprograms/{pkg}.*.json（大小写不敏感前缀匹配）
+  // 聚合 subprograms/{pkg}.{refName}.json（大小写不敏感**精确**匹配 belongToPackage）。
+  // 文件名 = belongToPackage + '.' + refName，refName 不含 '.'，故 stem 最后一个 '.' 之前即 belongToPackage。
+  // 不能用 startsWith(`${pkg}.`)：点号包名（FM 与 FM.XXX 共存）会误把 FM.XXX 的子程序并入 FM。
   const subpDir = join(artifactsDir, "subprograms")
   const subprograms: any[] = []
   if (existsSync(subpDir)) {
-    const prefixUpper = `${pkg.toUpperCase()}.`
+    const wantUpper = pkg.toUpperCase()
     for (const f of readdirSync(subpDir).sort()) {
       if (!f.endsWith(".json")) continue
-      if (!f.slice(0, -".json".length).toUpperCase().startsWith(prefixUpper)) continue
+      const stem = f.slice(0, -".json".length)
+      const lastDot = stem.lastIndexOf(".")
+      const filePkg = lastDot > 0 ? stem.slice(0, lastDot) : stem
+      if (filePkg.toUpperCase() !== wantUpper) continue
       try {
         subprograms.push(JSON.parse(readFileSync(join(subpDir, f), "utf-8")))
       } catch { /* 跳过损坏 */ }

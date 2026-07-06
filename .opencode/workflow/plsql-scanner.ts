@@ -14,7 +14,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync } from "node:fs"
-import { join, extname, relative, sep } from "node:path"
+import { join, extname, sep } from "node:path"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
 import { getLogger } from "./workflow-logger"
 import { parseMainEntry } from "./scope-computer"
@@ -1125,9 +1125,18 @@ function extractSequenceFromText(code: string, sequences: SequenceIndex[], relPa
 
 // ── 文件收集 ────────────────────────────────────────────────────────────────────
 
-/** 计算存入 headerPath/bodyPath 的路径：在 primaryBase 下存相对（可移植），否则存绝对。 */
+/** 计算存入 headerPath/bodyPath 的路径：在 primaryBase 下存相对（可移植），否则存绝对。
+ *  Windows 文件系统大小写不敏感：用户传的 primaryBase 大小写可能与 readdirSync 返回的不一致
+ *  （C:\Proj vs C:\proj），startsWith 区分大小写会误判为非子路径 → 存绝对路径，使 inventory.json
+ *  路径风格部分相对部分绝对、跨平台不可移植。故 win32 下做大小写不敏感前缀匹配，存路径仍用原始大小写。 */
 function storedFilePath(filePath: string, primaryBase: string): string {
-  return filePath.startsWith(primaryBase + sep) ? relative(primaryBase, filePath) : filePath
+  const prefix = primaryBase + sep
+  const underPrimary = process.platform === "win32"
+    ? filePath.toLowerCase().startsWith(prefix.toLowerCase())
+    : filePath.startsWith(prefix)
+  if (!underPrimary) return filePath
+  // 剥前缀（保留 filePath 原始大小写），规范为 '/' 分隔跨平台可移植
+  return filePath.slice(prefix.length).replace(/\\/g, "/")
 }
 
 /** 收集多根目录下所有 PL/SQL 文件，root 顺序为主键，root 内 .pks→.pkb→名。 */

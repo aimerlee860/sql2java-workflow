@@ -172,7 +172,7 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
   inventory: [
     'optional 字段（defaultValue/bodyPath/returnType/headerPath/ddlFile 等）可省略或写 null，均可通过校验',
     'parameters[].mode 自动 normalize 为大写："in"/"In"/"IN" 均等价于 "IN"，"in out"/"IN OUT" 均等价于 "IN OUT"',
-    'type 自动 normalize 为小写："PROCEDURE"/"Procedure" 均等价于 "procedure"',
+    'subprograms[].type 严格大写枚举："PROCEDURE" / "FUNCTION"（不 normalize，必须全大写）；directCalls[].kind 严格小写："function" / "procedure"',
     'triggers.timing 自动 normalize 为小写：任意大小写均可通过',
     'triggers.level 自动 normalize 为小写：任意大小写均可通过',
     'triggers.events 每个元素自动 normalize 为小写：任意大小写均可通过',

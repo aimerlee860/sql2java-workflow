@@ -14,12 +14,13 @@
  * 单一真相源（refName 规范、pkgOf/refOf/parseQualified），与 callGraph key 口径一致。
  *
  * 纯函数、零副作用、可单测：不读文件、不持久化。调用方（workflow-engine）负责加载
- * dependency-graph.json / inventory-packages 数据并传入，以及把结果写入 run.metadata。
+ * 依赖图（dependency-graph.ts 按需推导，不再落盘 dependency-graph.json）/ packages 数据并传入，
+ * 以及把结果写入 run.metadata。
  */
 
 import { pkgOf, refNameOf, parseQualified } from "./refname"
 
-// ── 宽松输入形态（来自 Zod 校验后的 dependency-graph.json / inventory-packages，但本模块不强耦合 schema）──
+// ── 宽松输入形态（来自依赖图 dependency-graph.ts 推导结果 / packages 数据，本模块不强耦合 schema）──
 
 export interface AnalysisLike {
   callGraph: Record<string, string[]>
@@ -63,7 +64,7 @@ export function parseMainEntry(spec: unknown): ParsedMainEntry | null {
   const rest = slashIdx >= 0 ? trimmed.slice(slashIdx + 1) : trimmed
   if (rest.length === 0) return null
 
-  const q = parseQualified(rest) // [pkg, refName]，按首个 `.` 拆；无 `.` 返回 null
+  const q = parseQualified(rest) // [pkg, refName]，按最后一个 `.` 拆（dotted 包名 fm.xxx 取末段为 refName）；无 `.` 返回 null
   if (!q) return null // 纯包名（无过程）→ 非过程级
   return { subdir: subdir && subdir.length > 0 ? subdir : null, pkg: q[0], refName: q[1] }
 }

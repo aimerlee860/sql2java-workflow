@@ -55,53 +55,8 @@ const ModuleCategorySchema = z.enum(ModuleCategoryValues)
 
 // ============================================================================
 // Inventory Index Schema（预扫描索引，machine-generated）
+// 定义移至 PackageArtifactSchema/SubprogramArtifactSchema/TableArtifactSchema 之后（复用它们）
 // ============================================================================
-
-export const InventoryIndexSchema = z.object({
-  sourcePath: z.string(),
-  scannedAt: z.string(),
-  scannerUsed: ciEnumLower(["ast", "regex"]),
-
-  packages: z.array(z.object({
-    name: z.string(),
-    headerFile: z.string().nullable().optional(),
-    bodyFile: z.string().nullable().optional(),
-    procedures: z.array(z.object({
-      name: z.string(),
-      type: ciEnumLower(["procedure", "function"]),
-      lineRange: z.tuple([z.number(), z.number()]).optional(),
-    })),
-    estimatedLoc: z.number(),
-  })),
-
-  tables: z.array(z.object({
-    name: z.string(),
-    ddlFile: z.string().nullable().optional(),
-  })),
-
-  triggers: z.array(z.object({
-    name: z.string(),
-    sourceFile: z.string(),
-  })),
-
-  views: z.array(z.object({
-    name: z.string(),
-    ddlFile: z.string().nullable().optional(),
-  })),
-
-  sequences: z.array(z.object({
-    name: z.string(),
-    ddlFile: z.string().nullable().optional(),
-  })),
-
-  standaloneProcedures: z.array(z.object({
-    name: z.string(),
-    type: ciEnumLower(["procedure", "function"]),
-    sourceFile: z.string(),
-  })),
-
-  callGraph: z.record(z.string(), z.array(z.string())).optional(),
-}).passthrough()
 
 // ============================================================================
 // Inventory Schema（顶层轻量索引：packageNames + tableNames + triggers/views/sequences + 元信息）
@@ -226,6 +181,53 @@ export const TableArtifactSchema = z.object({
   })).optional(),
 }).passthrough()
 
+// ── InventoryIndexSchema（scanner 产出的预扫描索引，machine-generated）──────────
+// 新形状：packages[]（PackageArtifactSchema 全字段）+ 顶层 subprograms[]（SubprogramArtifactSchema）
+// + tables/triggers/views/sequences/standaloneProcedures。不再有 callGraph（依赖图按需推导）。
+// 旧 schema 声明 name/headerFile/bodyFile/procedures[对象] + callGraph，与实际产出脱节，
+// 致 stripNullsAndRewrite(idxPath, InventoryIndexSchema) 校验失败、null 修复被静默跳过。
+export const InventoryIndexSchema = z.object({
+  sourcePath: z.string(),
+  scannedAt: z.string(),
+  scannerUsed: ciEnumLower(["ast", "regex"]),
+  warnings: z.array(z.string()).default([]),
+  packages: z.array(PackageArtifactSchema),
+  subprograms: z.array(SubprogramArtifactSchema),
+  tables: z.array(TableArtifactSchema),
+  triggers: z.array(z.object({
+    name: z.string(),
+    timing: ciEnumLower(["before", "after", "instead-of", "compound"]).optional(),
+    level: ciEnumLower(["statement", "row"]).optional(),
+    targetTable: z.string().optional(),
+    events: z.array(ciEnumLower(["insert", "update", "delete"])).optional(),
+    sourceFile: z.string(),
+    lineRange: z.tuple([z.number(), z.number()]).optional(),
+    condition: z.string().nullable().optional(),
+  }).passthrough()).default([]),
+  views: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().nullable().optional(),
+    sourceFile: z.string().nullable().optional(),
+    columns: z.array(z.string()).optional(),
+    underlyingTables: z.array(z.string()).nullable().optional(),
+  }).passthrough()).default([]),
+  sequences: z.array(z.object({
+    name: z.string(),
+    ddlFile: z.string().nullable().optional(),
+    sourceFile: z.string().nullable().optional(),
+    startWith: z.number().nullable().optional(),
+    incrementBy: z.number().nullable().optional(),
+    minValue: z.number().nullable().optional(),
+    maxValue: z.number().nullable().optional(),
+    cycle: z.boolean().nullable().optional(),
+  }).passthrough()).default([]),
+  standaloneProcedures: z.array(z.object({
+    name: z.string(),
+    type: ciEnumLower(["procedure", "function"]),
+    sourceFile: z.string(),
+  }).passthrough()).default([]),
+}).passthrough()
+
 // ============================================================================
 // Analysis Schema（拆分为 Meta + Per-Package）
 // ============================================================================
@@ -280,23 +282,8 @@ export const UnitAnalysisSchema = z.object({
   subprograms: z.array(SubprogramSchema),
 }).passthrough()
 
-/** @deprecated 旧格式兼容，仅用于跨 Schema 校验的 fallback */
-export const AnalysisSchema = z.object({
-  callGraph: z.record(z.string(), z.array(z.string())),
-  packageDependency: z.record(z.string(), z.array(z.string())),
-  translationOrder: z.array(z.array(z.string())),
-  complexity: z.record(z.string(), z.object({
-    score: z.number().min(1).max(10),
-    patterns: z.array(z.string()),
-    riskLevel: ciEnumLower(["low", "medium", "high"]),
-  })),
-  sccGroups: z.array(z.array(z.string())),
-  packages: z.array(z.object({
-    name: z.string(),
-    subprograms: z.array(SubprogramSchema),
-  })).optional(),
-  packageNames: z.array(z.string()).optional(),
-}).passthrough()
+//（旧 AnalysisSchema 已删：dependency-graph.json 落盘移除后无活跃消费者，仅残留旧字段定义。
+//  调用图/complexity 等改由 dependency-graph.ts 按需推导 + packages/{PKG}.json.complexity 承载。）
 
 // ============================================================================
 // Plan Schema
