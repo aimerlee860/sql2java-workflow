@@ -1067,14 +1067,13 @@ export function buildShardedWorkerOrder(
   let projectRoot: string | null = null
   if (artifactId) {
     const md = run.metadata as Record<string, unknown>
-    if (typeof md.generatedRoot === "string" && md.generatedRoot) {
-      projectRoot = md.generatedRoot
-    } else if (phase === "scaffold") {
+    if (phase === "scaffold" && !(typeof md.generatedRoot === "string" && md.generatedRoot)) {
+      // 首次 scaffold claim（建目录+写 marker）并持久化，作为全阶段单一真相源
       projectRoot = claimGeneratedRoot(run.runId, artifactId)
       md.generatedRoot = projectRoot
       engine.persist(run)
     } else {
-      projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+      projectRoot = generatedRootFor(run, artifactId)
     }
   }
   const projectRootLine = projectRoot ? `- projectRoot: \`${projectRoot}\`  ← Java/项目文件写入此目录` : ""
@@ -1807,7 +1806,10 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
         if (planForRoot) {
           const artifactId = (planForRoot.targetProject as { artifactId: string })?.artifactId
           if (artifactId) {
-            const expectedRoot = resolveGeneratedRoot(run.runId, artifactId)
+            // 用 generatedRootFor（读 metadata.generatedRoot 单一真相源），不用 resolveGeneratedRoot 重新派生——
+            // 否则磁盘状态在 claim/save/validation 间变化时 expectedRoot 会 base↔fallback 翻转，
+            // 与 dispatch 注入给 agent 的值不一致，导致 advance 反复拒绝（先要 runId 后缀、再不要、再要）。
+            const expectedRoot = generatedRootFor(run, artifactId)
             if (scaffoldData.projectRoot !== expectedRoot) {
               return `scaffold.json projectRoot 必须是 "${expectedRoot}"，实际为 "${scaffoldData.projectRoot}"。请使用 Runtime Context 中注入的 projectRoot 值。`
             }
@@ -4451,7 +4453,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               const planArt = engine.loadArtifactJson(artifactsDir, "plan")
               const artifactId = (planArt?.targetProject as any)?.artifactId
               if (artifactId) {
-                const projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+                const projectRoot = generatedRootFor(run, artifactId)
                 const dedupRulesPath = (run.metadata as Record<string, unknown>).dedupRulesPath as string | undefined
                 const targetPkgs = currentEntry?.incrementalContext?.targetPackages as string[] | undefined
                 const res = scanDuplicates(artifactsDir, projectRoot, targetPkgs, dedupRulesPath)
@@ -4483,7 +4485,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
               const planArt = engine.loadArtifactJson(artifactsDir, "plan")
               const artifactId = (planArt?.targetProject as any)?.artifactId
               if (artifactId) {
-                const projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+                const projectRoot = generatedRootFor(run, artifactId)
                 const targetPkgs = currentEntry?.incrementalContext?.targetPackages as string[] | undefined
                 const isFixLoop = currentEntry?.branchedFrom === "review"
                 const staticPath = join(artifactsDir, "review-static.json")
@@ -4766,7 +4768,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             if (planForDispatch) {
               const artifactId = (planForDispatch.targetProject as any)?.artifactId
               if (artifactId) {
-                const projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+                const projectRoot = generatedRootFor(run, artifactId)
                 workOrderParts.push(
                   `- projectRoot: ${projectRoot}  ← Java/项目文件写入此目录`,
                 )
@@ -4783,7 +4785,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
                   ?? buildDependencyGraph(`${ARTIFACT_DIR}/${run.runId}`).packageNames
                   ?? []
                 if (focusPkgs.length > 0) {
-                  const projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+                  const projectRoot = generatedRootFor(run, artifactId)
                   const sourcePath = String((run.metadata as Record<string, unknown>).sourcePath ?? "")
                   const focusBlock = buildReviewFocus(`${ARTIFACT_DIR}/${run.runId}`, focusPkgs, sourcePath, projectRoot)
                   if (focusBlock) workOrderParts.push("", focusBlock)
@@ -4810,7 +4812,7 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
             // P3c: 路径规则（plan 之后阶段才有 projectRoot 概念）
             if (planForDispatch && (planForDispatch.targetProject as any)?.artifactId) {
               const artifactId = (planForDispatch.targetProject as any).artifactId
-              const projectRoot = resolveGeneratedRoot(run.runId, artifactId)
+              const projectRoot = generatedRootFor(run, artifactId)
               workOrderParts.push(
                 ``,
                 `## 📂 文件写入路径（强制）`,
@@ -4974,12 +4976,15 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
           }
         }
 
-        // P3b: scaffold.json 的 projectRoot 强制覆写为引擎计算值
+        // P3b: scaffold.json 的 projectRoot 强制覆写为引擎计算值（与 dispatch/validation 同源：
+        // generatedRootFor 读 metadata.generatedRoot，不用 resolveGeneratedRoot 重新派生，
+        // 否则与磁盘状态绑定会在 claim/save/validation 间 base↔fallback 翻转）
         if (args.path === "scaffold.json") {
           const planArtifact = engine.loadArtifactJson(`${ARTIFACT_DIR}/${runId}`, "plan")
           const artifactId = (planArtifact?.targetProject as any)?.artifactId
           if (artifactId) {
-            const expectedRoot = resolveGeneratedRoot(runId, artifactId)
+            const run = engine.status(runId)
+            const expectedRoot = run ? generatedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
             try {
               const parsed = JSON.parse(args.content)
               if (parsed.projectRoot !== expectedRoot) {
@@ -5030,7 +5035,10 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       let projectRoot = ''
       if (planArtifact) {
         const artifactId = (planArtifact.targetProject as any)?.artifactId
-        if (artifactId) projectRoot = resolveGeneratedRoot(runId, artifactId)
+        if (artifactId) {
+          const run = engine.status(runId)
+          projectRoot = run ? generatedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
+        }
       }
 
       const sourcePath = resolveSourcePath(runId)
@@ -5074,7 +5082,8 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       if (!planArtifact) return
       const artifactId = (planArtifact.targetProject as any)?.artifactId
       if (!artifactId) return
-      const projectRoot = resolveGeneratedRoot(runId, artifactId)
+      const run = engine.status(runId)
+      const projectRoot = run ? generatedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
 
       // 扫描常见写入模式，检测是否往项目文件路径写入
       const writeRe = /(?:>|\btee\b|\bcp\b|\bmv\b)\s.*\.(java|xml|yml|yaml|properties|sql)\b/i
