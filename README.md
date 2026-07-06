@@ -65,7 +65,7 @@ sql2java-workflow/
 │   │   └── type-mappings.ts          # Oracle → Java/JDBC 类型映射表
 │   ├── plugins/
 │   │   └── workflow-engine.ts        # 插件入口（workflow 工具 + hooks + artifact 校验）
-│   └── package.json                  # 依赖：@opencode-ai/plugin, zod, ts-plsql-parser, pg(optional)
+│   └── package.json                  # 依赖：@opencode-ai/plugin, zod, antlr4ts, pg(optional)
 ├── resources/
 │   ├── mfg_erp_sql/                  # 完整示例 PL/SQL 输入（schema/pkg/func/trigger/type）
 │   ├── mfg_erp_sql_mini/             # 中等规模示例（子集）
@@ -376,7 +376,7 @@ opencode models zai-coding-plan  # 只看 z.ai 模型
 
 | 模式 | 实现 | 触发条件 |
 |------|------|---------|
-| **AST** | `@griffithswaite/ts-plsql-parser`（ANTLR4） | parser 安装成功 |
+| **AST** | `antlr4ts`（ANTLR4 TS 移植 + 官方 PL/SQL grammar） | 默认（自包含入库，无需安装） |
 | **Regex 降级** | Node.js fs + 正则 + 行号追踪 | parser 安装失败 |
 
 **提取内容**：Package header/body 结构（`headerFile`/`bodyFile` + procedure/function 签名 + 包级 types/variables/constants）、DDL 对象（table/trigger/view/sequence）、调用关系图（PKG.PROC 模式）、standalone 过程（独立 CREATE PROCEDURE/FUNCTION）。
@@ -492,7 +492,7 @@ src/main/java/{packageBase}/service
 
 - **运行框架**：[opencode](https://opencode.ai) AI Agent 插件（`@opencode-ai/plugin` 1.16.2）
 - **Workflow Engine**：TypeScript 确定性状态机
-- **SQL 解析**：AST 预扫描（`@griffithswaite/ts-plsql-parser` ^1.0.5）+ regex 降级 + LLM 语义补充
+- **SQL 解析**：AST 预扫描（`antlr4ts` 0.5.0-alpha.4 + 官方 PL/SQL grammar，自包含入库）+ regex 预处理 + LLM 语义补充
 - **Schema 获取**：pg 驱动（可选依赖，有 db.properties 时自动启用，PostgreSQL/GaussDB）
 - **Schema 校验**：Zod ^3.23.0
 - **Agent 定义**：Markdown（按 `## Phase: xxx` 分节，位于 `.opencode/agent/`）
