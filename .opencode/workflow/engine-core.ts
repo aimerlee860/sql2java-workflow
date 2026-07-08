@@ -1697,13 +1697,17 @@ export class WorkflowEngine {
     safeWriteFile(filePath, JSON.stringify(run, null, 2))
   }
 
-  /** 追加事件日志 */
+  /** 追加事件日志（落盘到 logs/_events.log，与 workflow.log 同目录）*/
   private appendEvent(runId: string, eventType: string, phase: string, message: string): void {
     const dir = join(this.artifactsRoot, runId)
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
-    const logPath = join(dir, "_events.log")
+    const logsDir = join(dir, "logs")
+    if (!existsSync(logsDir)) {
+      mkdirSync(logsDir, { recursive: true })
+    }
+    const logPath = join(logsDir, "_events.log")
     const now = new Date().toISOString()
     const line = `[${now}] [${eventType}] [${runId}] [${phase}] ${message}\n`
     try { appendFileSync(logPath, line, "utf-8") } catch (e: any) { /* 日志写入失败不阻塞主流程 */ if (typeof process !== "undefined" && process.stderr) process.stderr.write(`[engine-core] appendEvent failed: ${e.message}\n`) }
