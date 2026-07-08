@@ -31,7 +31,7 @@ import { join, extname } from "node:path"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
 import { getLogger } from "./workflow-logger"
 import { parseMainEntry } from "./scope-computer"
-import { scanFilesParallel, createPoolSession, getWorkerCount, type PoolSession } from "./plsql-worker-pool"
+import { scanFilesParallel, createPoolSession, type PoolSession } from "./plsql-worker-pool"
 import {
   cleanName, extractTriggerFromText, extractTableFromText, extractViewFromText, extractSequenceFromText,
   extractPackageNames, stripSqlPlusCommands, storedFilePath, scanFileSet,
@@ -373,21 +373,19 @@ export function partitionFilesByPackage(files: string[]): { fileSets: string[][]
   return { fileSets: sets.map(s => s.paths), totalLines }
 }
 
-/** 串行/并行闸门：总行数低于此值时，N 个 worker 的 ATN 冷启动（~4.3s/worker）摊销不开，串行更快。 */
-const SERIAL_THRESHOLD_LINES = 10_000
-
 /**
  * 用 antlr4ts listener 扫描源码目录，产出 InventoryIndex。
- * 按包分区成 file-set → 大工作量走 worker 池并行（bun）/ 小工作量或 fallback 走串行
+ * 按包分区成 file-set → worker 池解析（Worker 可用，含崩溃隔离）/ 串行 fallback（测试环境）
  * → 合并 + 后处理。串行/并行产物等价（partition 保序 + finalize 共用）。
  */
 export async function scanWithAST(roots: string[], primaryBase: string): Promise<InventoryIndex> {
   const files = collectSourceFiles(roots)
   const { fileSets, totalLines } = partitionFilesByPackage(files)
-  getLogger().info("[scan]", `AST: ${files.length} 文件 / ${totalLines} 行 / ${fileSets.length} file-set → ${totalLines < SERIAL_THRESHOLD_LINES ? "串行" : "并行(worker 池)"}`)
-  const results = totalLines < SERIAL_THRESHOLD_LINES
-    ? await serialScanFileSets(fileSets, primaryBase)
-    : await scanFilesParallel(fileSets, primaryBase)
+  getLogger().info("[scan]", `AST: ${files.length} 文件 / ${totalLines} 行 / ${fileSets.length} file-set → worker 池（含崩溃隔离）`)
+  // 一律走 scanFilesParallel：Worker 可用时每个 file-set 在独立 worker isolate 解析，
+  // antlr4ts 硬崩只死 worker（主进程存活），由池跳过+告警。主进程内串行（serialScanFileSets）
+  // 对硬崩无防护（绕过 try/catch 拖垮主进程），仅 Worker 不可用的测试环境用。
+  const results = await scanFilesParallel(fileSets, primaryBase)
   return finalizeFileSetResults(results, primaryBase, "ast")
 }
 
@@ -584,10 +582,10 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
   // 避免 const/type 引用图传递爆炸（一个包引用 30 个包的常量 → 传递闭包上千）。
   const callClosure = new Set<string>([entryPkgUpper])
   const constLeaf = new Set<string>()
-  // persistent session：首波足够大时建，后续波次复用 warm 池（amortize ATN 冷启动）；
-  // 小闭包全程不建 session，串行。Worker 不可用 → session=null，全程串行 fallback。
+  // persistent session：首波前建，后续波次复用 warm 池（amortize ATN 冷启动）+ 崩溃隔离。
+  // 不再用波次大小门槛——小闭包也隔离，防 antlr4ts 硬崩拖垮主进程。Worker 不可用 → session=null，
+  // 全程串行 fallback（仅测试环境）。
   let session: PoolSession | null = null
-  const SESSION_THRESHOLD = 2 * getWorkerCount()
   try {
     while (queue.length > 0) {
       // 取当前 BFS 层（已去重）的全部包
@@ -602,8 +600,8 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
       if (wave.length === 0) continue
 
       getLogger().info("[scan]", `lazy 波次: 解析 ${wave.length} 包 [${wave.join(", ")}]（累计 call-closure ${callClosure.size} / const-leaf ${constLeaf.size}）`)
-      // 首波达阈值 → 建 session（仅一次）；之后所有波次走 session（warm 池）
-      if (!session && wave.length >= SESSION_THRESHOLD) session = await createPoolSession()
+      // 首波前建 session（仅一次，Worker 可用时）；之后所有波次走 warm 池
+      if (!session) session = await createPoolSession()
       const fileSets = wave.map(p => packageFileMap.get(p)!.files)
       const results = session
         ? await session.run(fileSets, primaryBase)

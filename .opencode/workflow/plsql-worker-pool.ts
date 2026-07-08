@@ -58,6 +58,9 @@ class WorkerHandle {
   readonly worker: any
   private readonly ready: Promise<void>
   private nextId = 0
+  private dead = false
+  private readyReject: ((e: Error) => void) | null = null
+  private pendingReject: ((e: Error) => void) | null = null
 
   constructor() {
     const WorkerCtor = (globalThis as any).Worker
@@ -69,28 +72,49 @@ class WorkerHandle {
       const onReady = (ev: MessageEvent) => {
         if (ev.data?.kind === "ready") {
           this.worker.removeEventListener?.("message", onReady)
+          this.readyReject = null
           resolve()
         }
       }
-      const onError = (e: any) => reject(new Error(e?.message ?? "worker spawn error"))
       this.worker.addEventListener?.("message", onReady)
-      this.worker.addEventListener?.("error", onError)
       // 兜底：某些运行时 onmessage 赋值式而非 addEventListener
       if (!this.worker.addEventListener) this.worker.onmessage = onReady
+      this.readyReject = reject
     })
+    // 持续监听 worker 死亡（error/exit/close）：worker 硬崩/异常退出时 reject 进行中任务，
+    // 调用方据此跳过该 file-set + 告警，不拖垮主进程。bun Worker 为独立 isolate，主进程存活。
+    const onDeath = (reason: string, msg?: any) => this.markDead(reason, msg)
+    this.worker.addEventListener?.("error", (e: any) => onDeath("error", e?.message))
+    this.worker.addEventListener?.("exit", (code?: number) => onDeath("exit", `code=${code}`))
+    this.worker.addEventListener?.("close", () => onDeath("close"))
   }
+
+  /** worker 死亡：标记 dead + reject ready（若未就绪）+ reject 进行中的 run。幂等。 */
+  private markDead(reason: string, msg?: any): void {
+    if (this.dead) return
+    this.dead = true
+    const m = msg != null ? `${reason}: ${msg}` : reason
+    const err = new Error(`worker died (${m})`)
+    this.readyReject?.(err); this.readyReject = null
+    this.pendingReject?.(err); this.pendingReject = null
+  }
+
+  isDead(): boolean { return this.dead }
 
   /** 等待 worker 模块加载完成（ready 信号）。 */
   whenReady(): Promise<void> { return this.ready }
 
   /** 跑一个 file-set，返回结果（失败 reject）。worker 处理完保持存活等下一个。 */
   run(fileSet: string[], primaryBase: string): Promise<FileSetResult> {
+    if (this.dead) return Promise.reject(new Error("worker 已死亡"))
     const id = this.nextId++
     return new Promise<FileSetResult>((resolve, reject) => {
+      this.pendingReject = reject
       const onMsg = (ev: MessageEvent) => {
         const d = ev.data
         if (d?.id !== id) return
         this.worker.removeEventListener?.("message", onMsg)
+        this.pendingReject = null
         if (d.ok) resolve(d.result as FileSetResult)
         else reject(new Error(d.error))
       }
@@ -101,6 +125,7 @@ class WorkerHandle {
   }
 
   terminate() {
+    this.dead = true
     try { this.worker.terminate?.() } catch { /* 忽略 */ }
   }
 }
@@ -114,12 +139,13 @@ class WorkerPool {
   async ready(): Promise<void> {
     await Promise.all(this.handles.map(h => h.whenReady()))
   }
-  /** 提交全部 file-set，按提交序返回结果。单任务失败→占位产物，不 reject。 */
+  /** 提交全部 file-set，按提交序返回结果。单任务失败/worker 死亡→占位产物，不 reject。 */
   async runAll(fileSets: string[][], primaryBase: string): Promise<FileSetResult[]> {
     const results = new Array<FileSetResult>(fileSets.length)
     let nextIdx = 0
     const runNext = async (h: WorkerHandle) => {
       while (true) {
+        if (h.isDead()) break  // worker 已死，停止派发；剩余任务由其他 worker 接或兜底跳过
         const i = nextIdx++
         if (i >= fileSets.length) break
         try {
@@ -131,6 +157,10 @@ class WorkerPool {
       }
     }
     await Promise.all(this.handles.map(runNext))
+    // 兜底：worker 死亡致部分任务无人接 → 占位（不留 undefined）
+    for (let i = 0; i < results.length; i++) {
+      if (!results[i]) results[i] = emptyResultWithError("worker 死亡后未派发", fileSets[i])
+    }
     return results
   }
   terminate() {
@@ -141,35 +171,38 @@ class WorkerPool {
 /**
  * 并行扫描多个 file-set，结果按提交序返回。
  * - 0 file-set → []
- * - 1 file-set → 直接串行（省 spawn 开销）
- * - Worker 不可用 / spawn 失败 → 串行 fallback
- * - 池运行中崩溃 → 串行 fallback 兜底重跑全部
+ * - Worker 不可用（vitest/node 测试环境）→ 串行 fallback（主进程内；测试 fixture 合法无硬崩风险）
+ * - Worker 可用 → 一律走池（worker 数按 file-set 数缩，1 个 file-set 也用 1 worker 隔离）。
+ *   antlr4ts 硬崩绕过 try/catch，主进程内直跑会拖垮整个扫描；worker isolate 内则优雅降级
+ *  （parseFileAst catch 成 warning）或 worker 死亡被池跳过+告警，主进程存活。
+ * - spawn 失败 → 串行 fallback（最后兜底）。
  */
 export async function scanFilesParallel(fileSets: string[][], primaryBase: string): Promise<FileSetResult[]> {
   if (fileSets.length === 0) return []
-  // 小工作量闸门：file-set 数 < 2×workerCount 时，N 个 worker 各付 ATN 冷启动（~4.3s/worker）
-  // 摊销不开 → 串行（1 次冷启动）反而更快。大项目（千级包→千级 file-set）才走池。
-  const workerCount = getWorkerCount()
-  if (fileSets.length < 2 * workerCount) {
+  // vitest 跑在 bun worker 线程里，嵌套 spawn worker 不可用（hang）→ 串行 fallback。
+  // 亦覆盖 Worker 全局不可用的运行时。生产（opencode/bun 主进程）不走此分支，用池获崩溃隔离。
+  if (process.env.VITEST || typeof (globalThis as any).Worker !== "function") {
     return serialFallback(fileSets, primaryBase)
   }
-
+  const workerCount = Math.min(getWorkerCount(), Math.max(1, fileSets.length))
   let pool: WorkerPool | null = null
   try {
-    pool = new WorkerPool(getWorkerCount())
+    pool = new WorkerPool(workerCount)
     await pool.ready()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    try { (await import("./workflow-logger")).getLogger().warn("[worker-pool]", `spawn 失败，回退串行: ${msg}`) } catch { /* logger 不可用也无所谓 */ }
+    try { (await import("./workflow-logger")).getLogger().warn("[worker-pool]", `spawn 失败，回退主进程串行: ${msg}`) } catch { /* logger 不可用也无所谓 */ }
     return serialFallback(fileSets, primaryBase)
   }
 
   try {
     return await pool.runAll(fileSets, primaryBase)
   } catch (e) {
+    // runAll 已对单任务/worker 死亡兜底（不抛）；此处仅防未预期异常——不回退主进程串行
+    //（避免硬崩文件拖垮主进程），返回占位结果，由调用方按 warning 处理。
     const msg = e instanceof Error ? e.message : String(e)
-    try { (await import("./workflow-logger")).getLogger().warn("[worker-pool]", `池运行失败，回退串行: ${msg}`) } catch { /* */ }
-    return serialFallback(fileSets, primaryBase)
+    try { (await import("./workflow-logger")).getLogger().error("[worker-pool]", `runAll 异常: ${msg}`) } catch { /* */ }
+    return fileSets.map(fs => emptyResultWithError(`pool runAll 异常: ${msg}`, fs))
   } finally {
     pool.terminate()
   }
@@ -188,7 +221,8 @@ export interface PoolSession {
 }
 
 export async function createPoolSession(): Promise<PoolSession | null> {
-  if (typeof (globalThis as any).Worker !== "function") return null
+  // vitest 嵌套 worker 不可用 / Worker 全局不可用 → 返回 null，调用方走串行
+  if (process.env.VITEST || typeof (globalThis as any).Worker !== "function") return null
   try {
     const pool = new WorkerPool(getWorkerCount())
     await pool.ready()
