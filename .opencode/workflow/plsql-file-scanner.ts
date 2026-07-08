@@ -754,17 +754,34 @@ export function parseFileAst(
   standaloneSlots: SubprogramInfo[],
   warnings: string[],
 ): void {
+  // 收集语法/词法错误为 warning：antlr 默认错误恢复【不抛错】，语法错误会被静默恢复成部分树，
+  // 可能导致子程序漏捕（「包识别但无子程序」类问题的根因常在此）。默认 ConsoleErrorListener
+  // 已由 removeErrorListeners() 移除，此处挂收集型 listener 把错误按文件+行号记入 warnings，
+  // 调用方（finalizeInventoryIndex）再透传 workflow.log，便于追查。每文件只记前 N 条防刷屏。
+  const MAX_SYNTAX_ERRORS = 5
+  let syntaxErrors = 0
+  const errorListener = {
+    syntaxError(_r: unknown, _s: unknown, line: number, col: number, msg: string): void {
+      syntaxErrors++
+      if (syntaxErrors <= MAX_SYNTAX_ERRORS) {
+        warnings.push(`AST 语法错误: ${relPath} 行 ${line}:${col} ${msg}`)
+      }
+    },
+  }
   try {
     const lex = new PlSqlLexer(new UpperCaseCharStream(CharStreams.fromString(code)))
     const tokens = new CommonTokenStream(lex)
     const parser = new PlSqlParser(tokens)
-    // 默认错误恢复：不清空 error listener 的话默认 ConsoleErrorListener 会打印；
-    // 挂一个收集 warning 的 listener，不抛。
     lex.removeErrorListeners()
     parser.removeErrorListeners()
+    lex.addErrorListener(errorListener as any)
+    parser.addErrorListener(errorListener as any)
     const tree = parser.sql_script()
     const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, standaloneSlots, warnings, tokens)
     ParseTreeWalker.DEFAULT.walk(listener as any, tree)
+    if (syntaxErrors > MAX_SYNTAX_ERRORS) {
+      warnings.push(`AST 语法错误: ${relPath} 共 ${syntaxErrors} 条（仅列前 ${MAX_SYNTAX_ERRORS} 条）`)
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     warnings.push(`AST 解析失败，跳过该文件的包结构: ${relPath} — ${msg}`)

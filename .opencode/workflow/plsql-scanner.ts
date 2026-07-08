@@ -153,6 +153,10 @@ function finalizeInventoryIndex(
   warnings: string[],
   scannerUsed: "ast" | "regex",
 ): InventoryIndex {
+  // 透传收集到的 warning 到 workflow.log（inventory.warnings 同时保留），便于实时追查
+  // 「哪个文件 AST 解析失败 / 语法错误 / 降级」类问题。parseFileAst 的语法错误 warning 在此落日志。
+  for (const w of warnings) getLogger().warn("[scan]", w)
+
   // 扁平化 subprograms，赋 overloadIndex（同名>1 才标序）
   const subprogramList: SubprogramInfo[] = []
   for (const slots of subprograms.values()) {
@@ -173,6 +177,16 @@ function finalizeInventoryIndex(
     let set = subprogramIndex.get(s.belongToPackage)
     if (!set) { set = new Set(); subprogramIndex.set(s.belongToPackage, set) }
     set.add(s.name)
+  }
+  // 可疑信号：包有 body 文件但 0 子程序——疑似 body 解析失败 / 漏收集 body / body 全是初始化段。
+  // finalizeInventoryIndex 仅 ast 路径调用（regex 兜底不走此，regex 本就 0 子程序已另有 warning），
+  // 故无需区分 scannerUsed。standalone 虚拟包注入了对应子程序，不会误报。
+  for (const p of pkgList) {
+    if (p.bodyPath && !(subprogramIndex.get(p.packageName)?.size)) {
+      const w = `包 ${p.packageName} 有 body(${p.bodyPath}) 但 0 子程序——疑似 body 解析失败或漏收集（查该文件 AST 语法错误 warning）`
+      warnings.push(w)
+      getLogger().warn("[scan]", w)
+    }
   }
   for (const s of subprogramList) {
     const seen = new Set<string>()
@@ -370,6 +384,7 @@ const SERIAL_THRESHOLD_LINES = 10_000
 export async function scanWithAST(roots: string[], primaryBase: string): Promise<InventoryIndex> {
   const files = collectSourceFiles(roots)
   const { fileSets, totalLines } = partitionFilesByPackage(files)
+  getLogger().info("[scan]", `AST: ${files.length} 文件 / ${totalLines} 行 / ${fileSets.length} file-set → ${totalLines < SERIAL_THRESHOLD_LINES ? "串行" : "并行(worker 池)"}`)
   const results = totalLines < SERIAL_THRESHOLD_LINES
     ? await serialScanFileSets(fileSets, primaryBase)
     : await scanFilesParallel(fileSets, primaryBase)
@@ -460,11 +475,20 @@ export async function scanSource(sourceOrOpts: string | ScanSourceOpts): Promise
     getLogger().warn("[plsql-scanner]", `scanSource 收到 entry=${entry}，入口范围扫描请改用 scanSourceLazy；此处忽略，按全量扫描`)
   }
 
+  getLogger().info("[scan]", `开始全量 AST 扫描: ${roots.length} root(s) [${roots.join(", ")}]`)
   try {
-    return await scanWithAST(roots, primaryBase)
+    const idx = await scanWithAST(roots, primaryBase)
+    getLogger().info(
+      "[scan]",
+      `扫描完成(ast): ${idx.packages.length} 包 / ${idx.subprograms.length} 子程序 / ${idx.tables.length} 表 / ${idx.triggers.length} triggers / ${idx.views.length} views / ${idx.sequences.length} seqs / ${idx.warnings.length} warnings`,
+    )
+    return idx
   } catch (e) {
-    getLogger().error("[plsql-scanner]", `AST scan failed, falling back to regex: ${e}`)
-    return scanWithRegex(roots, primaryBase)
+    const msg = e instanceof Error ? e.message : String(e)
+    getLogger().error("[scan]", `AST 扫描整体失败，降级 regex 兜底: ${msg}`)
+    const idx = scanWithRegex(roots, primaryBase)
+    getLogger().warn("[scan]", `regex 兜底完成: ${idx.packages.length} 包 / 0 子程序（regex 仅提包名，无结构字段，仅作最后兜底）`)
+    return idx
   }
 }
 
@@ -536,11 +560,13 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
       if (!entry.files.includes(filePath)) entry.files.push(filePath)
     }
   }
+  getLogger().info("[scan]", `lazy Phase 0(regex): ${files.length} 文件 → ${packageFileMap.size} 包映射 / ${tables.length} 表 / ${triggers.length} triggers / ${views.length} views / ${sequences.length} seqs`)
 
   const entryMap = packageFileMap.get(entryPkgUpper)
   if (!entryMap) {
     throw new Error(`scanSourceLazy: 入口包 ${parsed.pkg} 未在源码中找到 CREATE PACKAGE 声明（检查包名拼写 / 大小写 / mainEntry 格式）`)
   }
+  getLogger().info("[scan]", `lazy Phase 1(BFS): 入口 ${parsed.pkg}.${parsed.refName}，按可达闭包解析（call-closure 传递 + const-leaf 1-hop 断传递）`)
 
   // ── Phase 1: antlr BFS，包粒度 wavefront，只解析闭包内包 ──
   // 队列持包名（非文件）：每包的全部文件作为一个 file-set 交给 scanFilesParallel（worker 池并行
@@ -575,6 +601,7 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
       }
       if (wave.length === 0) continue
 
+      getLogger().info("[scan]", `lazy 波次: 解析 ${wave.length} 包 [${wave.join(", ")}]（累计 call-closure ${callClosure.size} / const-leaf ${constLeaf.size}）`)
       // 首波达阈值 → 建 session（仅一次）；之后所有波次走 session（warm 池）
       if (!session && wave.length >= SESSION_THRESHOLD) session = await createPoolSession()
       const fileSets = wave.map(p => packageFileMap.get(p)!.files)
@@ -655,5 +682,10 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
     session?.close()
   }
 
-  return finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, standaloneSlots, tables, triggers, views, sequences, warnings, "ast")
+  const idx = finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, standaloneSlots, tables, triggers, views, sequences, warnings, "ast")
+  getLogger().info(
+    "[scan]",
+    `lazy 扫描完成(ast): 闭包 ${idx.packages.length} 包 / ${idx.subprograms.length} 子程序 / ${idx.tables.length} 表 / ${idx.warnings.length} warnings`,
+  )
+  return idx
 }
