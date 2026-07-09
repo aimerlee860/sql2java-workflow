@@ -179,14 +179,27 @@ export function cleanName(name: string): string {
  *  `CREATE OR REPLACE` 与 `PACKAGE` 间插 EDITIONABLE 内联注释，裸正则不匹配 → 包被当无包文件
  *  → partition/Phase0 把 spec 与 body 分到不同 file-set → 跨文件 spec↔body 合并断裂。
  *  antlr grammar 本就容忍该注释，此处对齐 grammar 行为。供 partitionFilesByPackage 与
- *  scanSourceLazy Phase 0 共用。 */
+ *  scanSourceLazy Phase 0 共用。
+ *
+ *  **包名规范化须与 grammar 的 extractFullPackageName 完全一致**（SCHEMA.LOCAL，引号去之），
+ *  否则 spec 与 body 抽出不同名 → 落不同 packageFileMap 桶 → body 桶永不被 BFS 入队 → body
+ *  文件从不解析 → 全部 bodyLocation=null + body 内 directCalls 丢失（间接调用闭包不展开）。
+ *  旧正则 `([A-Za-z_][\w.]*)` 在引号标识符处截断：DBMS_METADATA 默认导出 `"SCHEMA"."PKG"`
+ *  形态，spec 抽出 `SCHEMA`、body 抽出 `BODY`（误吃关键字），完全错位 → 系统性 body 丢失。
+ *  改为按「引号段 | 裸标识符」逐段匹配 + cleanName 重组，与 grammar 同构。 */
 export function extractPackageNames(code: string): string[] {
   // 剥块注释 + 行注释：CREATE 语句里的 -- 行注释会让正则失配 → body 抽不到包名 → body 与 spec
   // 被分到不同 file-set → 不共享 Map → 产出 header-only / body-only 两个分裂槽位 → header 槽位
   // bodyLocation=null（且被误判为重载）。容忍 EDITIONABLE/NONEDITIONABLE literal 关键字
   //（Oracle 12c+ DBMS_METADATA 导出 PACKAGE 常见，非 /*EDITIONABLE*/ 注释形式）。
   const clean = code.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ")
-  const re = /CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?PACKAGE\s+(BODY\s+)?([A-Za-z_][\w.]*)/gi
+  // 段 = 引号串 "..." 或裸标识符；qualified = 段（可选 .段 重复）。后随空白/;/词界 IS/AS，
+  // 避免吞掉 PACKAGE BODY 后紧跟的 AS/IS 修饰。引号段与裸段都经 cleanName 去引号+大写+保留点。
+  const seg = `(?:"[A-Za-z_][\\w]*"|[A-Za-z_][\\w]*)`
+  const re = new RegExp(
+    `CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\\s+)?PACKAGE\\s+(BODY\\s+)?(${seg}(?:\\s*\\.\\s*${seg})*)(?=\\s|;|$|\\bIS\\b|\\bAS\\b)`,
+    "gi",
+  )
   const names: string[] = []
   for (const m of clean.matchAll(re)) {
     const n = cleanName(m[2])
