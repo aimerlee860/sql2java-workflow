@@ -301,7 +301,8 @@ export const PlanSchema = z.object({
   packageMappings: z.array(z.object({
     oraclePackage: z.string(),
     javaPackage: z.string(),
-    mapperInterface: z.string(),
+    /** DDD Mapper 接口；纯常量包（无 PROCEDURE/FUNCTION）不生成 Mapper，此字段可缺省。 */
+    mapperInterface: z.string().optional(),
     /** @deprecated 三层架构遗留字段；DDD 改用 accessImpl。保留以兼容历史 run resume。 */
     serviceClass: z.string().optional(),
     /** @deprecated 三层架构遗留字段；DDD 改用 accessImpl。保留以兼容历史 run resume。 */
@@ -323,7 +324,7 @@ export const PlanSchema = z.object({
       [m.accessIntf, m.accessImpl, m.processor, m.aggregate, m.builder, m.validator, m.serviceClass, m.serviceImplClass]
         .some(v => typeof v === "string" && v.trim().length > 0)
     ),
-    { message: "每个 packageMapping 至少需要一个组件类名（DDD: accessImpl/accessIntf/aggregate/processor/builder/validator；遗留: serviceImplClass/serviceClass）——下游 verify 归因 / translate 跨包索引 / 测试骨架生成均依赖此锚点" },
+    { message: "每个 packageMapping 至少需要一个组件类名（DDD: accessImpl/accessIntf/aggregate/processor/builder/validator；遗留: serviceImplClass/serviceClass；纯常量包仅 aggregate 常量持有类）——下游 verify 归因 / translate 跨包索引 / 测试骨架生成均依赖此锚点" },
   ),
 
   rules: z.object({
