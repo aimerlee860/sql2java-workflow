@@ -1012,7 +1012,7 @@ export function buildScopeBanner(run: WorkflowRun): string {
     `- scopeUnits（analyze/translate 只处理这些 unit）: ${scope.scopeUnits.join(", ") || "（无）"}`,
     `- scopePackages（plan/scaffold/review/dedup/verify 只处理这些包）: ${scope.scopePackages.join(", ") || "（无）"}`,
     `- **仅处理以上闭包范围内的 unit/包；闭包外的不译/不规划/不审/不验证。**`,
-    `- 仅常量/类型被引用的包（在 scopePackages 但其 unit 不在 scopeUnits）只出 scaffold 空壳，不译方法体。`,
+    `- 仅常量/类型被引用的包（在 scopePackages 但其 unit 不在 scopeUnits）：纯常量包（无子程序）只出常量持有类、不出 DDD 行为层壳/Mapper；有子程序但本闭包未调用其 PROC 的包只出 scaffold 空壳，均不译方法体。`,
     ``,
   ].join("\n")
 }

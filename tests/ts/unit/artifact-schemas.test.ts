@@ -393,6 +393,24 @@ describe("Schema 无效数据被拒绝", () => {
     const result = PlanSchema.safeParse(planData)
     expect(result.success).toBe(false)
   })
+
+  it("PlanSchema 接受纯常量包映射（仅 aggregate 常量持有类，无 mapperInterface/行为层）", () => {
+    const planData = {
+      targetProject: {
+        groupId: "com.example", artifactId: "item-service",
+        packageBase: "com.example.item", javaVersion: "17", springBootVersion: "3.2.0",
+      },
+      packageMappings: [
+        // 纯常量包：无子程序，只映射常量持有类，省略 mapperInterface/access/processor/builder/validator
+        { oraclePackage: "PKG_CONST", javaPackage: "com.example.item.consts", aggregate: "MfgConst" },
+      ],
+      rules: { namingConvention: "camelCase", nullHandling: "optional", exceptionStrategy: "custom-business", logFramework: "common-log" },
+      typeMappings: {}, manualReviewList: [], conventions: "",
+    }
+    const result = PlanSchema.safeParse(planData)
+    expect(result.success).toBe(true)
+    expect(result.success && result.data.packageMappings[0].mapperInterface).toBeUndefined()
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════
