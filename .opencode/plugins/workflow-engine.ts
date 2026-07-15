@@ -49,7 +49,7 @@ import {
 } from "../workflow/phase-metrics-collector"
 import type { PhaseMetrics } from "../workflow/phase-metrics-collector"
 import { initLogger, getLogger, destroyLogger } from "../workflow/workflow-logger"
-import { initWatchdog, registerWorker, registerOrchestrator, handleSessionStatus, markManualStop, resolveWatchdogConfig } from "../workflow/watchdog"
+import { initWatchdog, registerWorker, registerOrchestrator, handleSessionStatus, handleSessionError, resolveWatchdogConfig } from "../workflow/watchdog"
 
 const engine = new WorkflowEngine()
 engine.registerDefinition(SQL2JAVA_WORKFLOW)
@@ -5308,8 +5308,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
     try {
       if (event.type === "session.status") {
         handleSessionStatus(event.properties?.sessionID, event.properties?.status)
-      } else if (event.type === "tui.command.execute" && event.properties?.command === "session.interrupt") {
-        markManualStop()
+      } else if (event.type === "session.error") {
+        handleSessionError(event.properties?.sessionID, event.properties?.error?.name)
       }
       if (!currentWorkflowContext || !activeCollector) return
       if (event.type !== "message.part.updated") return

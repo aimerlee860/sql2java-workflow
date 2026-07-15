@@ -188,11 +188,20 @@ export function registerOrchestrator(sid: string, runId?: string): void {
  * 编排者重新 busy（用户 resume/继续输入）时自动清除标记，恢复监控。
  * 用于区分：人工终止（ESC，不干预）vs 程序异常卡死（无标记，watchdog 干预）。
  */
-export function markManualStop(): void {
-  if (!started) return
+/**
+ * session.error 处理：编排者 session 被 ESC 中断（MessageAbortedError）= 人工终止。
+ * watchdog 不 abort 编排者（只 abort worker），所以编排者的 MessageAbortedError 一定是人工 ESC。
+ * worker 的 MessageAbortedError 可能是 watchdog 自身 abort 触发，不标记。
+ * 据此区分人工终止（ESC，不干预）vs 程序异常（无此信号，watchdog 干预）。
+ */
+export function handleSessionError(sid: string, errorName: string): void {
+  if (!started || !sid) return
+  if (errorName !== "MessageAbortedError") return
+  const e = sessionMap.get(sid)
+  if (!e || e.role !== "orchestrator") return  // 只编排者被中断才算人工 ESC
   if (currentRunId && manualStopRunId !== currentRunId) {
     manualStopRunId = currentRunId
-    wlog("INFO", `run ${currentRunId} 人工终止标记（session.interrupt），watchdog 不再唤醒；编排者重新 busy 时自动清除`)
+    wlog("INFO", `run ${currentRunId} 人工终止标记（编排者被 ESC 中断: MessageAbortedError），watchdog 不再唤醒；编排者重新 busy 时自动清除`)
   }
 }
 
