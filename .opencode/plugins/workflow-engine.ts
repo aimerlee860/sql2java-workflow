@@ -49,6 +49,7 @@ import {
 } from "../workflow/phase-metrics-collector"
 import type { PhaseMetrics } from "../workflow/phase-metrics-collector"
 import { initLogger, getLogger, destroyLogger } from "../workflow/workflow-logger"
+import { initWatchdog, registerWorker, registerOrchestrator, handleSessionStatus, resolveWatchdogConfig } from "../workflow/watchdog"
 
 const engine = new WorkflowEngine()
 engine.registerDefinition(SQL2JAVA_WORKFLOW)
@@ -3215,7 +3216,7 @@ export function buildUnitScopeBlock(
 
 // ── 插件导出 ──────────────────────────────────────────────────────────────────
 
-export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
+export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any }) => {
   // 尝试安装依赖，失败则注册 stub 工具提供清晰错误信息（Fix #2）
   let depsOk = false
   try {
@@ -3251,6 +3252,12 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
       },
     }
   }
+
+  const wdPhaseOverrides: Record<string, { workerTimeoutMs?: number }> = {}
+  for (const p of SQL2JAVA_WORKFLOW.phases) {
+    if (p.watchdog?.workerTimeoutMs) wdPhaseOverrides[p.name] = { workerTimeoutMs: p.watchdog.workerTimeoutMs }
+  }
+  initWatchdog(resolveWatchdogConfig(wdPhaseOverrides), client, engine)
 
   return ({
   tool: {
@@ -5182,11 +5189,13 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
     if (!getSubagentNames().includes(agentName)) {
       const sid = input?.sessionID
       if (sid) orchestratorSessionIds.add(sid)
+      registerOrchestrator(sid, currentWorkflowContext?.runId)
       // 编排 session 不覆盖温度，使用默认值
       return
     }
     // Worker subagent session：按阶段配置设置温度
     if (currentWorkflowContext) {
+      registerWorker(input?.sessionID, currentWorkflowContext)
       if (output) output.temperature = currentWorkflowContext.temperature
     }
   },
@@ -5297,6 +5306,9 @@ export const WorkflowEnginePlugin = async ({ $ }: { $: any }) => {
   // try-catch 包裹整体：畸形事件或 SDK 变更不应杀死事件链
   event: async ({ event }: { event: any }) => {
     try {
+      if (event.type === "session.status") {
+        handleSessionStatus(event.properties?.sessionID, event.properties?.status)
+      }
       if (!currentWorkflowContext || !activeCollector) return
       if (event.type !== "message.part.updated") return
       const part = event.properties?.part

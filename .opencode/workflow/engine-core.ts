@@ -96,6 +96,7 @@ export interface PhaseConfig {
   maxPackagesPerShard?: number                  // 分片大小，不设置或 0 表示不分片
   tools: string[]                               // 允许的工具列表
   description?: string                          // 阶段中文描述，用于输出 banner
+  watchdog?: { workerTimeoutMs?: number }       // watchdog worker 超时覆盖（重型阶段如 verify 放宽）
 }
 
 /** 条件转移规则 */
