@@ -15,7 +15,6 @@
 
 import { appendFileSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { getLogger } from "./workflow-logger"
 
 // ── 配置 ─────────────────────────────────────────────────────────────────────
 
@@ -75,22 +74,29 @@ let stuckTimer: ReturnType<typeof setInterval> | undefined
 let crashTimer: ReturnType<typeof setInterval> | undefined
 let started = false
 
-const WD_LOG = join(".workflow-artifacts", "_watchdog.log")
+const WD_LOG_GLOBAL = join(".workflow-artifacts", "_watchdog.log")
+let currentRunId: string | undefined
+
+function wdLogPath(runId: string): string {
+  return join(".workflow-artifacts", runId, "logs", "watchdog.log")
+}
 
 // ── 日志（双层：_watchdog.log 兜底 + getLogger 主日志）─────────────────────────
 
 function wlog(level: "INFO" | "WARN" | "ERROR", msg: string): void {
   const line = `[${new Date().toISOString()}] [${level}] [watchdog] ${msg}\n`
+  const runId = currentRunId
+  if (runId) {
+    try {
+      mkdirSync(dirname(wdLogPath(runId)), { recursive: true })
+      appendFileSync(wdLogPath(runId), line, "utf-8")
+      return
+    } catch { /* per-run 写失败，落全局兜底 */ }
+  }
   try {
-    mkdirSync(dirname(WD_LOG), { recursive: true })
-    appendFileSync(WD_LOG, line, "utf-8")
-  } catch { /* 探针日志失败不影响主流程 */ }
-  try {
-    const logger = getLogger()
-    if (level === "ERROR") logger.error("[watchdog]", msg)
-    else if (level === "WARN") logger.warn("[watchdog]", msg)
-    else logger.info("[watchdog]", msg)
-  } catch { /* getLogger 未初始化时静默 */ }
+    mkdirSync(dirname(WD_LOG_GLOBAL), { recursive: true })
+    appendFileSync(WD_LOG_GLOBAL, line, "utf-8")
+  } catch { /* 日志失败不影响主流程 */ }
 }
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────────
@@ -133,6 +139,7 @@ export function registerWorker(
     existing.lastStatusAt = Date.now()
     return
   }
+  if (!currentRunId) currentRunId = ctx.runId
   const timeoutMs = workerTimeoutFor(ctx.phase)
   const entry: WatchdogEntry = {
     role: "worker",
@@ -153,6 +160,7 @@ export function registerOrchestrator(sid: string, runId?: string): void {
   const existing = sessionMap.get(sid)
   if (existing && existing.role === "orchestrator") return  // 幂等
   if (!runId) return
+  if (!currentRunId) currentRunId = runId
   sessionMap.set(sid, {
     role: "orchestrator",
     runId,
@@ -241,6 +249,7 @@ function checkOrchestratorStuck(): void {
     if (e.role !== "orchestrator") continue
     const run = engineRef?.status?.(e.runId)
     if (!run || run.status !== "running") {
+      if (e.runId === currentRunId) currentRunId = undefined
       sessionMap.delete(sid)  // run 结束，清理 orchestrator entry 避积累
       continue
     }
@@ -298,6 +307,7 @@ async function checkOrchestratorCrash(): Promise<void> {
     const run = engineRef?.status?.(e.runId)
     if (!run || run.status !== "running") {
       if (e.crashAlerted) e.crashAlerted = false
+      if (e.runId === currentRunId) currentRunId = undefined
       sessionMap.delete(sid)
       continue
     }
