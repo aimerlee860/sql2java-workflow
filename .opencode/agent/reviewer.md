@@ -2,6 +2,7 @@
 description: 翻译质量审查专家，负责对照 Oracle PL/SQL 源码审查翻译等价性和测试代码质量（review）和全局编译验证 + MyBatis 校验 + 单元测试执行（verify）。用于工作流的 review 和 verify 阶段。
 mode: subagent
 temperature: 0.1
+maxSteps: 300
 tools:
   read: true
   bash: true

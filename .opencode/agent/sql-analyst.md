@@ -2,6 +2,7 @@
 description: Oracle PL/SQL 分析专家，负责扫描源码编目（inventory）和依赖分析+子程序结构解析+FSD 生成（analyze）。用于工作流的 inventory 和 analyze 阶段。
 mode: subagent
 temperature: 0.1
+maxSteps: 300
 tools:
   read: true
   bash: true
