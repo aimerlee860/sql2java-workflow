@@ -5813,6 +5813,7 @@ statement
     | return_statement
     | case_statement
     | sql_statement
+    | get_diagnostics_statement
     | call_statement
     | pipe_row_statement
     | grant_statement
@@ -5820,6 +5821,13 @@ statement
 
 assignment_statement
     : (general_element | bind_variable) ASSIGN_OP expression
+    ;
+
+// GaussDB/openGauss 过程语句：GET [CURRENT] DIAGNOSTICS var = ROW_COUNT;
+// （Oracle 用 SQL%ROWCOUNT）。DIAGNOSTICS/ROW_COUNT 非关键字，用 id_expression 匹配
+// 避免污染关键字表。置于 statement 的 call_statement 之前，防 GET 被当 routine_name 误抽为调用。
+get_diagnostics_statement
+    : GET CURRENT? id_expression id_expression '=' id_expression
     ;
 
 continue_statement
@@ -6181,7 +6189,7 @@ query_block
     : SELECT (DISTINCT | UNIQUE | ALL)? selected_list into_clause? from_clause? where_clause? (
         hierarchical_query_clause
         | group_by_clause
-    )* model_clause? order_by_clause? offset_clause? fetch_clause?
+    )* model_clause? order_by_clause? offset_clause? fetch_clause? limit_clause?
     ;
 
 selected_list
@@ -6400,6 +6408,13 @@ offset_clause
 
 fetch_clause
     : FETCH (FIRST | NEXT) (expression PERCENT_KEYWORD?)? (ROW | ROWS) (ONLY | WITH TIES)
+    ;
+
+// GaussDB/openGauss/MySQL 风格分页（Oracle 用 fetch_clause）。LIMIT 已是 lexer token。
+// 形式：LIMIT count | LIMIT ALL | LIMIT offset, count | LIMIT count OFFSET offset
+// OFFSET 此处不带 ROW|ROWS（GaussDB 风格），与 Oracle offset_clause 区分。
+limit_clause
+    : LIMIT (ALL | expression (',' expression)? (OFFSET expression)?)
     ;
 
 for_update_clause
@@ -6790,6 +6805,7 @@ atom
     | general_element outer_join_sign?
     | '(' subquery ')' subquery_operation_part*
     | '(' expressions_ ')'
+    | atom DOUBLE_COLON type_spec
     ;
 
 quantified_expression

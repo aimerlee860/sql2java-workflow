@@ -2577,6 +2577,7 @@ TILDE_OPERATOR_PART       : '~';
 EXCLAMATION_OPERATOR_PART : '!';
 GREATER_THAN_OP           : '>';
 LESS_THAN_OP              : '<';
+DOUBLE_COLON              : '::';
 COLON                     : ':';
 SEMICOLON                 : ';';
 

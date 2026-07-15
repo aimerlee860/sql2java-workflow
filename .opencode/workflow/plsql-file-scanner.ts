@@ -915,15 +915,13 @@ export function parseFileAst(
   // 收集语法/词法错误为 warning：antlr 默认错误恢复【不抛错】，语法错误会被静默恢复成部分树，
   // 可能导致子程序漏捕（「包识别但无子程序」类问题的根因常在此）。默认 ConsoleErrorListener
   // 已由 removeErrorListeners() 移除，此处挂收集型 listener 把错误按文件+行号记入 warnings，
-  // 调用方（finalizeInventoryIndex）再透传 workflow.log，便于追查。每文件只记前 N 条防刷屏。
-  const MAX_SYNTAX_ERRORS = 5
+  // 调用方（finalizeInventoryIndex）再透传 workflow.log，便于追查。
+  // 全量打印（不截断）：排查方言语法问题需要完整错误分布；方言支持完善后 warning 数量自然下降。
   let syntaxErrors = 0
   const errorListener = {
     syntaxError(_r: unknown, _s: unknown, line: number, col: number, msg: string): void {
       syntaxErrors++
-      if (syntaxErrors <= MAX_SYNTAX_ERRORS) {
-        warnings.push(`AST 语法错误: ${relPath} 行 ${line}:${col} ${msg}`)
-      }
+      warnings.push(`AST 语法错误: ${relPath} 行 ${line}:${col} ${msg}`)
     },
   }
   try {
@@ -937,8 +935,8 @@ export function parseFileAst(
     const tree = parser.sql_script()
     const listener = new PlSqlStructListener(relPath, packages, subprograms, standaloneProcedures, standaloneSlots, warnings, tokens)
     ParseTreeWalker.DEFAULT.walk(listener as any, tree)
-    if (syntaxErrors > MAX_SYNTAX_ERRORS) {
-      warnings.push(`AST 语法错误: ${relPath} 共 ${syntaxErrors} 条（仅列前 ${MAX_SYNTAX_ERRORS} 条）`)
+    if (syntaxErrors > 0) {
+      warnings.push(`AST 语法错误: ${relPath} 共 ${syntaxErrors} 条`)
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
