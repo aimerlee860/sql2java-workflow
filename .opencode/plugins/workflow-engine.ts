@@ -102,8 +102,8 @@ export interface RunContext {
   originalInput: string                  // 用户原始 $ARGUMENTS 文字，便于回溯
   params: {
     path?: string
-    headerPath?: string                  // 双目录模式：包头声明目录
-    bodyPath?: string                    // 双目录模式：包体实现目录
+    headerPath?: string                  // 双目录兜底模式：包头声明目录（默认单目录模式留 null）
+    bodyPath?: string                    // 双目录兜底模式：包体实现目录（默认单目录模式留 null）
     dbConf?: string
     specConf?: string
     mainEntry?: string
@@ -3271,8 +3271,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
         ]),
         runId: zFn.string().optional(),
         sourcePath: zFn.string().optional(),
-        headerPath: zFn.string().optional(),    // --header 用：包头声明目录（双目录模式）
-        bodyPath: zFn.string().optional(),      // --body 用：包体实现目录（双目录模式）
+        headerPath: zFn.string().optional(),    // --header 用：包头声明目录（双目录兜底模式，仅当包头/包体在无共同父目录的两棵树时；默认单目录模式留 null）
+        bodyPath: zFn.string().optional(),      // --body 用：包体实现目录（双目录兜底模式，同上）
         artifact: zFn.any().optional(),
         result: zFn.enum(["passed", "failed"]).optional(),
         phases: zFn.string().optional(),        // --phases 用
@@ -3313,8 +3313,10 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             if (args.specConf) args.specConf = resolve(args.specConf)
             if (args.dedupRules) args.dedupRules = resolve(args.dedupRules)
 
-            // 双目录模式（--header + --body）：sourcePath 派生为 headerPath 作主路径（runId /
-            // project-spec.md 查找 / db.properties 定位）。仅给单个 --header 或 --body 时退化为单目录。
+            // 双目录兜底模式（--header + --body 同时给）：仅当包头/包体分散在无共同父目录的两棵树时使用。
+            // sourcePath 派生为 headerPath 作主路径（runId / project-spec.md 查找 / db.properties 定位）。
+            // 默认单目录模式：只给 sourcePath（或单个 --header/--body），headerPath/bodyPath 留 null，
+            // scanner 按 PACKAGE vs PACKAGE BODY 内容区分 spec/body，按包名配对填 headerLocation/bodyLocation。
             const isTwoDir = !!(args.headerPath && args.bodyPath)
             if (isTwoDir) {
               if (!args.sourcePath) args.sourcePath = args.headerPath
