@@ -278,6 +278,36 @@ export function cleanName(name: string): string {
   return name.replace(/["`]/g, "").trim().toUpperCase()
 }
 
+/**
+ * 按 Oracle 名字解析语义把限定名拆为 {pkg, member}，锚定到 caller 所属 schema：
+ *   1 段 proc             → pkg = callerPkg（同包裸名）
+ *   2 段 pkg.proc         → pkg = callerSchema.pkg（补当前 schema；caller 无 schema 则原样）
+ *   3+ 段 schema.pkg.proc → pkg = schema.pkg（完整路径精确）
+ * 归一化后 pkg 恰为声明键形式（如 FMBM.P_FM_LOG / MFG_ERP.F_EXC），下游 packageFileMap /
+ * subprogramIndex / refIndex 精确匹配即可，无需各自做 schema 归一化。callerSchema = callerPkg
+ * 去掉最后一段（声明键最后一段是包名，前缀是 schema）。
+ *
+ * 单一真相源：listener 的 recordCall/recordPackageRef 与 regex 兜底 extractCallsByRegex 共用，
+ * 保证 AST 路径与正则兜底的三段归一化语义一致。
+ */
+export function resolveQualifiedName(qualified: string, callerPkg: string): { pkg: string; member: string } {
+  const segs = qualified.replace(/["`]/g, "").split(".").map(s => s.trim()).filter(Boolean)
+  if (segs.length === 0) return { pkg: callerPkg, member: "" }
+  const member = cleanName(segs[segs.length - 1])
+  let pkg: string
+  if (segs.length === 1) {
+    pkg = callerPkg
+  } else if (segs.length === 2) {
+    const lastDot = callerPkg.lastIndexOf(".")
+    const callerSchema = lastDot > 0 ? callerPkg.slice(0, lastDot) : ""
+    const pkgPart = cleanName(segs[0])
+    pkg = callerSchema ? `${callerSchema}.${pkgPart}` : pkgPart
+  } else {
+    pkg = cleanName(segs.slice(0, -1).join("."))
+  }
+  return { pkg, member }
+}
+
 /** 从源码文本提取声明的包名（大写、保留点）。
  *  先剥块注释（slash-star ... star-slash）——Oracle 12c+ 导出 PACKAGE BODY 时在
  *  `CREATE OR REPLACE` 与 `PACKAGE` 间插 EDITIONABLE 内联注释，裸正则不匹配 → 包被当无包文件
@@ -786,38 +816,11 @@ export class PlSqlStructListener implements PlSqlParserListener {
     // 保留签名兼容；实际 directCalls 经 enterCall_statement / enterStandard_function 走 recordCall
   }
 
-  /**
-   * 按 Oracle 名字解析语义把限定名拆为 {pkg, member}，锚定到 caller 所属 schema：
-   *   1 段 proc             → pkg = callerPkg（同包裸名）
-   *   2 段 pkg.proc         → pkg = callerSchema.pkg（补当前 schema；caller 无 schema 则原样）
-   *   3+ 段 schema.pkg.proc → pkg = schema.pkg（完整路径精确）
-   * 归一化后 pkg 恰为声明键形式（如 FMBM.P_FM_LOG / MFG_ERP.F_EXC），下游 packageFileMap /
-   * subprogramIndex / refIndex 精确匹配即可，无需各自做 schema 归一化。callerSchema = callerPkg
-   * 去掉最后一段（声明键最后一段是包名，前缀是 schema）。
-   */
-  private resolveQualified(qualified: string, callerPkg: string): { pkg: string; member: string } {
-    const segs = qualified.replace(/["`]/g, "").split(".").map(s => s.trim()).filter(Boolean)
-    if (segs.length === 0) return { pkg: callerPkg, member: "" }
-    const member = cleanName(segs[segs.length - 1])
-    let pkg: string
-    if (segs.length === 1) {
-      pkg = callerPkg
-    } else if (segs.length === 2) {
-      const lastDot = callerPkg.lastIndexOf(".")
-      const callerSchema = lastDot > 0 ? callerPkg.slice(0, lastDot) : ""
-      const pkgPart = cleanName(segs[0])
-      pkg = callerSchema ? `${callerSchema}.${pkgPart}` : pkgPart
-    } else {
-      pkg = cleanName(segs.slice(0, -1).join("."))
-    }
-    return { pkg, member }
-  }
-
-  /** 把限定名拆为 package + name（走 resolveQualified）；裸名归属调用方所属包；排除 SQL 伪列与自递归 */
+  /** 把限定名拆为 package + name（走 resolveQualifiedName）；裸名归属调用方所属包；排除 SQL 伪列与自递归 */
   private recordCall(qualified: string, line: number, kind: "function" | "procedure") {
     if (this.subprogramStack.length === 0) return
     const caller = this.subprogramStack[this.subprogramStack.length - 1]
-    const { pkg, member: method } = this.resolveQualified(qualified, caller.belongToPackage)
+    const { pkg, member: method } = resolveQualifiedName(qualified, caller.belongToPackage)
     if (method.length < 2 || SQL_PSEUDO.has(method)) return
     // 排除 :NEW/:OLD 绑定变量上下文（routine_name 不会匹配，但防 :NEW.X 误入）
     if (pkg === "NEW" || pkg === "OLD") return
@@ -829,12 +832,12 @@ export class PlSqlStructListener implements PlSqlParserListener {
     caller.directCalls.push({ package: pkg, name: method, line, kind })
   }
 
-  /** 记录跨包非调用引用（pkg.const / pkg.type / schema.pkg.const）。走 resolveQualified 归一化，
+  /** 记录跨包非调用引用（pkg.const / pkg.type / schema.pkg.const）。走 resolveQualifiedName 归一化，
    *  仅原始入栈，后过滤按已知包名收窄。 */
   private recordPackageRef(qualified: string, line: number) {
     if (this.subprogramStack.length === 0) return
     const caller = this.subprogramStack[this.subprogramStack.length - 1]
-    const { pkg, member } = this.resolveQualified(qualified, caller.belongToPackage)
+    const { pkg, member } = resolveQualifiedName(qualified, caller.belongToPackage)
     if (pkg.length < 2 || member.length < 2) return
     if (pkg === "NEW" || pkg === "OLD") return
     caller.packageRefs.push({ package: pkg, name: member, line })
@@ -1023,6 +1026,87 @@ export function locateSubprogramRange(
 
   const lineRange = lineRangeOf(code, startIdx, endIdx)
   return lineRange ? { lineRange } : null
+}
+
+/**
+ * 正则兜底从子程序 body 文本抽取直接调用（directCalls）。
+ *
+ * 触发场景：AST 语法错误恢复漏抽调用节点 / 漏抽 caller body 节点 → directCalls 为空
+ *（不像 bodyLocation 有 locateSubprogramRange 兜底，directCalls 原本无 regex 兜底）。
+ * GaussDB 项目用 Oracle 改编 grammar 解析错误率较高，故对 directCalls 为空的子程序
+ * 用正则从 body 区间文本抽调用，三段调用形式（schema.pkg.proc / pkg.proc / proc）全兼容。
+ *
+ * 语义对齐 AST 路径（recordCall + finalizeInventoryIndex 后过滤）：
+ *   - 三段归一化走 resolveQualifiedName（单一真相源）；
+ *   - 噪声过滤：member<2 / SQL_PSEUDO / pkg=NEW|OLD 丢弃（同 recordCall）；
+ *   - 已知子程序收窄：仅保留 subprogramIndex 命中的 callee（同 finalizeInventoryIndex），
+ *     自动滤除类型构造器 pkg.t_rec_type(...)、集合访问 pkg.g_array(i)、变量方法、SQL 内建函数；
+ *   - 排除声明头：前驱 token 为 procedure/function 的 match 跳过（PROCEDURE pkg.proc(...) 声明），
+ *     保留 CALL pkg.proc(...) 里的调用。
+ * kind 统一标 "procedure"（regex 不区分过程/函数调用；callGraph 构边只用 package/name）。
+ *
+ * @param code  整个包 body 文件文本（须先经 normalizeFullwidthSyntax）
+ * @param callerPkg  caller 声明键（belongToPackage，含 schema 前缀），供 resolveQualifiedName 锚定
+ * @param lineRange  caller 的 bodyLocation.lineRange，限定只抽该区间内的调用（区间隔离）
+ * @param subprogramIndex  PKG(大写)→Set<METHOD(大写)>，已知子程序收窄
+ */
+export function extractCallsByRegex(
+  code: string,
+  callerPkg: string,
+  lineRange: [number, number],
+  subprogramIndex: Map<string, Set<string>>,
+): DirectCall[] {
+  // 调用点：标识符（可含 $ #）+ 可选 .ident 重复 + 紧跟左括号 = 调用。单捕获组取完整限定名
+  //（覆盖 proc(...) / pkg.proc(...) / schema.pkg.proc(...)）。g+i 不敏感，归一化走 resolveQualifiedName。
+  const callRe = /([A-Za-z_][\w$#]*(?:\.[A-Za-z_][\w$#]*)*)\s*\(/gi
+  // 预计算行起始偏移，二分把 match 偏移映回 1-based 行号，避免每次 O(n) slice（大 body 文件）。
+  // 剥注释（行注释 -- / 块注释 /* */），用等量空格+换行替换保持 offset 与行号对齐，
+  // 避免抽到注释里写的调用（AST 不解析注释，regex 兜底须对齐）。字符串字面量内的 -- 罕见，
+  // 且调用点 '(' 通常在 -- 之前已匹配，误剥不影响调用抽取。
+  const src = code
+    .replace(/--[^\n]*/g, s => " ".repeat(s.length))
+    .replace(/\/\*[\s\S]*?\*\//g, s => {
+      const nl = (s.match(/\n/g) || []).length
+      return " ".repeat(s.length - nl) + "\n".repeat(nl)
+    })
+  // 预计算行起始偏移，二分把 match 偏移映回 1-based 行号，避免每次 O(n) slice（大 body 文件）。
+  const lineStarts: number[] = [0]
+  for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts.push(i + 1)
+  const lineOf = (offset: number): number => {
+    let lo = 0, hi = lineStarts.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >>> 1
+      if (lineStarts[mid] <= offset) lo = mid
+      else hi = mid - 1
+    }
+    return lo + 1
+  }
+
+  const out: DirectCall[] = []
+  const seen = new Set<string>()
+  let m: RegExpExecArray | null
+  while ((m = callRe.exec(src)) !== null) {
+    const idx = m.index
+    const line = lineOf(idx)
+    if (line < lineRange[0] || line > lineRange[1]) continue  // 区间外，跳过（区间隔离）
+
+    // 排除声明头：match 所在行行首（去前导空白）为 procedure/function 关键字 → 声明而非调用，跳过。
+    // 覆盖 PROCEDURE pkg.proc(...) / FUNCTION func(...) 声明头（含 idx=0 无前驱的文件首行情形）。
+    // CALL pkg.proc(...) 行首是 CALL，不跳过（真实调用）。
+    const lineStart = lineStarts[line - 1]
+    if (/^\s*(procedure|function)\b/i.test(src.slice(lineStart, idx))) continue
+
+    const { pkg, member } = resolveQualifiedName(m[1], callerPkg)
+    if (member.length < 2 || SQL_PSEUDO.has(member)) continue   // 噪声过滤（同 recordCall）
+    if (pkg === "NEW" || pkg === "OLD") continue                // :NEW/:OLD 绑定变量
+    const methods = subprogramIndex.get(pkg)                    // 已知子程序收窄（同 finalizeInventoryIndex）
+    if (!methods || !methods.has(member)) continue
+    const key = `${pkg}.${member}.${line}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ package: pkg, name: member, line, kind: "procedure" })
+  }
+  return out
 }
 
 /** 从文本提取表 + 列 + 主键 + 外键 */
