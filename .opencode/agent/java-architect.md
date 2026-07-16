@@ -2,7 +2,6 @@
 description: Spring Boot + MyBatis 架构师，负责规划 Java 项目结构（plan）和生成项目骨架代码（scaffold）。用于工作流的 plan 和 scaffold 阶段。
 mode: subagent
 temperature: 0.2
-maxSteps: 300
 tools:
   read: true
   bash: true

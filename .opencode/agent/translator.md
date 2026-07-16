@@ -2,7 +2,6 @@
 description: PL/SQL → Java 翻译引擎，负责按拓扑序逐包翻译（translate）和根据反馈修复问题（fix）。用于工作流的 translate 和 fix 阶段。
 mode: subagent
 temperature: 0.1
-maxSteps: 300
 tools:
   read: true
   bash: true
