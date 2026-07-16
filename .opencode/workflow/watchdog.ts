@@ -74,7 +74,6 @@ let stuckTimer: ReturnType<typeof setInterval> | undefined
 let crashTimer: ReturnType<typeof setInterval> | undefined
 let started = false
 
-const WD_LOG_GLOBAL = join(".workflow-artifacts", "_watchdog.log")
 let currentRunId: string | undefined
 let manualStopRunId: string | undefined  // 人工终止（ESC session.interrupt）标记的 run，watchdog 不唤醒编排者
 
@@ -82,7 +81,11 @@ function wdLogPath(runId: string): string {
   return join(".workflow-artifacts", runId, "logs", "watchdog.log")
 }
 
-// ── 日志（双层：_watchdog.log 兜底 + getLogger 主日志）─────────────────────────
+// ── 日志（runId 创建前缓存，创建后 flush 到 per-run logs/watchdog.log）──────
+
+// runId 创建前的日志缓存：runId 设置后 flush 到 per-run logs/watchdog.log。
+// 不再生成全局 _watchdog.log（runId 创建前不落盘，符合「runId 创建后才打印日志」）。
+let pendingLogs: string[] = []
 
 function wlog(level: "INFO" | "WARN" | "ERROR", msg: string): void {
   const line = `[${new Date().toISOString()}] [${level}] [watchdog] ${msg}\n`
@@ -90,14 +93,15 @@ function wlog(level: "INFO" | "WARN" | "ERROR", msg: string): void {
   if (runId) {
     try {
       mkdirSync(dirname(wdLogPath(runId)), { recursive: true })
+      if (pendingLogs.length) {
+        appendFileSync(wdLogPath(runId), pendingLogs.join(""), "utf-8")
+        pendingLogs = []
+      }
       appendFileSync(wdLogPath(runId), line, "utf-8")
       return
-    } catch { /* per-run 写失败，落全局兜底 */ }
+    } catch { /* per-run 写失败：缓存待下次，不写全局文件 */ }
   }
-  try {
-    mkdirSync(dirname(WD_LOG_GLOBAL), { recursive: true })
-    appendFileSync(WD_LOG_GLOBAL, line, "utf-8")
-  } catch { /* 日志失败不影响主流程 */ }
+  pendingLogs.push(line)
 }
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────────
