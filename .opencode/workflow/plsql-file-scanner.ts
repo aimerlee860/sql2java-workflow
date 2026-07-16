@@ -1351,7 +1351,9 @@ export function extractPackageRefsByRegex(
   lineRange: [number, number],
 ): PackageRef[] {
   // 至少 2 段的限定引用（ident.ident[.ident]*）。后跟非 '(' 才算非调用引用。
-  const refRe = /([A-Za-z_][\w$#]*(?:\.[A-Za-z_][\w$#]*)+)/g
+  // 段支持引号标识符（"PKG"."CONST" / "SCHEMA"."PKG"."CONST"，DBMS_METADATA 导出常见），
+  // 与 extractCallsByRegex 的 callRe 一致；归一化走 resolveQualifiedName。
+  const refRe = /((?:"[^"]*"|[A-Za-z_][\w$#]*)(?:\.(?:"[^"]*"|[A-Za-z_][\w$#]*))+)/g
   const src = code
     .replace(/--[^\n]*/g, s => " ".repeat(s.length))
     .replace(/\/\*[\s\S]*?\*\//g, s => {

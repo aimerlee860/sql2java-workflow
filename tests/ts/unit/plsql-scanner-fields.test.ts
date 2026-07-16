@@ -13,17 +13,37 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
-import { scanWithAST, type InventoryIndex } from "@workflow/plsql-scanner"
-import { resolve } from "node:path"
+import { scanFileSet, finalizeFileSetResults, type InventoryIndex } from "@workflow/plsql-scanner"
+import { readdirSync, statSync } from "node:fs"
+import { resolve, join } from "node:path"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
+
+// 递归收集 root 下 .sql 文件（同 scanner-merged-parity.test.ts 的 collectSql）
+function collectSql(root: string): string[] {
+  const out: string[] = []
+  const walk = (d: string) => {
+    for (const e of readdirSync(d)) {
+      const p = join(d, e)
+      if (statSync(p).isDirectory()) walk(p)
+      else if (e.endsWith(".sql")) out.push(p)
+    }
+  }
+  walk(root)
+  return out
+}
+
+// 直接调 AST 路径 scanFileSet（生产主路径已切 regex，scanWithAST 不再跑 AST；此处显式走 AST
+// 作全字段回归对照，scannerUsed="ast"）。失败（antlr4ts 运行时未装）抛错由调用方 try/catch 降级 skip。
+const scanAst = (root: string): InventoryIndex =>
+  finalizeFileSetResults([scanFileSet(collectSql(root), root)], root, "ast")
 
 let result: InventoryIndex | null = null
 let parserAvailable = true
 
-beforeAll(async () => {
+beforeAll(() => {
   try {
-    result = await scanWithAST([FIXTURE_TINY], FIXTURE_TINY)
+    result = scanAst(FIXTURE_TINY)
   } catch {
     // 测试环境未安装 antlr4ts 运行时时跳过
     parserAvailable = false
@@ -229,7 +249,7 @@ describe("plsql-scanner 大小写不敏感关键字", () => {
 end;
 /`, "utf-8")
     try {
-      const inv = await scanWithAST([tmp], tmp)
+      const inv = scanAst(tmp)
       expect(inv.scannerUsed).toBe("ast")
       const pkg = inv.packages.find(p => p.packageName === "LOWER_PKG")
       expect(pkg, "小写关键字包应被识别").toBeDefined()
@@ -272,7 +292,7 @@ BEGIN
 END do_migrate;
 /`, "utf-8")
     try {
-      const inv = await scanWithAST([tmp], tmp)
+      const inv = scanAst(tmp)
       const sub = inv.subprograms.find(s => s.belongToPackage === "__STANDALONE_DO_MIGRATE__")
       expect(sub, "standalone 虚拟包子程序应存在").toBeDefined()
       // 修复前 directCalls 恒空（enterCreate_procedure_body 不压 subprogramStack，体内调用被早退丢弃）
@@ -307,7 +327,7 @@ CREATE OR REPLACE PACKAGE BODY outer_pkg AS
 END outer_pkg;
 /`, "utf-8")
     try {
-      const inv = await scanWithAST([tmp], tmp)
+      const inv = scanAst(tmp)
       const pkgSubs = inv.subprograms.filter(s => s.belongToPackage === "OUTER_PKG")
       const names = pkgSubs.map(s => s.name).sort()
       // 修复前 local_helper 被注册为包级子程序（污染）；修复后仅 main_proc + real_proc
@@ -337,7 +357,7 @@ CREATE TABLE t_meta (
 /
 EXIT`, "utf-8")
     try {
-      const inv = await scanWithAST([tmp], tmp)
+      const inv = scanAst(tmp)
       const tab = inv.tables.find(t => t.name === "T_META")!
       expect(tab, "表应被提取").toBeDefined()
       const colNames = tab.columns.map(c => c.name).sort()

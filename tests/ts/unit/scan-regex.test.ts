@@ -10,7 +10,7 @@ import { describe, it, expect, beforeAll } from "vitest"
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { scanFileSetRegex } from "@workflow/plsql-file-scanner"
+import { scanFileSetRegex, extractPackageRefsByRegex } from "@workflow/plsql-file-scanner"
 
 // spec + body 分文件。body 含三段调用 + 嵌套局部过程 + 跨包常量引用。
 const SPEC_SQL = `CREATE OR REPLACE PACKAGE MFG_ERP.P_FOO IS
@@ -106,6 +106,23 @@ describe("scanFileSetRegex regex 主路径", () => {
     const dw = r.subprograms.find(s => s.name === "DO_WORK")!
     const refNames = dw.packageRefs.map(ref => `${ref.package}.${ref.name}`)
     expect(refNames.some(k => k.includes("BASE_PKG") && k.includes("C_DIR_IN"))).toBe(true)
+  })
+
+  it("packageRefs 支持引号标识符引用（\"BASE_PKG\".\"C_DIR_IN\" / \"SCHEMA\".\"BASE_PKG\".\"C_VAL\"）", () => {
+    // DBMS_METADATA 导出常见引号标识符；refRe 须与 callRe 一致支持引号段，否则漏抽。
+    const code = `CREATE OR REPLACE PACKAGE BODY MFG_ERP.P_FOO IS
+  PROCEDURE do_work IS
+    v NUMBER;
+  BEGIN
+    v := "BASE_PKG"."C_DIR_IN";
+    v := "SCHEMA"."BASE_PKG"."C_VAL";
+  END do_work;
+END P_FOO;
+`
+    const refs = extractPackageRefsByRegex(code, "MFG_ERP.P_FOO", [2, 6])
+    const names = refs.map(r => `${r.package}.${r.name}`)
+    expect(names.some(k => k.includes("BASE_PKG") && k.includes("C_DIR_IN"))).toBe(true)
+    expect(names.some(k => k.includes("BASE_PKG") && k.includes("C_VAL"))).toBe(true)
   })
 
   it("parameters / returnType 留空（LLM 兜底）", () => {
