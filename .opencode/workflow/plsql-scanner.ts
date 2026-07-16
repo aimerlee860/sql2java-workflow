@@ -408,9 +408,10 @@ export async function scanWithAST(roots: string[], primaryBase: string): Promise
   const { fileSets, totalLines } = partitionFilesByPackage(files)
   getLogger().info("[scan]", `regex 主路径: ${files.length} 文件 / ${totalLines} 行 / ${fileSets.length} file-set → worker 池（scanFileSetRegex，AST 保留不启用）`)
   // 主路径已切到 scanFileSetRegex（纯 regex，无 antlr）：worker 池内 scanFileSetRegex 抽包/子程序/
-  // directCalls。原 scanFileSet（AST）保留不启用（对照/回退）。scannerUsed 沿用 "ast" 枚举兼容下游。
+  // directCalls。原 scanFileSet（AST）保留不启用（对照/回退，scanner-merged-parity / plsql-scanner-fields
+  // 直接调 scanFileSet 作 AST 全字段回归）。scannerUsed 标 "regex" 反映实际扫描路径（下游仅展示用）。
   const results = await scanFilesParallel(fileSets, primaryBase)
-  return finalizeFileSetResults(results, primaryBase, "ast")
+  return finalizeFileSetResults(results, primaryBase, "regex")
 }
 
 /** 串行扫描多个 file-set（小工作量 / worker 不可用 fallback 共用）。 */
@@ -497,17 +498,17 @@ export async function scanSource(sourceOrOpts: string | ScanSourceOpts): Promise
     getLogger().warn("[plsql-scanner]", `scanSource 收到 entry=${entry}，入口范围扫描请改用 scanSourceLazy；此处忽略，按全量扫描`)
   }
 
-  getLogger().info("[scan]", `开始全量 AST 扫描: ${roots.length} root(s) [${roots.join(", ")}]`)
+  getLogger().info("[scan]", `开始全量扫描（regex 主路径）: ${roots.length} root(s) [${roots.join(", ")}]`)
   try {
     const idx = await scanWithAST(roots, primaryBase)
     getLogger().info(
       "[scan]",
-      `扫描完成(ast): ${idx.packages.length} 包 / ${idx.subprograms.length} 子程序 / ${idx.tables.length} 表 / ${idx.triggers.length} triggers / ${idx.views.length} views / ${idx.sequences.length} seqs / ${idx.warnings.length} warnings`,
+      `扫描完成(regex): ${idx.packages.length} 包 / ${idx.subprograms.length} 子程序 / ${idx.tables.length} 表 / ${idx.triggers.length} triggers / ${idx.views.length} views / ${idx.sequences.length} seqs / ${idx.warnings.length} warnings`,
     )
     return idx
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    getLogger().error("[scan]", `AST 扫描整体失败，降级 regex 兜底: ${msg}`)
+    getLogger().error("[scan]", `regex 主路径失败，降级粗粒度兜底: ${msg}`)
     const idx = scanWithRegex(roots, primaryBase)
     getLogger().warn("[scan]", `regex 兜底完成: ${idx.packages.length} 包 / 0 子程序（regex 仅提包名，无结构字段，仅作最后兜底）`)
     return idx
@@ -707,10 +708,10 @@ export async function scanSourceLazy(opts: ScanSourceLazyOpts): Promise<Inventor
     session?.close()
   }
 
-  const idx = finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, standaloneSlots, tables, triggers, views, sequences, warnings, "ast")
+  const idx = finalizeInventoryIndex(primaryBase, packages, subprograms, standaloneProcedures, standaloneSlots, tables, triggers, views, sequences, warnings, "regex")
   getLogger().info(
     "[scan]",
-    `lazy 扫描完成(ast): 闭包 ${idx.packages.length} 包 / ${idx.subprograms.length} 子程序 / ${idx.tables.length} 表 / ${idx.warnings.length} warnings`,
+    `lazy 扫描完成(regex): 闭包 ${idx.packages.length} 包 / ${idx.subprograms.length} 子程序 / ${idx.tables.length} 表 / ${idx.warnings.length} warnings`,
   )
   return idx
 }
