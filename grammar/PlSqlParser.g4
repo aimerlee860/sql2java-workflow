@@ -6615,6 +6615,11 @@ logical_expression
     : unary_logical_expression
     | logical_expression AND logical_expression
     | logical_expression OR logical_expression
+    // GaussDB 方言：|| 作逻辑或（项目代码非标准写法，用 || 代 OR）。
+    // 与 concatenation 的 ||（字符串拼接）靠操作数层级区分：拼接操作数在 concatenation 层
+    // （字符串/变量/字面量）被 concatenation 先消费；逻辑或操作数是 IS NULL / 比较等
+    // （relational 及以上，在 logical 层），其后的 || 由本规则消费为逻辑或。
+    | logical_expression BAR BAR logical_expression
     ;
 
 unary_logical_expression

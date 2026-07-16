@@ -69,4 +69,19 @@ CREATE OR REPLACE PACKAGE BODY MFG_ERP.F_DIALECT AS
     F_UTIL.f_log('no_from');
   END p_no_from;
 
+  -- 5. || 作逻辑或（项目代码非标准写法，用 || 代 OR）
+  --    与字符串拼接的 || 靠操作数层级区分：拼接走 concatenation，逻辑或走 logical_expression
+  PROCEDURE p_logical_or IS
+    v VARCHAR2(10);
+    n INTEGER;
+  BEGIN
+    v := 'a' || 'b';                 -- 字符串拼接（concatenation）
+    IF v IS NULL || v = '1' THEN     -- || 逻辑或（IS NULL || 比较）
+      helper_ok;
+    END IF;
+    IF n = 1 || n = 2 THEN           -- || 逻辑或（比较 || 比较）
+      helper_ok;
+    END IF;
+  END p_logical_or;
+
 END F_DIALECT;
