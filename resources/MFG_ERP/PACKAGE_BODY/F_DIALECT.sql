@@ -84,4 +84,24 @@ CREATE OR REPLACE PACKAGE BODY MFG_ERP.F_DIALECT AS
     END IF;
   END p_logical_or;
 
+  -- 6. 数组类型 int[] 声明 + v[1] 索引（GaussDB 数组）
+  --    type_spec 加数组维度后缀 ['[' UNSIGNED_INTEGER? ']']*；v[1] 索引走 model_expression
+  PROCEDURE p_array IS
+    v INTEGER[];
+    w INTEGER;
+  BEGIN
+    v := ARRAY[1, 2, 3];
+    w := v[1];
+    helper_ok;
+  END p_array;
+
+  -- 7. 美元引用字符串 $$...$$ / $tag$...$tag$（可跨行、含引号），lexer 作 CHAR_STRING 返回
+  PROCEDURE p_dollar IS
+    v VARCHAR2(100);
+  BEGIN
+    v := $$hello world$$;
+    v := $tag$it's ok$tag$;
+    helper_ok;
+  END p_dollar;
+
 END F_DIALECT;

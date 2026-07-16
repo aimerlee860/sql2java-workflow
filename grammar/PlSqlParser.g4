@@ -7509,8 +7509,9 @@ argument
     ;
 
 type_spec
-    : datatype
-    | REF? type_name (PERCENT_ROWTYPE | PERCENT_TYPE)?
+    : (datatype | REF? type_name (PERCENT_ROWTYPE | PERCENT_TYPE)?) (
+        '[' UNSIGNED_INTEGER? ']'
+    )*
     ;
 
 datatype
