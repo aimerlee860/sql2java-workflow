@@ -5,6 +5,7 @@
  * - worker busy 持续 > workerTimeoutMs → abort（卡在 tool/LLM 挂起）
  * - worker idle 持续 > idleConfirmMs → abort（杀透防恢复重复执行）
  * - 编排者 idle + 无活跃 worker + run running + 超时 → promptAsync 唤醒调 resume
+ *   （无次数上限：只有人工终止 manualStopRunId 或 run 运行完毕才停止唤醒）
  * - 编排者 session 持续消失 > orchestratorMissingThresholdMs → 提示手动 /sql2java resume
  *
  * 重派/恢复交给现有机制（worker abort 后编排者自动重派 via advance 门控）。
@@ -25,8 +26,7 @@ export interface WatchdogConfig {
   idleConfirmMs: number                    // 持续 idle 确认"没在运行"的宽限期
   crashDetectionIntervalMs: number         // crash 检测轮询间隔
   orchestratorMissingThresholdMs: number   // session 持续消失判 crash 阈值
-  maxNudgesPerIdle: number                 // 同一 idle 周期最多唤醒次数
-  nudgeCooldownMs: number                  // 两次唤醒最小间隔
+  nudgeCooldownMs: number                  // 两次唤醒最小间隔（仅限频，不设上限）
   phaseOverrides?: Record<string, { workerTimeoutMs?: number }>
 }
 
@@ -37,7 +37,6 @@ const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
   idleConfirmMs: 10 * 60_000,              // 10min（慢环境 LLM 请求间隔拉长，给更多持续 idle 宽限再确认）
   crashDetectionIntervalMs: 60_000,        // 60s
   orchestratorMissingThresholdMs: 3 * 60_000, // 3min（避 session.list 抖动）
-  maxNudgesPerIdle: 3,
   nudgeCooldownMs: 60_000,
   phaseOverrides: {},
 }
@@ -313,12 +312,7 @@ function checkOrchestratorStuck(): void {
     // (e) idle 未超时 → 跳过
     const idleFor = Date.now() - e.lastStatusAt
     if (idleFor < cfg.orchestratorIdleTimeoutMs) continue
-    // (f) 唤醒达上限 → 建议人工介入
-    if (e.nudgeCount >= cfg.maxNudgesPerIdle) {
-      wlog("WARN", `orchestrator ${sid} 唤醒达上限 ${e.nudgeCount}，run=${e.runId} 建议人工介入`)
-      continue
-    }
-    // (g) 冷却期内 → 跳过
+    // (f) 冷却期内 → 跳过（仅限频，不设唤醒上限）
     if (e.lastNudgeAt && Date.now() - e.lastNudgeAt < cfg.nudgeCooldownMs) continue
     nudgeOrchestrator(sid, e.runId)
   }
@@ -329,7 +323,7 @@ function nudgeOrchestrator(sid: string, runId: string): void {
   if (!e) return
   e.nudgeCount++
   e.lastNudgeAt = Date.now()
-  wlog("WARN", `orchestrator ${sid} idle 无活跃 worker，唤醒调 resume (runId=${runId})`)
+  wlog("WARN", `orchestrator ${sid} idle 无活跃 worker，第 ${e.nudgeCount} 次唤醒调 resume (runId=${runId})`)
   try {
     apiClient?.session?.promptAsync?.({
       path: { id: sid },
