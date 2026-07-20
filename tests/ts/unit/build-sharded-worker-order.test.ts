@@ -35,7 +35,8 @@ function makeRun(runId: string, phase: string, ic: Record<string, unknown>): Wor
   } as unknown as WorkflowRun
 }
 
-describe("buildShardedWorkerOrder — analyze", () => {
+// analyze 阶段已砍（inventory→plan 直连），analyze workOrder 测试跳过，后续清理删。
+describe.skip("buildShardedWorkerOrder — analyze", () => {
   let art: string
   beforeAll(async () => {
     const runId = "test-wo-analyze"
@@ -105,20 +106,13 @@ describe("buildShardedWorkerOrder — translate", () => {
     const index = await scanSource(FIXTURE_TINY)
     buildInventoryFromIndex(art, index)
     buildDependencyGraphFromIndex(art)
-    // translate 在 plan 之后，需 plan.json（给 projectRoot）+ analysis-packages 聚合（analysis-slice）
+    // translate 在 plan 之后，需 plan.json（给 projectRoot）。analyze 砍后不再需要 analysis-packages。
     writeFileSync(join(art, "plan.json"), JSON.stringify({
       targetProject: { artifactId: "testapp" }, projectRoot: "/tmp/gen/testapp",
     }), "utf-8")
-    // analysis-packages 聚合（buildDependencyGraphFromIndex 已为无子程序包写空文件；CORE_PKG 有子程序需聚合）
-    // buildDependencyGraphFromIndex 不写有子程序包的聚合——由 analyze 阶段产。这里手写一个最小聚合供 analysis-slice。
-    mkdirSync(join(art, "analysis-packages"), { recursive: true })
-    writeFileSync(join(art, "analysis-packages", "CORE_PKG.json"), JSON.stringify({
-      packageName: "CORE_PKG",
-      subprograms: [{ name: "get_item", blocks: [], variables: [], cursors: [], exceptionHandlers: [], translationNotes: [] }],
-    }), "utf-8")
   }, 60000)
 
-  it("渲染 translate shard workOrder：含依赖签名块 + projectRoot + analysis-slice", () => {
+  it("渲染 translate shard workOrder：含依赖签名块 + projectRoot + source.sql 切片", () => {
     const runId = "test-wo-translate"
     const run = makeRun(runId, "translate", {
       targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 13,
@@ -131,9 +125,9 @@ describe("buildShardedWorkerOrder — translate", () => {
     expect(wo).toContain("CORE_PKG.get_item")
     // translate 有 projectRoot（plan 之后）
     expect(wo).toContain("projectRoot")
-    // analysis-slice.json 引用
-    expect(wo).toContain("analysis-slice.json")
-    expect(existsSync(join(art, "shard-inputs", "CORE_PKG", "get_item", "analysis-slice.json"))).toBe(true)
+    // source.sql 切片（analyze 砍后不再有 analysis-slice，只 source.sql + meta.json）
+    expect(existsSync(join(art, "shard-inputs", "CORE_PKG", "get_item", "source.sql"))).toBe(true)
+    expect(existsSync(join(art, "shard-inputs", "CORE_PKG", "get_item", "analysis-slice.json"))).toBe(false)
     // 无残留占位符
     expect(wo).not.toContain("{{")
     // 落盘

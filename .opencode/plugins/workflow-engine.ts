@@ -2954,18 +2954,14 @@ export function narrowUpstreamForIncremental(
 
 /**
  * 本分片某 unit 的切片相对路径（artifactsDir 相对）。narrowUpstreamForShard 用——只算路径字符串，
- * 不读不写（实际落盘由 generateUnitSlices 在 dispatch 时完成）。phase 决定注入哪些切片：
- *  - analyze: source.sql + inventory-slice.json + meta.json（结构来自 packages/subprograms）
- *  - translate: source.sql + analysis-slice.json + meta.json（结构来自 analysis-packages 聚合）
+ * 不读不写（实际落盘由 generateUnitSlices 在 dispatch 时完成）。
+ * analyze 砍后切片只含 source.sql + meta.json（translate 读 source.sql 翻译，不读 analysis-slice）。
  */
-export function unitSliceRelPaths(unitId: string, phase: string): string[] {
+export function unitSliceRelPaths(unitId: string, _phase: string): string[] {
   const pkg = pkgOf(unitId)
   const ref = refOf(unitId)
   const base = `shard-inputs/${pkg}/${ref}`
-  const files = [`${base}/source.sql`, `${base}/meta.json`]
-  if (phase === "analyze") files.push(`${base}/inventory-slice.json`)
-  if (phase === "translate") files.push(`${base}/analysis-slice.json`)
-  return files
+  return [`${base}/source.sql`, `${base}/meta.json`]
 }
 
 /**
@@ -2989,7 +2985,7 @@ export function generateUnitSlices(
   sourcePath: string,
 ): string[] {
   if (targetUnits.length === 0) return []
-  if (phase !== "analyze" && phase !== "translate") return []
+  if (phase !== "translate") return []
 
   const absSrc = (rel: string | null | undefined): string | null => {
     if (!rel) return null
@@ -3071,32 +3067,7 @@ export function generateUnitSlices(
     appendSlice("根", rootRef, rootSub)
     safeWriteFile(join(sliceDir, "source.sql"), sourceParts.join("\n\n"))
 
-    // ── inventory-slice.json（analyze）──
-    if (phase === "analyze") {
-      const slice = {
-        unitId: u,
-        packageName: pkg,
-        root: rootProc ? { ref: rootRef, proc: rootProc } : null,
-        cargo: [],
-      }
-      safeWriteFile(join(sliceDir, "inventory-slice.json"), JSON.stringify(slice, null, 2))
-    }
-
-    // ── analysis-slice.json（translate）──
-    let analysisMissing = false
-    if (phase === "translate") {
-      const subs = subprogramsForPkg(pkg)
-      if (subs === null) {
-        analysisMissing = true
-        safeWriteFile(join(sliceDir, "analysis-slice.json"), JSON.stringify({ unitId: u, packageName: pkg, subprograms: [] }, null, 2))
-      } else {
-        // 按 oracle name 匹配根
-        const wantNames = new Set<string>()
-        if (rootProc?.name) wantNames.add(String(rootProc.name))
-        const matched = subs.filter((sp: any) => sp && wantNames.has(String(sp.name)))
-        safeWriteFile(join(sliceDir, "analysis-slice.json"), JSON.stringify({ unitId: u, packageName: pkg, subprograms: matched }, null, 2))
-      }
-    }
+    // analyze 砍后不再产 inventory-slice/analysis-slice（translate 读 source.sql 翻译，不读结构切片）。
 
     // ── meta.json ──
     const meta = {
@@ -3106,7 +3077,6 @@ export function generateUnitSlices(
       phase,
       cargoFuncs: [],
       sourceFiles,
-      analysisMissing,
     }
     safeWriteFile(join(sliceDir, "meta.json"), JSON.stringify(meta, null, 2))
 

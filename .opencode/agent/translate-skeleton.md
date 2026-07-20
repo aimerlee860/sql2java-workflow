@@ -38,7 +38,7 @@ permission:
 
 - ⛔ **完整任务已在本卡系统提示中**，禁止 Read 任何 `.workOrder.md` / `dispatch-logs/`。
 - ⛔ **只处理本分片 targetUnits 列出的单元**，禁止越界。
-- ⛔ **源码只读 `shard-inputs/{pkg}/{ref}/source.sql` + `analysis-slice.json`**，禁止 read 整包 body/header。
+- ⛔ **源码只读 `shard-inputs/{pkg}/{ref}/source.sql`**，禁止 read 整包 body/header。
 - ⛔ **跨包/同包跨单元调用签名查「依赖签名」预注入块**，禁止 read `translations/`。
 - ⛔ 禁止调用 workflow 工具的任何 action（advance/confirm/retry/abort/dispatch/fixContinue/start）。
 

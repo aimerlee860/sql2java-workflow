@@ -21,15 +21,16 @@ beforeAll(() => {
   mkdirSync(sourcePath, { recursive: true })
 
   // 源 body 文件：4 个过程，行范围对齐 lineRange
+  // analyze 砍后 #5/#7 改源码 grep（EXCEPTION/CURSOR）、#1 只靠 complexity（manualReviewList 去）
   const body = [
     "PROCEDURE get_item IS",                       // 1
     "  v VARCHAR2 := NVL(p_x, '0');",              // 2  ← NVL → #3
-    "  CURSOR c IS SELECT * FROM t;",              // 3  ← cursor → #7
+    "  CURSOR c IS SELECT * FROM t;",              // 3  ← CURSOR → #7
     "BEGIN NULL; END;",                            // 4
     "PROCEDURE update_status(p_code OUT VARCHAR2) IS", // 5 ← OUT param → #8
-    "BEGIN NULL; END;",                            // 6
+    "BEGIN NULL; EXCEPTION WHEN OTHERS THEN NULL; END;", // 6 ← EXCEPTION → #5
     "PROCEDURE create_order IS",                   // 7
-    "BEGIN IF x THEN NULL; END IF; END;",          // 8  ← complexity high → #1
+    "BEGIN PRAGMA AUTONOMOUS_TRANSACTION; IF x THEN NULL; END IF; END;", // 8 ← AUTONOMOUS → #6
     "PROCEDURE simple_crud IS",                    // 9  ← 无信号
     "BEGIN INSERT INTO t VALUES(1); END;",         // 10
   ].join("\n")
@@ -59,24 +60,8 @@ beforeAll(() => {
     }), "utf-8")
   }
 
-  // analysis-packages/PKG_A.json（cursors / exceptionHandlers）
-  mkdirSync(join(dir, "analysis-packages"), { recursive: true })
-  writeFileSync(join(dir, "analysis-packages", "PKG_A.json"), JSON.stringify({
-    packageName: "PKG_A",
-    subprograms: [
-      { name: "get_item", cursors: [{ name: "c", query: "SELECT * FROM t", fetchMode: "implicit" }], exceptionHandlers: [] },
-      { name: "update_status", cursors: [], exceptionHandlers: [{ name: "OTHERS", actions: ["NULL"] }] }, // → #5
-      { name: "create_order", cursors: [], exceptionHandlers: [] },
-      { name: "simple_crud", cursors: [], exceptionHandlers: [] },
-    ],
-  }))
-
-  // plan.json（manualReviewList：create_order → #1 logic-equivalence；complexity 包级已 low）
-  writeFileSync(join(dir, "plan.json"), JSON.stringify({
-    targetProject: { groupId: "com.x", artifactId: "app", packageBase: "com.x", javaVersion: "1.8", springBootVersion: "2.7" },
-    packageMappings: [{ oraclePackage: "PKG_A", javaPackage: "com.x", mapperInterface: "FooMapper", accessIntf: "FooAccessIntf", accessImpl: "FooAccessImpl", processor: "FooProcessor", aggregate: "FooAggregate", builder: "FooBuilder", validator: "FooValidator" }],
-    rules: {}, typeMappings: {}, manualReviewList: [{ procedure: "create_order" }], conventions: "",
-  }))
+  // analysis-packages 已砍（analyze 阶段删除），review-focus 不再读 analysis。
+  // plan.json：manualReviewList 已去（#1 只靠 complexity），review-focus 不再读 plan，此处不写。
 
   // translations/PKG_A/translation.json（subprogramMethods → Java 锚点）
   mkdirSync(join(dir, "translations", "PKG_A"), { recursive: true })
@@ -120,10 +105,10 @@ describe("buildReviewFocus 信号选点", () => {
     expect(s).toContain("#5 exception-mapping")
   })
 
-  it("create_order 入选：#1 logic-equivalence(complexity high)", () => {
+  it("create_order 入选：#6 transaction-boundary(AUTONOMOUS_TRANSACTION)", () => {
     const s = block()
     expect(s).toContain("PKG_A.create_order")
-    expect(s).toContain("#1 logic-equivalence")
+    expect(s).toContain("#6 transaction-boundary")
   })
 
   it("simple_crud 无信号 → 不在聚焦点（但出现在跳过统计）", () => {

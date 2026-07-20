@@ -19,7 +19,7 @@
 
 - ⛔ 完整任务已在本卡系统提示中。禁止 Read 任何 `.workOrder.md` / `dispatch-logs/`。
 - ⛔ 只处理本分片 targetUnits，禁止越界。
-- ⛔ 源码只读 `shard-inputs/{pkg}/{ref}/source.sql` + `analysis-slice.json`，禁止 read 整包 body/header。
+- ⛔ 源码只读 `shard-inputs/{pkg}/{ref}/source.sql`，禁止 read 整包 body/header。
 - ⛔ 跨包/同包跨单元调用签名查下方「依赖签名」预注入块，禁止 read `translations/`。
 
 ## Runtime Context + 本 unit 数据
