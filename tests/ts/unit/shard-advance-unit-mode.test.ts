@@ -104,7 +104,7 @@ describe("engine.advance 分片推进 — unitMode 字段", () => {
       completedShards: [],
     }
     const entry = engine.findCurrentEntry(runAtTranslate)!
-    entry.incrementalContext = { targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 2, currentSubStage: "compile", currentBatch: 1, totalBatches: 1 }
+    entry.incrementalContext = { targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 2, currentSubStage: "fsd", currentBatch: 1, totalBatches: 1 }
     engine.persist(runAtTranslate)
 
     // 写 shard 0 的 per-unit translation（G1-unit 要求 status=completed）

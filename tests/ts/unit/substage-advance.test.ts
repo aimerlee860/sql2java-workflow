@@ -69,9 +69,9 @@ describe("A-2 sub-stage 推进短路", () => {
     }
     engine.persist(run)
 
-    // 中间 sub-stage 推进：skeleton → translate-core → test-gen → static-check → compile
-    // 全程不写 per-unit JSON，短路应放行（不跑 G1-unit）
-    const expected = ["translate-core", "test-gen", "static-check", "compile"]
+    // 中间 sub-stage 推进：skeleton → translate-core → test-gen → static-check → compile → fsd
+    // 全程不写 per-unit JSON，短路应放行（不跑 G1-unit）。fsd 是最后 sub-stage，循环停在 fsd 不调其 advance。
+    const expected = ["translate-core", "test-gen", "static-check", "compile", "fsd"]
     for (const next of expected) {
       const adv = engine.advance(runId, { result: "passed" })
       expect(adv.rejected, `推进到 ${next} 不应拒绝: ${adv.rejectionReason}`).toBe(false)
@@ -81,8 +81,8 @@ describe("A-2 sub-stage 推进短路", () => {
     }
   })
 
-  it("最后 sub-stage(compile) advance 走 G1-unit：无 per-unit JSON 拒绝，写 completed 通过", () => {
-    const rid = "test-substage-compile"
+  it("最后 sub-stage(fsd) advance 走 G1-unit：partial 拒绝，completed 通过", () => {
+    const rid = "test-substage-fsd"
     const artifactsDir = join(dir, rid)
     mkdirSync(artifactsDir, { recursive: true })
     cpSync(join(dir, runId), artifactsDir, { recursive: true })
@@ -95,11 +95,11 @@ describe("A-2 sub-stage 推进短路", () => {
     const entry = engine.findCurrentEntry(run)!
     entry.incrementalContext = {
       targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 1,
-      currentSubStage: "compile", currentBatch: 1, totalBatches: 1,
+      currentSubStage: "fsd", currentBatch: 1, totalBatches: 1,
     }
     engine.persist(run)
 
-    // compile 是最后 sub-stage → 不短路 → 走 G1-unit。写 status=partial per-unit JSON → 拒绝
+    // fsd 是最后 sub-stage → 不短路 → 走 G1-unit。写 status=partial per-unit JSON → 拒绝
     mkdirSync(join(artifactsDir, "translations", "CORE_PKG"), { recursive: true })
     writeFileSync(join(artifactsDir, "translations", "CORE_PKG", "get_item.json"), JSON.stringify({
       unitRefName: "get_item", packageName: "CORE_PKG", status: "partial",
@@ -124,7 +124,7 @@ describe("A-2 sub-stage 推进短路", () => {
     if (adv2.rejected && (adv2 as any).warningPending) {
       adv2 = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
     }
-    expect(adv2.rejected, `compile 通过应推进: ${adv2.rejectionReason}`).toBe(false)
+    expect(adv2.rejected, `fsd 通过应推进: ${adv2.rejectionReason}`).toBe(false)
     // 1 shard 完成 → 阶段推进到 dedup
     expect(adv2.run.currentPhase).toBe("dedup")
   })

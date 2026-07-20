@@ -54,16 +54,17 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "translate",
-      description: "PL/SQL → Java/MyBatis 逐包翻译（A-2：单 unit 内 skeleton → translate-core → test-gen → static-check → compile 五 sub-stage 串行）",
+      description: "PL/SQL → Java/MyBatis 逐包翻译（A-2：单 unit 内 skeleton → translate-core → test-gen → static-check → compile → fsd 六 sub-stage 串行）",
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
       needsCrossSchemaValidation: true,
       maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "edit", "workflow"],
-      // A-2：translate 拆 5 sub-stage，dispatch 按 currentSubStage 路由对应 agent；
-      // advance 在 sub-stage 间空推进（不跑校验），仅 compile 完成跑 G1-unit + crossSchema + shard advance。
+      // A-2：translate 拆 6 sub-stage，dispatch 按 currentSubStage 路由对应 agent；
+      // advance 在 sub-stage 间空推进（不跑校验），仅 fsd 完成跑 G1-unit + crossSchema + shard advance。
       // 1 unit = 1 shard（dispatch 强制 maxUnitsPerShard=1），sub-stage 天然 per-unit。
+      // fsd（compile 后）模板填空生成 FSD 说明书，孤立产出（translate UPSTREAM 不含 _FSD，translate-core 不读 FSD）。
       // fix 阶段复用 translator.md（不带 subStages），仍一次性 prompt 修复。
       subStages: [
         { name: "skeleton",       agentFile: "agent/translate-skeleton.md" },
@@ -71,6 +72,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
         { name: "test-gen",       agentFile: "agent/translate-test.md" },
         { name: "static-check",   agentFile: "agent/translate-lint.md" },
         { name: "compile",        agentFile: "agent/translate-compile.md" },
+        { name: "fsd",            agentFile: "agent/translate-fsd.md" },
       ],
     },
     {
@@ -157,8 +159,9 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   // 的高风险项来自 analysis-packages.translationNotes，不依赖 FSD。
   plan: [..._INV_BASE, ..._ANALYSIS],
   scaffold: [..._PLAN, ..._INV_BASE],
-  // translate：fsd/*/*.md 会在分片模式下被 narrowUpstreamForShard 收窄到 fsd/{pkg}/*.md（本包 FSD）。
-  translate: [..._INV_BASE, ..._PLAN, ..._ANALYSIS, ..._SCAFFOLD, ..._FSD],
+  // translate：FSD 现由 translate 内 fsd sub-stage 产（compile 后），孤立产出——translate UPSTREAM 不含 _FSD，
+  // translate-core 不读 FSD（先验证 FSD 生成质量再考虑接入）。fsd sub-stage 读 source.sql + decisions 自产 FSD。
+  translate: [..._INV_BASE, ..._PLAN, ..._ANALYSIS, ..._SCAFFOLD],
   dedup: [..._PLAN, ..._SCAFFOLD, ..._INV_BASE, ..._ANALYSIS, ..._TRANSLATIONS, "dedup-duplicates.json"],
   // TODO (F9): translations/*/translation.json 在 dedup/review/verify 三阶段重复读取，
   // artifactCache 每次 advance 清空导致无法跨阶段缓存。考虑支持只读 artifact 的跨阶段缓存。
