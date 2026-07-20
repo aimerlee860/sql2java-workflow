@@ -27,7 +27,7 @@ import {
 import { scanSource, scanSourceLazy } from "../workflow/plsql-scanner"
 import type { InventoryIndex } from "../workflow/plsql-scanner"
 import { refNamesForPackage, pkgOf, refOf } from "../workflow/refname"
-import { parseInventoryPackage, parseAnalysisPackage, type InventoryPackageParsed } from "../workflow/package-parser"
+import { parseInventoryPackage, type InventoryPackageParsed } from "../workflow/package-parser"
 import { buildInventoryFromIndex } from "../workflow/inventory-builder"
 import { buildDependencyGraphFromIndex } from "../workflow/analysis-builder"
 import { buildDependencyGraph } from "../workflow/dependency-graph"
@@ -2305,36 +2305,7 @@ function autoFixStructuralIssues(run: WorkflowRun): {
     }
   }
 
-  // 5. analyze：PROCEDURE 级 per-unit 文件（analysis-packages/{pkg}/{ref}.json，UnitAnalysisSchema）
-  //    + 包级回退聚合（analysis-packages/{pkg}.json，AnalysisPackageSchema）。两者都扫，覆盖 unit 模式与
-  //    旧 run 包级回退；per-unit 文件在 {pkg}/ 子目录，须递归子目录 strip（顶层 readdirSync 不递归）。
-  if (phase === "analyze") {
-    const anaPkgDir = join(artifactsDir, "analysis-packages")
-    if (existsSync(anaPkgDir)) {
-      const unitSchema = getPerUnitSchema("analyze") // UnitAnalysisSchema
-      const aggSchema = getAnalysisPackageSchema()
-      try {
-        for (const entry of readdirSync(anaPkgDir, { withFileTypes: true })) {
-          if (entry.isFile() && entry.name.endsWith(".json")) {
-            // 包级回退聚合 analysis-packages/{pkg}.json
-            const filePath = join(anaPkgDir, entry.name)
-            if (stripNullsAndRewrite(filePath, aggSchema)) {
-              fixedFiles.push(`analysis-packages/${entry.name}`)
-            }
-          } else if (entry.isDirectory()) {
-            // unit 模式 per-unit analysis-packages/{pkg}/{ref}.json
-            const subDir = join(anaPkgDir, entry.name)
-            for (const f of readdirSync(subDir).filter(f => f.endsWith(".json"))) {
-              const filePath = join(subDir, f)
-              if (stripNullsAndRewrite(filePath, unitSchema ?? undefined)) {
-                fixedFiles.push(`analysis-packages/${entry.name}/${f}`)
-              }
-            }
-          }
-        }
-      } catch { /* ignore */ }
-    }
-  }
+  // analyze 阶段已砍，analysis-packages strip 块删除。
 
   return {
     fixed: fixedFiles.length > 0,
@@ -2936,15 +2907,7 @@ export function generateUnitSlices(
     return parsed
   }
 
-  // analysis-packages/{pkg}.json 聚合缓存：pkg → subprograms[]（parseAnalysisPackage）
-  const anaCache = new Map<string, any[] | null>()
-  function subprogramsForPkg(pkg: string): any[] | null {
-    if (anaCache.has(pkg)) return anaCache.get(pkg) ?? null
-    const parsed = parseAnalysisPackage(artifactsDir, pkg)
-    const subs = parsed?.subprograms ?? null
-    anaCache.set(pkg, subs)
-    return subs
-  }
+  // analysis-packages 聚合缓存已删（analyze 砍后不再产 analysis-slice，subprogramsForPkg 死代码移除）。
 
   // 子程序 → 切片友好的 proc 条目（保留旧字段名 lineRange/bodyFile，参数用 parameters）
   function procEntry(sub: any): any | null {
