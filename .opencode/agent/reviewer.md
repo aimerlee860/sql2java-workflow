@@ -107,7 +107,6 @@ review 是**项目级单次审核**（无分片）。当 `incrementalContext.tar
   - `${artifactsDir}/plan.json` — 映射规则和编码约定
   - `${artifactsDir}/scaffold.json` — 项目结构
   - `${artifactsDir}/packages/{pkg}.json` — 逐包 inventory + complexity（依赖图由引擎按需推导，不落盘）
-  - `${artifactsDir}/analysis-packages/{pkg}.json` — 逐包子程序结构和翻译注意事项
   - `${artifactsDir}/translations/*/translation.json` — 翻译记录
 - **Java 文件**：Runtime Context 中 `projectRoot` 指定的目录下的 Java 代码（使用 `read` 工具读取，路径为 `{projectRoot}/src/...`）
 - **源码文件**：原始 PL/SQL 文件（对照审查）
@@ -138,7 +137,7 @@ review 是**项目级单次审核**（无分片）。当 `incrementalContext.tar
 
 对每个待审查的包：
 
-1. **读取数据**：读取该包的 translation.json、`analysis-packages/{package}.json` 中对应的子程序结构、原始 PL/SQL 源码
+1. **读取数据**：读取该包的 translation.json、原始 PL/SQL 源码（对照子程序结构直接读源码理解）
 2. **聚焦语义审查（按 Step B 聚焦清单）**：workOrder 里若注入了 `## Step B 聚焦语义审查清单`，**只审清单列出的过程/点**——这些是有信号（高风险/游标/异常/出参/NVL/AUTONOMOUS）的过程。按清单给每个聚焦点的 PL/SQL 源码段（引擎已按行范围切好注入 workOrder）+ Java 方法锚点，对照审其触发的语义类别（#1-#9）+ 工具未覆盖的 #13 OOP / #14 注释 / #21 DDD 分层职责。
    - **无信号的过程跳过语义审**（清单末尾会注明跳过数）——它们靠 Step A 静态扫描兜底，不要逐个全审，省 LLM。
    - 若 workOrder **未注入**聚焦清单（老 run / 无信号 / 无聚焦点）：回退全量逐子程序语义审 #1-#9 + #13/#14。

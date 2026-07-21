@@ -30,18 +30,16 @@ describe("narrowUpstreamForShard", () => {
     expect(result).not.toContain("packages/PKG_C.json")
   })
 
-  it("translate: packages + analysis-packages + fsd 都收窄到本分片包", () => {
+  it("translate: packages + fsd 都收窄到本分片包", () => {
     const upstream = [
       "inventory.json", "packages/*.json", "subprograms/*.json", "tables/*.json",
-      "plan.json", "analysis-packages/*.json", "scaffold.json",
+      "plan.json", "scaffold.json",
       "fsd/*/*.md",
     ]
     const result = narrowUpstreamForShard(upstream, "translate", ["PKG_A"], [])
     expect(result).toContain("packages/PKG_A.json")
-    expect(result).toContain("analysis-packages/PKG_A.json")
     expect(result).toContain("fsd/PKG_A/*.md")
     expect(result).not.toContain("packages/*.json")
-    expect(result).not.toContain("analysis-packages/*.json")
     expect(result).not.toContain("fsd/*/*.md")
     // 全局只读 artifact 保留
     expect(result).toContain("plan.json")
@@ -49,24 +47,21 @@ describe("narrowUpstreamForShard", () => {
   })
 
   it("translate: 追加已完成分片的 translation.json（跨包调用依赖）", () => {
-    const upstream = ["packages/*.json", "subprograms/*.json", "analysis-packages/*.json", "plan.json"]
+    const upstream = ["packages/*.json", "subprograms/*.json", "plan.json"]
     const result = narrowUpstreamForShard(upstream, "translate", ["PKG_C"], ["PKG_A", "PKG_B"])
     expect(result).toContain("translations/PKG_A/translation.json")
     expect(result).toContain("translations/PKG_B/translation.json")
     // 本分片包的 per-package 收窄
     expect(result).toContain("packages/PKG_C.json")
-    expect(result).toContain("analysis-packages/PKG_C.json")
     // 不收窄到已完成分片包的 per-package（那些用 translation.json 即可）
     expect(result).not.toContain("packages/PKG_A.json")
   })
 
-  it("review: analysis-packages/*.json 收窄到本分片包，translations/* 收窄到本分片包（不展开已完成分片）", () => {
+  it("review: translations/* 收窄到本分片包（不展开已完成分片）", () => {
     // review 只审本分片包翻译，translations/* 收窄到 targetPkgs 而非 completedPkgs，
     // 避免第一分片 completedPkgs=[] 时 glob 保留导致 worker 全审所有包。
-    const upstream = ["plan.json", "scaffold.json", "analysis-packages/*.json", "dedup.json", "translations/*/translation.json"]
+    const upstream = ["plan.json", "scaffold.json", "dedup.json", "translations/*/translation.json"]
     const result = narrowUpstreamForShard(upstream, "review", ["PKG_B"], ["PKG_A"])
-    expect(result).toContain("analysis-packages/PKG_B.json")
-    expect(result).not.toContain("analysis-packages/*.json")
     expect(result).toContain("translations/PKG_B/translation.json")
     expect(result).not.toContain("translations/PKG_A/translation.json")
     expect(result).not.toContain("translations/*/translation.json")
@@ -104,9 +99,9 @@ describe("narrowUpstreamForShard — translate PROCEDURE 级（unit 模式）", 
     const result = narrowUpstreamForShard(baseUpstream, "translate", [], [], {
       targetUnits: ["PKG_A.create_order", "PKG_A.cancel_order"],
     })
-    // per-unit 切片（source.sql + analysis-slice.json + meta.json）
+    // per-unit 切片（source.sql + meta.json；analyze 砍后不再产 analysis-slice）
     expect(result).toContain("shard-inputs/PKG_A/create_order/source.sql")
-    expect(result).toContain("shard-inputs/PKG_A/create_order/analysis-slice.json")
+    expect(result).toContain("shard-inputs/PKG_A/create_order/meta.json")
     expect(result).toContain("shard-inputs/PKG_A/cancel_order/source.sql")
     // 根 FSD
     expect(result).toContain("fsd/PKG_A/create_order.md")
@@ -148,7 +143,8 @@ describe("narrowUpstreamForShard — translate PROCEDURE 级（unit 模式）", 
   })
 })
 
-describe("narrowUpstreamForShard — analyze PROCEDURE 级（unit 模式，Phase 1 切片）", () => {
+describe.skip("narrowUpstreamForShard — analyze PROCEDURE 级（unit 模式，Phase 1 切片）", () => {
+  // analyze phase 已砍（inventory→plan 直连），unit 模式切片路径不再走 analyze；保留用例待成套删。
   const baseUpstream = ["inventory.json", "packages/*.json", "subprograms/*.json", "tables/*.json"]
 
   it("targetUnits → packages/*.json 替换为 per-unit 切片文件", () => {

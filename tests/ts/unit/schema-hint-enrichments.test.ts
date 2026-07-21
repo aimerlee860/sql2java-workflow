@@ -145,7 +145,6 @@ describe("NON_ZOD_VALIDATION_RULES 覆盖性", () => {
     }
     // 应包含有额外校验的阶段
     expect(coveredPhases).toContain("inventory")
-    expect(coveredPhases).toContain("analyze")
     expect(coveredPhases).toContain("scaffold")
     expect(coveredPhases).toContain("translate")
     expect(coveredPhases).toContain("verify")
@@ -165,7 +164,7 @@ describe("NON_ZOD_VALIDATION_RULES 覆盖性", () => {
 describe("COMMON_PITFALLS 一致性", () => {
   /** 所有有 Zod schema 的 phase（应有 pitfall 提示） */
   const ALL_SCHEMA_PHASES = [
-    "inventory", "analyze", "plan", "scaffold",
+    "inventory", "plan", "scaffold",
     "translate", "review", "verify", "dedup", "fix",
   ]
 
@@ -210,13 +209,6 @@ describe("COMMON_PITFALLS 一致性", () => {
     expect(pitfalls).toBeDefined()
     const hasTrigger = pitfalls!.some(p => p.includes("timing") || p.includes("events"))
     expect(hasTrigger, "inventory pitfall 应包含 trigger 枚举提示").toBe(true)
-  })
-
-  it("analyze 阶段包含 translationNotes 类型提示", () => {
-    const pitfalls = COMMON_PITFALLS["analyze"]
-    expect(pitfalls).toBeDefined()
-    const hasTranslationNotes = pitfalls!.some(p => p.includes("translationNotes") && p.includes("string[]"))
-    expect(hasTranslationNotes, "analyze pitfall 应包含 translationNotes string[] 类型提示").toBe(true)
   })
 
   it("review 阶段包含 passed/mustFix 一致性提示", () => {

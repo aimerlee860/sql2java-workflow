@@ -22,7 +22,7 @@ describe("enhanceRejection", () => {
 
   it("每个已知阶段的引导语都包含关键要素", () => {
     const phases = Object.keys(PHASE_REJECTION_GUIDANCE)
-    expect(phases.length).toBeGreaterThanOrEqual(9) // 覆盖所有阶段（inventory-index 已不再落盘，引导语随之移除）
+    expect(phases.length).toBeGreaterThanOrEqual(8) // 覆盖所有阶段（analyze 砍后 8 阶段）
 
     for (const phase of phases) {
       const guidance = PHASE_REJECTION_GUIDANCE[phase]
@@ -55,7 +55,6 @@ describe("enhanceRejection", () => {
   it("各阶段引导语包含该阶段特有的执行动作词", () => {
     const phaseActionWords: Record<string, string> = {
       "inventory": "扫描",
-      "analyze": "分析",
       "plan": "规划",
       "scaffold": "生成",
       "translate": "翻译",

@@ -68,14 +68,6 @@ export const NON_ZOD_VALIDATION_RULES: { phases: string[]; message: string }[] =
     message: "inventory.json 的 packageNames 必须覆盖 packages/ 下所有包文件（含 header-only 包：只有 constants/exceptions/variables/types 而没有 procedures/functions 的包，bodyPath 为 null）",
   },
   {
-    phases: ["analyze"],
-    message: "analysis-packages/{PKG}.json: packageName 必须与文件名一致（大小写不敏感）",
-  },
-  {
-    phases: ["analyze"],
-    message: "依赖图（按需从 subprograms.directCalls 推导）的 packageNames 必须与 inventory 包名一致",
-  },
-  {
     phases: ["scaffold"],
     message: "scaffold.json 的 projectRoot 必须是 Runtime Context / workOrder 注入的 projectRoot 值（绝对路径 generated/{artifactId}，原样使用，勿自行编造）",
   },
@@ -138,10 +130,6 @@ export const CROSS_SCHEMA_HINTS: Record<string, string[]> = {
     "callGraph 的 key/value 必须为 PKG.refName 格式；refName 须落在该包 subprograms 推导的合法集合内（非重载=裸名，重载={name}__序号，大小写不敏感计数重载）",
     "translationOrder 必须覆盖所有包",
   ],
-  analyze: [
-    "依赖图（按需推导）的 packageNames 必须与 inventory 包名一致（大小写不敏感）",
-    "callGraph 的 key 必须为 PKG.refName 格式；重载子程序用 {name}__序号",
-  ],
   plan: [
     "plan.packageMappings 必须覆盖所有 inventory 包的 oraclePackage",
   ],
@@ -173,14 +161,6 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'triggers.level 自动 normalize 为小写：任意大小写均可通过',
     'triggers.events 每个元素自动 normalize 为小写：任意大小写均可通过',
     'packages/{PKG}.json 的 procedures/functions 仅为名字数组；子程序详情（parameters/bodyLocation/directCalls）在 subprograms/{PKG.METHOD}.json',
-    'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
-  ],
-  analyze: [
-    'riskLevel 自动 normalize 为小写：任意大小写均可通过',
-    'fetchMode 推荐大写："BULK" / "ONE_BY_ONE" / "FOR_UPDATE" / "OTHER"',
-    'callGraph key 格式为 PKG.refName；重载子程序用 {name}__序号（如 CALC__1），不能用裸名',
-    'block.type 推荐为以下之一（小写）："loop" / "cursor" / "if-else" / "exception-block" / "sql-statement" / "assignment" / "call"（不限死，但推荐使用这些值）',
-    'subprograms[].translationNotes 是 string[]（每条注意事项一个元素），不是单个字符串——如 ["注意空值处理", "循环边界需验证"]',
     'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
   plan: [

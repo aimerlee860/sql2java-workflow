@@ -228,7 +228,6 @@ function buildEnrichments(phase: string): string {
 /** 阶段中文描述映射 */
 const PHASE_DESCRIPTIONS: Record<string, string> = {
   inventory: "源码扫描编目",
-  analyze: "依赖分析 + 子程序结构解析 + FSD 生成",
   plan: "Java 架构规划",
   scaffold: "Spring Boot 项目骨架生成",
   translate: "PL/SQL → Java/MyBatis 逐包翻译",
@@ -272,10 +271,8 @@ export function renderSchemaHint(phase: string | null | undefined): string {
   parts.push("")
 
   // ── 顶层 schema ──
-  // analyze 阶段跳过：dependency-graph.json 由 inventory 阶段 generateDependencyGraph 代码产出（非 worker 手写），
-  // 其格式由 inventory 边界校验 + CROSS_SCHEMA_HINTS.analyze 文字覆盖，不在此渲染。
   const topLevelSchema = getSchemaForPhase(phase)
-  if (topLevelSchema && phase !== "analyze") {
+  if (topLevelSchema) {
     const filename = getArtifactFilename(phase)
     parts.push(`### ${filename}.json`)
     parts.push(renderZodSchema(topLevelSchema))
@@ -292,8 +289,7 @@ export function renderSchemaHint(phase: string | null | undefined): string {
   const perUnitSchema = (phase === "translate") ? getPerUnitSchema(phase) : null
   const perPackageSchema = perUnitSchema ? null : getPerPackageSchema(phase)
   if (perUnitSchema) {
-    const unitDir = phase === "analyze" ? "analysis-packages" : "translations"
-    parts.push(`### Per-Unit: ${unitDir}/{pkg}/{unitRef}.json`)
+    parts.push(`### Per-Unit: translations/{pkg}/{unitRef}.json`)
     parts.push(renderZodSchema(perUnitSchema))
     parts.push("")
   } else if (perPackageSchema) {

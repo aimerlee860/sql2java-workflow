@@ -45,11 +45,10 @@ describe("PHASE_PREREQUISITES OR-group（fix 的 summary 二选一）", () => {
 })
 
 describe("PHASE_PREREQUISITES 关键前置项", () => {
-  it("review 依赖 plan + scaffold + analysis", () => {
+  it("review 依赖 plan + scaffold", () => {
     const review = PHASE_PREREQUISITES.review!
     expect(review).toContain("plan.json")
     expect(review).toContain("scaffold.json")
-    expect(review).toContain("analysis-packages")
   })
 
   it("verify 依赖 plan + scaffold", () => {
@@ -58,12 +57,11 @@ describe("PHASE_PREREQUISITES 关键前置项", () => {
     expect(verify).toContain("scaffold.json")
   })
 
-  it("translate 依赖 inventory + analysis + plan + scaffold", () => {
+  it("translate 依赖 inventory + plan + scaffold", () => {
     const translate = PHASE_PREREQUISITES.translate!
     expect(translate).toContain("inventory.json")
     expect(translate).toContain("packages")
     expect(translate).toContain("subprograms")
-    expect(translate).toContain("analysis-packages")
     expect(translate).toContain("plan.json")
     expect(translate).toContain("scaffold.json")
   })

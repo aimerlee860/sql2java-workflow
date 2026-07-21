@@ -107,9 +107,11 @@ export interface PhaseConfig {
   tools: string[]                               // 允许的工具列表
   description?: string                          // 阶段中文描述，用于输出 banner
   watchdog?: { workerTimeoutMs?: number }       // watchdog worker 超时覆盖（重型阶段如 verify 放宽）
-  /** phase 内子阶段序列。配置后 dispatch 按 currentSubStage 路由对应 agentFile，
-   *  advance 在 sub-stage 间推进（中间 sub-stage 空推进不跑校验，仅最后 sub-stage 跑
-   *  validateQualityGates + crossSchema + shard advance）。未配置则 phase 仍为单 agent 一次性执行。 */
+  /** phase 内子阶段序列（translate 主从架构）。配置后：
+   *   - getSubagentNames 展平 subStages，使 slave agent 被识别为 worker（禁调 workflow 编排 action）；
+   *   - translator master 经 workflow `subdispatch` action 按 subStage 名渲染对应 slave workOrder，
+   *     再用 Task 工具派 slave（引擎不再逐 sub-stage 推进，advance 直走校验 + shard advance）。
+   *   未配置则 phase 仍为单 agent 一次性执行。 */
   subStages?: SubStageConfig[]
 }
 
@@ -149,14 +151,13 @@ export interface PhaseHistoryEntry {
   retryCount: number                            // 每次 retry 递增，与 PhaseConfig.maxRetries 比较
   branchedFrom?: string                         // fix 记录触发阶段；fix 回来的 entry 记录 "fix"
   incrementalContext?: {
-    targetPackages?: string[]                   // 增量模式：只处理这些包（analyze/review 包级分片）
-    targetUnits?: string[]                      // translate/analyze PROCEDURE 级分片：只处理这些 unit id（PKG.refName）
+    targetPackages?: string[]                   // 增量模式：只处理这些包（review 包级分片）
+    targetUnits?: string[]                      // translate PROCEDURE 级分片：只处理这些 unit id（PKG.refName）
     shardIndex?: number                         // 分片模式：当前分片序号（0-based）
     totalShards?: number                        // 分片模式：总分片数
-    /** A-2：phase 内当前 sub-stage 名（PhaseConfig.subStages[].name）。
-     *  dispatch 按此路由 agentFile；advance 在 sub-stage 间推进。 */
+    /** 旧 A-2 字段（sub-stage 由引擎推进时使用）。现 sub-stage 改由 translator master 子 agent
+     *  内部经 Task 工具调度，引擎不再写入；保留 optional 仅为旧 run.json resume 兼容。 */
     currentSubStage?: string
-    /** 二期预留：超长过程 translate-core 按 TODO 批次切多分片。首期恒 1。 */
     currentBatch?: number
     totalBatches?: number
     previousFindings?: Array<{                  // 增量 review：上次 review 的 mustFix，供 reviewer 核对是否已修复
@@ -174,7 +175,7 @@ export interface ShardPlan {
   shards: string[][]                            // shards[0] = ["CONST_PKG"]（包级）或 ["PKG.p1"]（translate unit 级）
   completedShards: number[]                     // 已完成的分片序号
   /** true = translate PROCEDURE 级分片（shards 元素是 unit id `PKG.refName`，dispatch 注入 targetUnits）；
-   *  false/缺省 = 包级分片（analyze/review，或无 procedureOrder 回退的 translate，注入 targetPackages）。 */
+   *  false/缺省 = 包级分片（review，或无 procedureOrder 回退的 translate，注入 targetPackages）。 */
   unitMode?: boolean
 }
 
@@ -216,7 +217,7 @@ const PhaseHistoryEntrySchema = z.object({
   retryCount: z.number(),
   branchedFrom: z.string().optional(),
   incrementalContext: z.object({
-    // 包级分片（review/包级回退）用 targetPackages；PROCEDURE 级分片（analyze/translate unit 模式）
+    // 包级分片（review/包级回退）用 targetPackages；PROCEDURE 级分片（translate unit 模式）
     // 用 targetUnits。二者择一，均 optional——unit 模式 entry 只含 targetUnits，包级只含 targetPackages。
     // 此前 targetPackages 误设为必填且无 targetUnits 字段，导致 unit 模式分片 run resume 时
     // loadFromDisk 校验失败（"targetPackages 字段缺失"）+ targetUnits 被当未知键剥离。feat/proc-entry-scope 暴露。
@@ -331,79 +332,9 @@ export class WorkflowEngine {
     // ── Step 2: 查找当前阶段配置 ──
     const currentPhaseConfig = def.phases.find(p => p.name === run.currentPhase)
 
-    // ── Step 2.5: sub-stage 推进短路（A-2） ──
-    // phase 配置了 subStages 时，中间 sub-stage 完成后直接推进到下一 sub-stage，
-    // 不跑 validateQualityGates / crossSchema / shard advance / transition。
-    // 仅最后一个 sub-stage 完成才走原有 Step 3a 起的全套校验 + 推进。
-    const subStages = currentPhaseConfig?.subStages
-    if (subStages && subStages.length > 0) {
-      const curSubName = currentEntry.incrementalContext?.currentSubStage
-      // currentSubStage 缺失 → 容错视为首个 sub-stage
-      let curIdx = curSubName ? subStages.findIndex(s => s.name === curSubName) : 0
-      if (curIdx < 0) curIdx = 0
-      const curStage = subStages[curIdx]
-      // 二期：repeatable sub-stage 批次未完 → 重复当前 sub-stage（currentBatch+1）。
-      // 首期 totalBatches 恒 1，此分支不触发。
-      const totalBatches = currentEntry.incrementalContext?.totalBatches ?? 1
-      const curBatch = currentEntry.incrementalContext?.currentBatch ?? 1
-      if (curStage?.repeatable && curBatch < totalBatches) {
-        currentEntry.status = "completed"
-        currentEntry.completedAt = now
-        run.updatedAt = now
-        run.phaseHistory.push({
-          phase: run.currentPhase!,
-          status: "in_progress",
-          startedAt: now,
-          retryCount: 0,
-          incrementalContext: {
-            ...currentEntry.incrementalContext,
-            currentSubStage: curStage.name,
-            currentBatch: curBatch + 1,
-          },
-        })
-        this.persist(run)
-        this.appendEvent(runId, "SUBSTAGE_ADVANCE", run.currentPhase!,
-          `sub-stage ${curStage.name} 批次 ${curBatch}/${totalBatches} 完成 → 批次 ${curBatch + 1}/${totalBatches}`)
-        return {
-          run,
-          nextPhase: currentPhaseConfig ?? null,
-          finished: false,
-          waitingForConfirmation: false,
-          rejected: false,
-        }
-      }
-      // 中间 sub-stage（非最后）→ 推进到下一 sub-stage
-      if (curIdx < subStages.length - 1) {
-        const nextStage = subStages[curIdx + 1]
-        currentEntry.status = "completed"
-        currentEntry.completedAt = now
-        run.updatedAt = now
-        run.phaseHistory.push({
-          phase: run.currentPhase!,
-          status: "in_progress",
-          startedAt: now,
-          retryCount: 0,
-          incrementalContext: {
-            ...currentEntry.incrementalContext,
-            currentSubStage: nextStage.name,
-            // 进入新 sub-stage 重置批次（二期 repeatable 由 skeleton 设 totalBatches）
-            currentBatch: 1,
-            totalBatches: 1,
-          },
-        })
-        this.persist(run)
-        this.appendEvent(runId, "SUBSTAGE_ADVANCE", run.currentPhase!,
-          `sub-stage ${curSubName ?? subStages[0].name} → ${nextStage.name}`)
-        return {
-          run,
-          nextPhase: currentPhaseConfig ?? null,
-          finished: false,
-          waitingForConfirmation: false,
-          rejected: false,
-        }
-      }
-      // 最后一个 sub-stage 完成 → 不短路，继续 Step 3a 起原有逻辑
-    }
+    // 注：translate sub-stage（skeleton→…→fsd）现由 translator master 子 agent 内部经 Task 工具
+    // 串行调度 6 个 slave，引擎不再逐 sub-stage 推进。advance 直走下方 Step 3a 起的全套校验 + shard advance。
+    // currentSubStage/currentBatch/totalBatches 字段保留 optional 仅为旧 run.json resume 兼容，不再写入。
 
     // ── Step 3a: 确定性数值质量门控 (L3) — 所有阶段 ──
     const qualityFindings = this.validateQualityGates(run, run.currentPhase!)
@@ -495,24 +426,18 @@ export class WorkflowEngine {
         run.updatedAt = now
 
         const nextShard = shardPlan.shards[nextShardIndex]
-        // unit 模式（analyze/translate PROCEDURE 级）shard 元素是 unit id `PKG.ref`，须写入 targetUnits
+        // unit 模式（translate PROCEDURE 级）shard 元素是 unit id `PKG.ref`，须写入 targetUnits
         // 而非 targetPackages——否则下游 narrowUpstreamForShard / generateUnitSlices / 写入边界因 targetUnits
         // 为空全部跳过，shard 1+ 退化为整包处理（硬隔离失效）。包级模式才用 targetPackages。
-        // A-2：若 phase 配了 subStages，新 unit 首个 entry 从首个 sub-stage 起步。
-        const ss0 = currentPhaseConfig?.subStages
+        // translate 的 sub-stage 由 translator master 子 agent 内部调度，新 entry 不再带 currentSubStage。
         const newEntry: PhaseHistoryEntry = {
           phase: run.currentPhase!,
           status: "in_progress",
           startedAt: now,
           retryCount: 0,
-          incrementalContext: {
-            ...(shardPlan.unitMode
-              ? { targetUnits: nextShard, shardIndex: nextShardIndex, totalShards }
-              : { targetPackages: nextShard, shardIndex: nextShardIndex, totalShards }),
-            ...(ss0 && ss0.length > 0
-              ? { currentSubStage: ss0[0].name, currentBatch: 1, totalBatches: 1 }
-              : {}),
-          },
+          incrementalContext: shardPlan.unitMode
+            ? { targetUnits: nextShard, shardIndex: nextShardIndex, totalShards }
+            : { targetPackages: nextShard, shardIndex: nextShardIndex, totalShards },
         }
         run.phaseHistory.push(newEntry)
         run.metadata.shardPlan = shardPlan
@@ -1079,6 +1004,21 @@ export class WorkflowEngine {
                 severity: "warning",
               })
             }
+            // sub-stage 产物完整性（warning，不阻断）：master 主从架构下 6 sub-stage 靠 master 自觉派 slave，
+            // 此处仅观测是否漏跑——lint.json（static-check）/ fsd {ref}.md（fsd sub-stage）缺失记 warning 放行。
+            // 不设 blocking：避免 advance 验收时因 master 偷懒跳过而反复重派卡死（lint 下游有 review 静态扫描兜底，fsd 是文档非正确性关键）。
+            if (!existsSync(join(artifactsDir, "translations", pkg, `${ref}.lint.json`))) {
+              findings.push({
+                message: `${pkg}.${ref}: translations/${pkg}/${ref}.lint.json 缺失——static-check sub-stage 可能未跑（master 漏派 slave）。lint 下游由 review 静态扫描兜底，已放行`,
+                severity: "warning",
+              })
+            }
+            if (!existsSync(join(artifactsDir, "fsd", pkg, `${ref}.md`))) {
+              findings.push({
+                message: `${pkg}.${ref}: fsd/${pkg}/${ref}.md 缺失——fsd sub-stage 可能未跑（master 漏派 slave）。FSD 为文档产物非正确性关键，已放行`,
+                severity: "warning",
+              })
+            }
           }
           break
         }
@@ -1337,17 +1277,14 @@ export class WorkflowEngine {
 
   /**
    * 按阶段决定分片所用的序列：review 拍平 SCC 组（每元素一层，真正一元素一分片）；
-   * analyze/translate 保留入参原貌（SCC 互依赖组共处同一分片）。
+   * translate 保留入参原貌（SCC 互依赖组共处同一分片）。
    *
-   * 入参语义随阶段而异：analyze/translate 传单元级 procedureOrder（`PKG.refName`，每 subprogram 独立成 unit）；
-   * review 传包级 translationOrder。三者都是 string[][] 拓扑层，本函数仅按阶段决定是否拍平，
+   * 入参语义随阶段而异：translate 传单元级 procedureOrder（`PKG.refName`，每 subprogram 独立成 unit）；
+   * review 传包级 translationOrder。两者都是 string[][] 拓扑层，本函数仅按阶段决定是否拍平，
    * 不关心元素是包名还是 unit id。
    *
-   * 为什么 analyze 与 translate **同策略**（保留 SCC）：analyze 的 per-unit FSD/结构虽独立产出、
-   * 原本可拆 SCC 换并行度，但让两阶段分片**完全一致**（同一 unit 在 analyze/translate 落到同一分片）
-   * 便于追踪、摊销小 unit 的 dispatch 开销；SCC 合并对 analyze 同样安全（只是少几路并行），translate
-   * 本就被迫合且更重，analyze 扛得住。分片只决定"一个 session 处理哪些 unit"，artifact 仍 per-unit
-   *（fsd/{pkg}/{ref}.md、analysis-packages/{pkg}/{ref}.json）。
+   * 为什么 translate 保留 SCC：SCC 互依赖组共处同一分片，分片只决定"一个 session 处理哪些 unit"，
+   * artifact 仍 per-unit（translations/{pkg}/{ref}.json、fsd/{pkg}/{ref}.md）。
    *
    * 为什么 review 仍拍平：review 是包级、每包审查独立，拆 SCC 包无副作用且并行度更高。
    */

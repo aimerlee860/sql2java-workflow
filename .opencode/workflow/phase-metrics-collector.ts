@@ -20,7 +20,6 @@ import { join } from "node:path"
 import { safeWriteFile } from "./cross-platform"
 import type { PhaseHistoryEntry, WorkflowRun } from "./engine-core"
 import { getLogger } from "./workflow-logger"
-import { buildDependencyGraph } from "./dependency-graph"
 
 // ── Type Definitions ──────────────────────────────────────────────────────────
 
@@ -85,11 +84,6 @@ interface PhaseBusinessData {
   sequenceCount?: number
   standaloneProcedureCount?: number
   totalProcedureCount?: number
-
-  // analyze
-  subprogramCount?: number
-  sccGroupCount?: number
-  fsdFileCount?: number
 
   // plan
   javaPackageCount?: number
@@ -215,21 +209,6 @@ function safeNumber(val: unknown): number {
 /** 可选数值转换（非 number 时返回 undefined，用于业务数据提取，避免缺失字段误报为 0） */
 function optionalNumber(val: unknown): number | undefined {
   return typeof val === "number" ? val : undefined
-}
-
-/** 递归统计目录下指定扩展名文件数 */
-function countFilesRecursive(dir: string, ext: string): number {
-  if (!existsSync(dir)) return 0
-  let count = 0
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      count += countFilesRecursive(full, ext)
-    } else if (entry.name.endsWith(ext)) {
-      count++
-    }
-  }
-  return count
 }
 
 /** 安全获取数组的 length */
@@ -401,9 +380,6 @@ function extractBusinessData(phase: string, artifactsDir: string): PhaseBusiness
     case "inventory":
       extractInventoryData(data, artifactsDir)
       break
-    case "analyze":
-      extractAnalyzeData(data, artifactsDir)
-      break
     case "plan":
       extractPlanData(data, artifactsDir)
       break
@@ -459,33 +435,6 @@ function extractInventoryData(data: PhaseBusinessData, dir: string): void {
     if (existsSync(subpDir)) {
       data.totalProcedureCount = readdirSync(subpDir).filter(f => f.endsWith(".json")).length
     }
-  } catch { /* skip */ }
-}
-
-function extractAnalyzeData(data: PhaseBusinessData, dir: string): void {
-  // 全局元数据：依赖图按需从 subprograms.directCalls 推导（dependency-graph.json 已删）
-  try {
-    const graph = buildDependencyGraph(dir)
-    data.sccGroupCount = graph.sccGroups.length
-  } catch { /* skip */ }
-
-  // 逐包子程序聚合
-  try {
-    const pkgDir = join(dir, "analysis-packages")
-    if (existsSync(pkgDir)) {
-      let total = 0
-      for (const f of readdirSync(pkgDir)) {
-        if (!f.endsWith(".json")) continue
-        const pkgJson = readJsonSafe(join(pkgDir, f))
-        if (pkgJson) total += safeArrayLen(pkgJson.subprograms)
-      }
-      data.subprogramCount = total
-    }
-  } catch { /* skip */ }
-
-  // FSD 文件数
-  try {
-    data.fsdFileCount = countFilesRecursive(join(dir, "fsd"), ".md")
   } catch { /* skip */ }
 }
 
@@ -870,11 +819,6 @@ function formatBusinessLines(phase: string, biz: PhaseBusinessData): string[] {
       fmt("序列:", biz.sequenceCount)
       fmt("独立子程序:", biz.standaloneProcedureCount)
       fmt("子程序总数:", biz.totalProcedureCount)
-      break
-    case "analyze":
-      fmt("子程序:", biz.subprogramCount)
-      fmt("SCC 分组:", biz.sccGroupCount)
-      fmt("FSD 文件:", biz.fsdFileCount)
       break
     case "plan":
       fmt("Java 包:", biz.javaPackageCount)

@@ -17,8 +17,6 @@ export const STRUCTURAL_FIX_GUIDANCE =
 export const PHASE_REJECTION_GUIDANCE: Record<string, string> = {
   "inventory":
     "⚠️ 此错误通常意味着 inventory 扫描不完整。请重新审视扫描过程，确保所有包的 procedures/types/variables 均被捕获，而非仅修补 JSON 字段。",
-  "analyze":
-    "⚠️ 此错误通常意味着分析不完整。请重新审视分析过程，确保每个包的子程序结构、调用图、依赖关系均被完整分析，而非仅修补 JSON 字段。",
   "plan":
     "⚠️ 此错误通常意味着规划不完整。请重新审视规划过程，确保所有包都有映射、类型映射和规则定义，而非仅修补 JSON 字段。",
   "scaffold":

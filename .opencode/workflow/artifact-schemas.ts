@@ -229,63 +229,6 @@ export const InventoryIndexSchema = z.object({
 }).passthrough()
 
 // ============================================================================
-// Analysis Schema（拆分为 Meta + Per-Package）
-// ============================================================================
-
-/** 子程序结构 — analyze 和 downstream agents 共用 */
-const SubprogramSchema = z.object({
-  name: z.string(),
-  blocks: z.array(z.object({
-    type: z.string(),
-    oracleLine: z.number(),
-    description: z.string(),
-    dependencies: z.array(z.string()),
-  })),
-  variables: z.array(z.object({
-    name: z.string(),
-    type: z.string(),
-    scope: z.string(),
-  })),
-  cursors: z.array(z.object({
-    name: z.string(),
-    query: z.string(),
-    fetchMode: z.string(),
-  })),
-  exceptionHandlers: z.array(z.object({
-    name: z.string(),
-    actions: z.array(z.string()),
-  })),
-  translationNotes: z.array(z.string()),
-})
-
-/** analysis-packages/{pkg}.json — 逐包子程序结构（聚合，由 engine mergeUnitAnalysis 产出） */
-export const AnalysisPackageSchema = z.object({
-  packageName: z.string(),
-  subprograms: z.array(SubprogramSchema),
-}).passthrough()
-
-/**
- * analysis-packages/{pkg}/{unitRef}.json — PROCEDURE 级 analyze 产物（per-unit）。
- *
- * analyze 下沉到 subprogram 级后，一个 unit = 一个 subprogram（PROCEDURE 或 FUNCTION，各自独立）。
- * agent 只写本 unit 的 per-procedure 文件（本 unit 根的 subprogram 结构）；engine 在每个 analyze
- * 分片 advance 后 merge 同包所有 per-unit 文件 → 聚合 `analysis-packages/{pkg}.json`
- * （AnalysisPackageSchema），下游 plan/review/translator 读聚合，形状不变。
- *
- * 与 [[translate-procedure-level]] 的 UnitTranslationSchema 同模式（per-unit + engine merge）。
- */
-export const UnitAnalysisSchema = z.object({
-  /** unit 根子程序的 refName（本 unit 唯一 subprogram），与文件名 {unitRef}.json 一致 */
-  unitRefName: z.string(),
-  packageName: z.string(),
-  /** 本单元子程序结构（本 unit 根），merge 后并入聚合 subprograms */
-  subprograms: z.array(SubprogramSchema),
-}).passthrough()
-
-//（旧 AnalysisSchema 已删：dependency-graph.json 落盘移除后无活跃消费者，仅残留旧字段定义。
-//  调用图/complexity 等改由 dependency-graph.ts 按需推导 + packages/{PKG}.json.complexity 承载。）
-
-// ============================================================================
 // Plan Schema
 // ============================================================================
 
@@ -924,15 +867,9 @@ export function getPerPackageSchema(phase: string): ZodType | null {
  */
 export function getPerUnitSchema(phase: string): ZodType | null {
   const schemaMap: Record<string, ZodType> = {
-    analyze: UnitAnalysisSchema,
     translate: UnitTranslationSchema,
   }
   return schemaMap[phase] ?? null
-}
-
-/** 查找 analysis per-package schema（analyze 阶段拆分校验用） */
-export function getAnalysisPackageSchema(): ZodType {
-  return AnalysisPackageSchema
 }
 
 /** 根据 summary 文件名查找 summary schema */

@@ -6,6 +6,8 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest"
+import { mkdirSync } from "node:fs"
+import { join } from "node:path"
 import { type CrossSchemaFinding } from "@workflow/engine-core"
 import { createEngineWithTempDir, writeArtifact } from "../helpers/engine-factory"
 
@@ -15,15 +17,15 @@ function writeInv(dir: string, packageNames: string[]) {
   writeArtifact(dir, RUN_ID, "inventory.json", {
     sourcePath: "src", packageNames, tableNames: [], triggers: [], views: [], sequences: [],
   })
+  // inventory advance 校验要求 subprograms/ + tables/ 目录存在（空包可为空目录）
+  mkdirSync(join(dir, RUN_ID, "subprograms"), { recursive: true })
+  mkdirSync(join(dir, RUN_ID, "tables"), { recursive: true })
 }
 function writePkg(dir: string, pkg: string) {
   writeArtifact(dir, RUN_ID, `packages/${pkg}.json`, {
     packageName: pkg, absolutePaths: [], headerPath: null, bodyPath: null,
     constants: [], variables: [], exceptions: [], types: [], functions: [], procedures: [], estimatedLoc: 0,
   })
-}
-function writeAnaPkg(dir: string, pkg: string) {
-  writeArtifact(dir, RUN_ID, `analysis-packages/${pkg}.json`, { packageName: pkg, subprograms: [] })
 }
 
 /** 基础 setup：inventory 含 CORE_PKG + EXTRA_PKG，packages/ 也含两包 */
@@ -196,14 +198,11 @@ describe("advance() — warning 自动放行", () => {
     ctx = createEngineWithTempDir()
     const engine = ctx.engine
     engine.start("sql2java", RUN_ID)
-    pushToPhase(engine, "analyze")
+    pushToPhase(engine, "inventory")
 
     // inventory 两包，packages/ 只 CORE_PKG（graph 缺 EXTRA_PKG）
     writeInv(ctx.dir, ["CORE_PKG", "EXTRA_PKG"])
     writePkg(ctx.dir, "CORE_PKG")
-    // analysis-packages 覆盖 inventory 全部包（analyze 边界校验需要）
-    writeAnaPkg(ctx.dir, "CORE_PKG")
-    writeAnaPkg(ctx.dir, "EXTRA_PKG")
 
     const result = engine.advance(RUN_ID)
     expect(result.rejected).toBe(false)
@@ -215,13 +214,12 @@ describe("advance() — warning 自动放行", () => {
     ctx = createEngineWithTempDir()
     const engine = ctx.engine
     engine.start("sql2java", RUN_ID)
-    pushToPhase(engine, "analyze")
+    pushToPhase(engine, "inventory")
 
     // inventory 只 CORE_PKG，packages/ 有 CORE_PKG + GHOST_PKG（graph 多 GHOST_PKG）
     writeInv(ctx.dir, ["CORE_PKG"])
     writePkg(ctx.dir, "CORE_PKG")
     writePkg(ctx.dir, "GHOST_PKG")
-    writeAnaPkg(ctx.dir, "CORE_PKG")
 
     const result = engine.advance(RUN_ID)
     expect(result.rejected).toBe(false)
@@ -233,12 +231,11 @@ describe("advance() — warning 自动放行", () => {
     ctx = createEngineWithTempDir()
     const engine = ctx.engine
     engine.start("sql2java", RUN_ID)
-    pushToPhase(engine, "analyze")
+    pushToPhase(engine, "inventory")
 
     writeInv(ctx.dir, ["CORE_PKG"])
     writePkg(ctx.dir, "CORE_PKG")
     writePkg(ctx.dir, "GHOST_PKG")
-    writeAnaPkg(ctx.dir, "CORE_PKG")
 
     const result = engine.advance(RUN_ID, { acceptWarnings: true })
     expect(result.rejected).toBe(false)
@@ -255,7 +252,7 @@ describe("advance() — 混合场景", () => {
     ctx = createEngineWithTempDir()
     const engine = ctx.engine
     engine.start("sql2java", RUN_ID)
-    pushToPhase(engine, "analyze")
+    pushToPhase(engine, "inventory")
 
     // inventory 有 CORE_PKG + EXTRA_PKG，packages/ 有 CORE_PKG + GHOST_PKG
     // → EXTRA_PKG: 依赖图缺少包 = warning
@@ -263,8 +260,6 @@ describe("advance() — 混合场景", () => {
     writeInv(ctx.dir, ["CORE_PKG", "EXTRA_PKG"])
     writePkg(ctx.dir, "CORE_PKG")
     writePkg(ctx.dir, "GHOST_PKG")
-    writeAnaPkg(ctx.dir, "CORE_PKG")
-    writeAnaPkg(ctx.dir, "EXTRA_PKG")
 
     const result = engine.advance(RUN_ID)
     expect(result.rejected).toBe(false)

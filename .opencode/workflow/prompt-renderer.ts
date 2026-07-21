@@ -1,7 +1,7 @@
 /**
  * prompt-renderer.ts — worker 任务提示词模板渲染器
  *
- * 把 analyze/translate 的 worker 任务从「编排者 LLM 即兴拼凑」改为「.md 模板 + 引擎填变量」：
+ * 把 translate 的 worker 任务从「编排者 LLM 即兴拼凑」改为「.md 模板 + 引擎填变量」：
  * 模板（.opencode/workflow/prompts/{phase}-worker.md）是可 review 的静态骨架，引擎用本分片数据
  * 填充 {{占位符}}（含动态块：scopeBanner / 切片读取清单 / 依赖签名 / upstream / schemaHint /
  * rejectionError）。渲染产物 = workOrder，既落盘可追溯（dispatch-logs/），又注入 worker 系统提示
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url"
 
 const TEMPLATES_DIR = join(dirname(fileURLToPath(import.meta.url)), "prompts")
 
-/** 静态 subtask 触发器（analyze/translate 分片用）。读一次缓存——非运行时拼接，可 review。 */
+/** 静态 subtask 触发器（translate 分片用）。读一次缓存——非运行时拼接，可 review。 */
 let _subtaskTriggerCache: string | null = null
 export function getSubtaskTriggerPrompt(): string {
   if (_subtaskTriggerCache !== null) return _subtaskTriggerCache
@@ -30,7 +30,7 @@ export type WorkerPromptCtx = Record<string, string>
 
 /**
  * 渲染 worker 任务模板。
- * @param phase    "analyze" | "translate"（其他阶段无模板，抛错）
+ * @param phase    "translate"（其他阶段无模板，抛错；analyze 已砍）
  * @param ctx      占位符 → 值（含动态块字符串）
  * @param subStage A-2：phase 内 sub-stage 名。提供时选 `prompts/{phase}-{subStage}-worker.md`，
  *                 否则回退 `prompts/{phase}-worker.md`。

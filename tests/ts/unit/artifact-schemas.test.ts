@@ -6,7 +6,6 @@ import { describe, it, expect } from "vitest"
 import {
   InventoryIndexSchema,
   InventorySchema,
-  AnalysisPackageSchema,
   PlanSchema,
   ScaffoldSchema,
   TranslationSchema,
@@ -24,11 +23,10 @@ import {
   getPerPackageSchema,
   getSummarySchema,
   getArtifactFilename,
-  getAnalysisPackageSchema,
 } from "@workflow/artifact-schemas"
 import {
   makeInventoryIndex, makeInventory,
-  makePlan, makeScaffold, makeAnalysisPackage, makeTranslation,
+  makePlan, makeScaffold, makeTranslation,
   makeReviewSummary, makeVerifySummary, makeDedup, makeFixArtifact,
 } from "../helpers/artifact-factory"
 
@@ -51,21 +49,6 @@ describe("Schema 有效数据通过校验", () => {
       sequences: [],
     }
     expect(InventorySchema.safeParse(data).success).toBe(true)
-  })
-
-  it("AnalysisPackageSchema 通过", () => {
-    const data = {
-      packageName: "CORE_PKG",
-      subprograms: [{
-        name: "GET_ITEM",
-        blocks: [],
-        variables: [],
-        cursors: [],
-        exceptionHandlers: [],
-        translationNotes: ["Simple getter"],
-      }],
-    }
-    expect(AnalysisPackageSchema.safeParse(data).success).toBe(true)
   })
 
   it("PlanSchema 通过", () => {
@@ -263,9 +246,6 @@ describe("工厂默认产出符合 Schema", () => {
   })
   it("makeTranslation 默认值通过 TranslationSchema", () => {
     expect(TranslationSchema.safeParse(makeTranslation()).success).toBe(true)
-  })
-  it("makeAnalysisPackage 默认值通过 AnalysisPackageSchema", () => {
-    expect(AnalysisPackageSchema.safeParse(makeAnalysisPackage()).success).toBe(true)
   })
 })
 
@@ -491,12 +471,6 @@ describe("getSummarySchema", () => {
 
   it("非 summary 阶段返回 null", () => {
     expect(getSummarySchema("review")).toBeNull()
-  })
-})
-
-describe("getAnalysisPackageSchema", () => {
-  it("返回非 null schema", () => {
-    expect(getAnalysisPackageSchema()).not.toBeNull()
   })
 })
 

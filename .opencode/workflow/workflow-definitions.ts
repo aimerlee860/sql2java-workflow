@@ -44,18 +44,18 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "translate",
-      description: "PL/SQL → Java/MyBatis 逐包翻译（A-2：单 unit 内 skeleton → translate-core → test-gen → static-check → compile → fsd 六 sub-stage 串行）",
+      description: "PL/SQL → Java/MyBatis 逐 unit 翻译（主从架构：translator master 每 shard 派 6 slave 子 agent 串行跑 skeleton → translate-core → test-gen → static-check → compile → fsd）",
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
       needsCrossSchemaValidation: true,
       maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "edit", "workflow"],
-      // A-2：translate 拆 6 sub-stage，dispatch 按 currentSubStage 路由对应 agent；
-      // advance 在 sub-stage 间空推进（不跑校验），仅 fsd 完成跑 G1-unit + crossSchema + shard advance。
+      // translate 主从架构：subStages 仅供 getSubagentNames（slave 识别为 worker）+ subdispatch 渲染 slave workOrder。
+      // master（translator.md）每 shard 派 6 slave 串行跑；引擎 advance 直走 G1-unit + crossSchema + shard advance（不再逐 sub-stage 推进）。
       // 1 unit = 1 shard（dispatch 强制 maxUnitsPerShard=1），sub-stage 天然 per-unit。
       // fsd（compile 后）模板填空生成 FSD 说明书，孤立产出（translate UPSTREAM 不含 _FSD，translate-core 不读 FSD）。
-      // fix 阶段复用 translator.md（不带 subStages），仍一次性 prompt 修复。
+      // fix 阶段复用 translator.md（master 不派 slave，一次性 prompt 修复）。
       subStages: [
         { name: "skeleton",       agentFile: "agent/translate-skeleton.md" },
         { name: "translate-core", agentFile: "agent/translate-core.md" },

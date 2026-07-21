@@ -10,8 +10,8 @@
  *   - 大输出截断
  *   - 依赖自动安装（node_modules 缺失时自动 npm/bun install）
  */
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync, realpathSync, rmSync, renameSync, unlinkSync } from "node:fs"
-import { join, dirname, resolve, sep, relative, isAbsolute, basename } from "node:path"
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync, realpathSync, rmSync } from "node:fs"
+import { join, dirname, resolve, sep, isAbsolute, basename } from "node:path"
 import { safeWriteFile, extractLineRange } from "../workflow/cross-platform"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
 import { enhanceRejection } from "../workflow/rejection-guidance"
@@ -20,13 +20,12 @@ import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
 import { UPSTREAM_ARTIFACTS, PHASE_PREREQUISITES } from "../workflow/workflow-definitions"
 import {
   getSchemaForPhase, getPerPackageSchema, getPerUnitSchema, getSummarySchema,
-  getAnalysisPackageSchema,
   getArtifactFilename,
   PackageArtifactSchema, SubprogramArtifactSchema, TableArtifactSchema,
 } from "../workflow/artifact-schemas"
 import { scanSource, scanSourceLazy } from "../workflow/plsql-scanner"
 import type { InventoryIndex } from "../workflow/plsql-scanner"
-import { refNamesForPackage, pkgOf, refOf } from "../workflow/refname"
+import { pkgOf, refOf } from "../workflow/refname"
 import { parseInventoryPackage, type InventoryPackageParsed } from "../workflow/package-parser"
 import { buildInventoryFromIndex } from "../workflow/inventory-builder"
 import { buildDependencyGraphFromIndex } from "../workflow/analysis-builder"
@@ -193,6 +192,22 @@ function getSubagentNames(): string[] {
   return [...new Set(files.map(agentFileToName))]
 }
 
+/** translate 主从架构：slave agent 名 → { subStage, agentFile } 映射。
+ *  master（phaseConfig.agentFile=translator.md）经 Task 工具派 slave；system.transform hook 按
+ *  session 的 agent 名识别 slave，注入对应 slave .md + sub-stage workOrder（而非 master 的 translator.md）。 */
+function getSlaveAgentMap(): Map<string, { subStage: string; agentFile: string }> {
+  const m = new Map<string, { subStage: string; agentFile: string }>()
+  for (const p of SQL2JAVA_WORKFLOW.phases) {
+    if (!p.subStages) continue
+    for (const s of p.subStages) m.set(agentFileToName(s.agentFile), { subStage: s.name, agentFile: s.agentFile })
+  }
+  return m
+}
+
+/** sessionID → agent 名（chat.params 记录，system.transform 读取以识别 slave session）。
+ *  system.transform 的 input 无 agent 字段，须借此映射判断当前 session 是 master 还是某 slave。 */
+const sessionAgentMap = new Map<string, string>()
+
 /** fix 阶段序号追踪（同一 runId 内递增） */
 const fixPhaseIndexMap = new Map<string, number>()
 
@@ -266,17 +281,14 @@ function formatPhaseEndBanner(phaseName: string, duration?: string): string {
 
 function setWorkflowContext(run: WorkflowRun): void {
   const phaseConfig = SQL2JAVA_WORKFLOW.phases.find((p) => p.name === run.currentPhase)
-  // A-2：若 phase 有 subStages 且当前 entry 标了 currentSubStage，按 sub-stage 覆盖 agentFile/temperature，
-  // 使 system.transform 注入对应 sub-stage agent 的系统提示。currentSubStage 缺失（首 entry 未初始化）
-  // → 回退 phaseConfig.agentFile，由 dispatch 侧补齐 currentSubStage 后重新 setWorkflowContext。
-  const entry = engine.findCurrentEntry(run)
-  const subName = entry?.incrementalContext?.currentSubStage
-  const subStage = subName ? phaseConfig?.subStages?.find(s => s.name === subName) : undefined
+  // translate 主从架构：引擎只 dispatch translator master（phaseConfig.agentFile）；
+  // sub-stage slave 由 master 经 Task 工具内部派发，不经引擎 dispatch，故此处不再按 currentSubStage 路由。
+  // 旧 run.json entry 可能残留 currentSubStage，忽略它——始终用 phaseConfig.agentFile。
   currentWorkflowContext = {
     runId: run.runId,
     phase: run.currentPhase ?? "unknown",
-    agentFile: subStage?.agentFile ?? phaseConfig?.agentFile ?? "unknown",
-    temperature: subStage?.temperature ?? phaseConfig?.temperature ?? 0.1,
+    agentFile: phaseConfig?.agentFile ?? "unknown",
+    temperature: phaseConfig?.temperature ?? 0.1,
   }
   // ── Metrics: 创建 collector ──
   const isFix = phaseConfig?.isFixPhase
@@ -346,8 +358,12 @@ function clearWorkflowContext(): void {
   destroyLogger()
 }
 
-/** 需要 Java 代码规约的 agent 文件名（正向白名单） */
-const JAVA_SPEC_AGENTS = ["java-architect", "translator", "reviewer"]
+/** 需要 Java 代码规约的 agent 文件名（正向白名单，按 effectiveAgentFile 子串匹配）。
+ *  translate 主从架构下，写 Java 的 slave（skeleton/translate-core/test）也需注入规约。 */
+const JAVA_SPEC_AGENTS = [
+  "java-architect", "translator", "reviewer",
+  "translate-skeleton", "translate-core", "translate-test",
+]
 
 /** 缓存的 Java 代码规约内容 + 文件 mtime（缺失时不缓存，每次重试） */
 let _cachedJavaCodeSpec: string | null = null
@@ -1023,7 +1039,7 @@ export function buildShardScopeBanner(run: WorkflowRun): string {
  * 过程级入口闭包 scope 的 workOrder 指令块（feat/proc-entry-scope）。
  *
  * mainEntry 为过程级且 scope 已计算时，向所有阶段 workOrder 注入闭包范围说明：
- * scopeUnits（analyze/translate 只译这些 unit）+ scopePackages（plan/scaffold/review/dedup/verify
+ * scopeUnits（translate 只译这些 unit）+ scopePackages（plan/scaffold/review/dedup/verify
  * 只处理这些包）。无 scope（未指定 mainEntry / 未计算）返回空串，不影响全量翻译。
  */
 export function buildScopeBanner(run: WorkflowRun): string {
@@ -1033,7 +1049,7 @@ export function buildScopeBanner(run: WorkflowRun): string {
   return [
     `## 翻译闭包 scope（过程级入口 ${mainEntry}）`,
     `- 入口 unit: \`${scope.entryUnit}\``,
-    `- scopeUnits（analyze/translate 只处理这些 unit）: ${scope.scopeUnits.join(", ") || "（无）"}`,
+    `- scopeUnits（translate 只处理这些 unit）: ${scope.scopeUnits.join(", ") || "（无）"}`,
     `- scopePackages（plan/scaffold/review/dedup/verify 只处理这些包）: ${scope.scopePackages.join(", ") || "（无）"}`,
     `- **仅处理以上闭包范围内的 unit/包；闭包外的不译/不规划/不审/不验证。**`,
     `- 仅常量/类型被引用的包（在 scopePackages 但其 unit 不在 scopeUnits）：纯常量包（无子程序）只出常量持有类、不出 DDD 行为层壳/Mapper；有子程序但本闭包未调用其 PROC 的包只出 scaffold 空壳，均不译方法体。`,
@@ -1042,13 +1058,13 @@ export function buildScopeBanner(run: WorkflowRun): string {
 }
 
 /**
- * 为 analyze/translate 分片 worker 渲染 .md 模板 workOrder（取代编排者即兴拼凑的任务提示）。
+ * 为 translate 分片 worker 渲染 .md 模板 workOrder（取代编排者即兴拼凑的任务提示）。
  *
  * 复用既有确定性构建器（buildShardScopeBanner / buildUnitScopeBlock / buildDependencySignaturesBlock /
  * narrowUpstreamForShard / generateUnitSlices / renderSchemaHint / enhanceRejection）组装 ctx，再由
  * prompt-renderer 填入 .md 模板占位符。产物落盘 dispatch-logs/ 供审计 + system.transform 注入。
  *
- * 仅 analyze/translate 调用；其他阶段仍走 workOrderParts。rejectionError 非 null 表示 advance 被拒后
+ * 仅 translate 调用；其他阶段仍走 workOrderParts。rejectionError 非 null 表示 advance 被拒后
  * 重 dispatch（注入错误让 worker 修正）。
  */
 export function buildShardedWorkerOrder(
@@ -1056,8 +1072,9 @@ export function buildShardedWorkerOrder(
   currentEntry: { incrementalContext?: any; branchedFrom?: string } | null | undefined,
   artifactsDir: string,
   rejectionError: string | null,
+  subStageOverride?: string,
 ): string {
-  const phase = run.currentPhase ?? "analyze"
+  const phase = run.currentPhase ?? "translate"
   const activeShardPlan = engine.getShardPlan(run)
   const ic = currentEntry?.incrementalContext
   // 防御性自愈：unitMode shardPlan 但 entry 缺/错 targetUnits（历史脏 run 残留）→ 按 shards[si] 补，
@@ -1171,8 +1188,10 @@ export function buildShardedWorkerOrder(
     schemaHint,
     rejectionErrorBlock,
   }
-  // A-2：当前 sub-stage（phase 内子阶段），传给 renderWorkerPrompt 选对应模板 + persistWorkOrder 区分文件名
-  const currentSubStage = effectiveIc?.currentSubStage as string | undefined
+  // translate 主从架构：dispatch 渲染的是 translator master 的 workOrder（currentSubStage 恒 undefined →
+  // translate-worker.md 模板）。各 sub-stage slave 的 workOrder 由 master 调 workflow `subdispatch` action 渲染
+  // （subStageOverride 指定 sub-stage → translate-<subStage>-worker.md 模板）。
+  const currentSubStage = subStageOverride ?? (effectiveIc?.currentSubStage as string | undefined)
   const rendered = renderWorkerPrompt(phase, ctx, currentSubStage)
   try {
     persistWorkOrder(artifactsDir, phase, si, rendered, currentSubStage)
@@ -1369,202 +1388,15 @@ function validateInventoryPackages(
   return null // 校验通过
 }
 
-/**
- * 校验 analyze 拆分后的 analysis-packages/ 目录
- * - 检查目录存在
- * - 从 inventory.json 获取期望包名
- * - 逐个校验 per-package 文件存在且通过 Zod 校验
- * - 校验 packageNames 与 inventory 一致
- */
-function validateAnalysisPackages(
-  artifactsDir: string,
-  targetPkgs?: string[],
-): string | null {
-  const analysisPackagesDir = join(artifactsDir, "analysis-packages")
-  if (!existsSync(analysisPackagesDir)) {
-    return "analysis-packages/ directory not found. Agent must write per-package files before advancing."
-  }
-
-  // 从 inventory.json 获取期望包名
-  const inventory = engine.loadArtifactJson(artifactsDir, "inventory")
-  if (!inventory) {
-    return "inventory.json not found or malformed — cannot verify analysis package coverage"
-  }
-  const allPackages = Array.from(engine.extractPackageNames(inventory))
-  // 分片模式下只校验本分片包（与 translate G1 同模式：每包在所属分片 advance 时校验，全量覆盖跨分片完成）
-  const expectedPackages = targetPkgs && targetPkgs.length > 0
-    ? allPackages.filter(p => targetPkgs.some(t => t.toUpperCase() === p.toUpperCase()))
-    : allPackages
-
-  // 逐包校验（大小写不敏感匹配文件名，缓存目录列表避免 N 次 readdirSync）
-  const pkgSchema = getAnalysisPackageSchema()
-  const pkgDirEntries = readdirSync(analysisPackagesDir, { withFileTypes: true })
-  for (const pkgName of expectedPackages) {
-    const actualFileName = findFileCaseInsensitive(analysisPackagesDir, pkgName, pkgDirEntries)
-    if (!actualFileName) {
-      return `Missing analysis package file: analysis-packages/${pkgName}.json`
-    }
-    const pkgFile = join(analysisPackagesDir, actualFileName)
-    try {
-      const raw = readFileSync(pkgFile, "utf-8")
-      const parsed = JSON.parse(raw)
-      const result = pkgSchema.safeParse(parsed)
-      if (!result.success) {
-        const errors = formatZodIssues(result.error)
-        return `Zod validation failed for analysis-packages/${actualFileName}:\n${errors}`
-      }
-      if (typeof parsed.packageName !== "string" || parsed.packageName.toUpperCase() !== pkgName.toUpperCase()) {
-        return `analysis-packages/${actualFileName}: packageName "${parsed.packageName}" does not match expected "${pkgName}"`
-      }
-    } catch (e: any) {
-      return `Failed to read/parse analysis-packages/${actualFileName}: ${e.message}`
-    }
-  }
-
-  // 注：dependency-graph.json 的 packageNames 一致性校验已随 dependency-graph.json 产出移至 inventory 边界
-  // （engine-core validateCrossSchema("inventory")），此处不再依赖 dependency-graph.json。
-
-  return null // 校验通过
-}
-
 // per-package 文件名映射复用 artifact-schemas.ts 的 PHASE_FILENAME_MAP
 // getArtifactFilename("translate") → "translation"，其余 phase 名与文件名一致
 
-/**
- * 校验 FSD 文档（analyze 阶段产出）：
- *  - 覆盖：每个有子程序的包，按 refName 规范（refNamesForPackage）算出期望文件名，
- *    逐个检查 fsd/{pkg}/{refName}.md 存在。
- *  - stub：fsd 下所有 .md 不得含"详见"占位符（FSD 必须自包含）。
- * 缺 FSD 或含占位符均 blocking（translate 依赖完整 FSD）。
- */
-export function validateFsds(artifactsDir: string, targetPkgs?: string[]): string | null {
-  const fsdDir = join(artifactsDir, "fsd")
-  if (!existsSync(fsdDir)) {
-    return "fsd/ directory not found. Agent must generate FSD docs before advancing."
-  }
+//（analyze 阶段已砍：validateAnalysisPackages / validateFsds / validateFsdStubs /
+//  normalizeFsdFilenames / mergeUnitAnalysis 五个旧 analyze 校验函数已删——
+//  analysis-packages 聚合 + per-unit FSD 完整性/stub/文件名规范化均随 analyze phase 一并废弃。
+//  FSD 现由 translate 第 6 sub-stage（fsd）产，孤立文档产出，advance 不校验。）
 
-  // 读 inventory.json 取包名（直接读盘，避免依赖 engine 单例，便于单测）
-  const invPath = join(artifactsDir, "inventory.json")
-  if (!existsSync(invPath)) {
-    return "inventory.json not found or malformed — cannot verify FSD coverage"
-  }
-  let allPackages: string[]
-  try {
-    const inv = JSON.parse(readFileSync(invPath, "utf-8")) as { packageNames?: string[] }
-    allPackages = inv.packageNames ?? []
-  } catch (e: any) {
-    return `Failed to read/parse inventory.json: ${e.message}`
-  }
-  // 分片模式下只校验本分片包（每包在所属分片 advance 时校验，全量覆盖跨分片完成）
-  const packageNames = targetPkgs && targetPkgs.length > 0
-    ? allPackages.filter(p => targetPkgs.some(t => t.toUpperCase() === p.toUpperCase()))
-    : allPackages
 
-  // 覆盖校验：逐包按 refName 检查 FSD 存在（子程序名取自 subprograms/{pkg}.*.json）
-  for (const pkgName of packageNames) {
-    const parsed = parseInventoryPackage(artifactsDir, pkgName)
-    if (!parsed) continue // packages/ 缺该包由 validateInventoryPackages 报，此处不重复
-    const procNames = parsed.subprograms.map((s: any) => s.name)
-    if (procNames.length === 0) continue // 无子程序的包不生成 FSD
-    const refNames = refNamesForPackage(procNames)
-    const pkgFsdDirName = findDirCaseInsensitive(fsdDir, pkgName)
-    if (!pkgFsdDirName) {
-      return `Missing FSD directory: fsd/${pkgName}/ (包有 ${procNames.length} 个子程序)`
-    }
-    const fullPkgFsdDir = join(fsdDir, pkgFsdDirName)
-    const entries = readdirSync(fullPkgFsdDir, { withFileTypes: true })
-    for (const refName of refNames) {
-      // .md 文件大小写不敏感匹配（findFileCaseInsensitive 仅支持 .json，此处直接查）
-      const refUpper = refName.toUpperCase()
-      const found = entries.some(e => e.isFile() && e.name.replace(/\.md$/i, "").toUpperCase() === refUpper)
-      if (!found) {
-        return `Missing FSD: fsd/${pkgName}/${refName}.md`
-      }
-    }
-  }
-
-  // stub 校验：fsd 下所有 .md 不得含"详见"占位符（FSD 必须自包含）
-  return validateFsdStubs(artifactsDir)
-}
-
-/**
- * FSD 占位符校验：递归 grep fsd 下所有 .md，含"详见"即报错。
- * 从 validateFsds 抽出，供 analyze unit 模式（per-unit 存在性检查替代包级覆盖）复用。
- */
-function validateFsdStubs(artifactsDir: string): string | null {
-  const fsdDir = join(artifactsDir, "fsd")
-  if (!existsSync(fsdDir)) return null // 目录存在性由调用方/覆盖校验保证
-  const stubFiles: string[] = []
-  function walkFsd(dir: string): void {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, e.name)
-      if (e.isDirectory()) walkFsd(full)
-      else if (e.isFile() && e.name.endsWith(".md")) {
-        const text = readFileSync(full, "utf-8")
-        if (text.includes("详见")) stubFiles.push(relative(artifactsDir, full))
-      }
-    }
-  }
-  walkFsd(fsdDir)
-  if (stubFiles.length > 0) {
-    return `FSD 含"详见"占位符（必须自包含，禁用占位）: ${stubFiles.slice(0, 5).join(", ")}${stubFiles.length > 5 ? ` ... (+${stubFiles.length - 5})` : ""}`
-  }
-  return null
-}
-
-/**
- * 规范化 FSD 文件名到大写 refName。analyze worker 偶发小写命名 FSD
- *（如 `format_error_stack.md` 而非 `FORMAT_ERROR_STACK.md`），但下游一律用大写
- * `refOf(unit)` 定位 FSD：analyze 完整性校验 `existsSync(fsd/{pkg}/{ref}.md)`（unit 模式）
- * 与 translate prompt 注入的 FSD 输入路径都是大写。macOS 大小写不敏感 FS 能蒙混；
- * Linux 大小写敏感 FS 上 analyze advance 会因 existsSync 失败直接阻断、translate 读不到 FSD。
- *
- * 此处在 analyze advance 校验前，按 targetUnits 把 `fsd/{pkg}/` 下 case-insensitive
- * 匹配到的 .md 重命名为规范 `refName.md`（幂等：已规范则不动；有重复小写副本则清理）。
- * 缺失文件不报（由完整性校验负责）。
- */
-export function normalizeFsdFilenames(artifactsDir: string, targetUnits: readonly string[]): void {
-  const fsdDir = join(artifactsDir, "fsd")
-  if (!existsSync(fsdDir)) return
-  // pkg(原样) → 规范 refName 列表
-  const byPkg = new Map<string, string[]>()
-  for (const u of targetUnits) {
-    const pkg = pkgOf(u)
-    const ref = refOf(u)
-    if (!pkg || !ref) continue
-    const arr = byPkg.get(pkg) ?? []
-    arr.push(ref)
-    byPkg.set(pkg, arr)
-  }
-  for (const [pkg, refs] of byPkg) {
-    const pkgDirName = findDirCaseInsensitive(fsdDir, pkg)
-    if (!pkgDirName) continue // 包 FSD 目录缺失由完整性校验报
-    const pkgDir = join(fsdDir, pkgDirName)
-    let entries: import("node:fs").Dirent[]
-    try { entries = readdirSync(pkgDir, { withFileTypes: true }) } catch { continue }
-    for (const refCanonical of refs) {
-      const canonical = `${refCanonical}.md`
-      const refUpper = refCanonical.toUpperCase()
-      const matches = entries.filter(e => e.isFile() && e.name.replace(/\.md$/i, "").toUpperCase() === refUpper)
-      if (matches.length === 0) continue // 缺失由完整性校验报
-      if (matches.some(e => e.name === canonical)) {
-        // 已有规范名文件 → 清理任何 case 变体重复副本
-        for (const e of matches) {
-          if (e.name === canonical) continue
-          try { unlinkSync(join(pkgDir, e.name)) } catch {}
-          getLogger().warn("[fsd-normalize]", `删除重复 FSD: fsd/${pkgDirName}/${e.name}（保留规范 ${canonical}）`)
-        }
-      } else {
-        // 无规范名 → 取首个 case 变体重命名
-        try {
-          renameSync(join(pkgDir, matches[0].name), join(pkgDir, canonical))
-        } catch (e: any) {
-          getLogger().warn("[fsd-normalize]", `重命名失败 fsd/${pkgDirName}/${matches[0].name} → ${canonical}: ${e?.message ?? e}`)
-        }
-      }
-    }
-  }
-}
 
 /**
  * translate PROCEDURE 级：合并某包的所有 per-unit 产物 → 聚合 translations/{pkg}/translation.json。
@@ -1692,63 +1524,6 @@ function updateProcedureMap(artifactsDir: string, pkgName: string, methods: Arra
   }
   mkdirSync(join(artifactsDir, "translations"), { recursive: true })
   writeFileSync(mapPath, JSON.stringify(map, null, 2), "utf-8")
-}
-
-/**
- * analyze PROCEDURE 级：合并某包的所有 per-unit 产物 → 聚合 analysis-packages/{pkg}.json。
- *
- * 镜像 mergeUnitTranslations（零 LLM 代码 reduce）。per-unit 文件位于子目录
- * `analysis-packages/{pkg}/{refName}.json`（UnitAnalysisSchema，本 unit 根 subprogram
- * 结构）；聚合文件 `analysis-packages/{pkg}.json`（AnalysisPackageSchema = {packageName, subprograms}）
- * 在父目录，供 plan/review/translator 消费，形状不变。
- *
- * 期望 unit ref 集合取自 analysis.procedureOrder 本包 unit，作白名单过滤（排除子目录里可能的杂散文件）。
- * - 无 unit 的空包（header-only/类型包）：子目录不存在，聚合空文件已由 analysis-builder 预写，直接 return。
- * - 子目录不存在但有期望 unit：return null（等 agent 写 per-unit 文件）。
- * 返回 null 成功，string 为首个错误。
- */
-export function mergeUnitAnalysis(artifactsDir: string, pkgName: string): string | null {
-  const schema = getPerUnitSchema("analyze")
-  if (!schema) return `no UnitAnalysisSchema for analyze`
-
-  const procOrder = buildDependencyGraph(artifactsDir).procedureOrder
-  const expectedRefs = new Set(
-    procOrder.flat()
-      .filter(u => { const i = u.indexOf("."); return i > 0 && pkgOf(u) === pkgName })
-      .map(refOf),
-  )
-
-  const pkgSubDir = join(artifactsDir, "analysis-packages", pkgName)
-  if (!existsSync(pkgSubDir)) {
-    // 空包：聚合空文件已由 analysis-builder 预写；有期望 unit 但尚未产出 per-unit → 等 agent 写。
-    return null
-  }
-
-  // 白名单：仅读文件名（去 .json）落在期望 unit ref 集合的 per-unit 文件
-  const unitFiles = readdirSync(pkgSubDir).filter(f => f.endsWith(".json") && expectedRefs.has(f.slice(0, -5)))
-
-  const subprograms: unknown[] = []
-  for (const f of unitFiles) {
-    let parsed: any
-    try {
-      parsed = JSON.parse(readFileSync(join(pkgSubDir, f), "utf-8"))
-    } catch (e: any) {
-      return `Failed to parse analysis-packages/${pkgName}/${f}: ${e.message}`
-    }
-    const r = schema.safeParse(parsed)
-    if (!r.success) {
-      return `Zod validation failed for analysis-packages/${pkgName}/${f}:\n${formatZodIssues(r.error)}`
-    }
-    const u = r.data as any
-    subprograms.push(...(u.subprograms ?? []))
-  }
-
-  const aggregated = {
-    packageName: pkgName,
-    subprograms,
-  }
-  writeFileSync(join(artifactsDir, "analysis-packages", `${pkgName}.json`), JSON.stringify(aggregated, null, 2), "utf-8")
-  return null
 }
 
 /**
@@ -1896,18 +1671,18 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
         }
       }
 
-      // inventory 阶段：校验 packages/+subprograms/+tables/+inventory.json；兜底 analysis-packages 空包 + complexity。
+      // inventory 阶段：校验 packages/+subprograms/+tables/+inventory.json；兜底 complexity。
       // dependency-graph.json 已删——调用图按需从 subprograms.directCalls 推导（buildDependencyGraph）。
       if (phase === "inventory") {
         const pkgError = validateInventoryPackages(artifactsDir)
         if (pkgError) return pkgError
-        // analysis-packages 无子程序包空文件 + complexity 写入 packages/*.json 由 generateDependencyGraph 代码产出
-        //（零 LLM 确定性）。worker 偶发漏调 generateDependencyGraph → 引擎兜底自动生成（与 dedup.json /
+        // complexity 写入 packages/*.json 由 generateDependencyGraph 代码产出（零 LLM 确定性）。
+        // worker 偶发漏调 generateDependencyGraph → 引擎兜底自动生成（与 dedup.json /
         // review-static.json 引擎兜底同模式）。生成失败才报错（直接暴露 buildDependencyGraphFromIndex 的失败原因）。
         try {
           buildDependencyGraphFromIndex(artifactsDir)
         } catch (e: any) {
-          return `inventory 兜底（analysis-packages/complexity）生成失败: ${e.message}（可重试 workflow({action:"generateDependencyGraph", runId:"${run.runId}"})）`
+          return `inventory 兜底（complexity）生成失败: ${e.message}（可重试 workflow({action:"generateDependencyGraph", runId:"${run.runId}"})）`
         }
         // 过程级入口闭包 scope（feat/proc-entry-scope）：依赖图按需推导就绪后在此计算并持久化；
         // mainEntry 为过程级但入口不可解析（拼写错/已改名/subdir 不匹配）→ **硬失败**，拒绝 advance，
@@ -2474,13 +2249,12 @@ function isProjectFile(path: string): boolean {
 }
 
 /** artifactsDir 下已知子目录前缀，重定向时需剥除 */
-const ARTIFACT_PREFIX_RE = /^(?:translations|analysis-packages|status|metrics|fsd|reports)\/[^/]+\//
+const ARTIFACT_PREFIX_RE = /^(?:translations|status|metrics|fsd|reports)\/[^/]+\//
 
 /**
  * 从 artifactsDir 下的相对路径中剥除 artifact 子目录前缀，提取项目文件路径。
  *
  * "translations/ORDER_PKG/src/main/java/.../Order.java" → "src/main/java/.../Order.java"
- * "analysis-packages/ORDER_PKG/src/main/..."             → "src/main/..."
  * "src/main/java/.../Order.java" (无前缀)               → "src/main/java/.../Order.java"
  */
 function stripArtifactPrefixes(relPath: string): string {
@@ -2504,15 +2278,15 @@ function resolveSourcePath(runId: string): string {
 }
 
 /**
- * 启用 per-unit 写入边界的阶段。analyze（Phase 1）+ translate（Phase 2）。
+ * 启用 per-unit 写入边界的阶段。translate（单元模式）。
  * 单元模式下 worker 可能读了整包后顺手写出别的 unit 产物 → 后续分片退化审核；此边界按 targetUnits
  * 拦截 per-unit artifact 越界写入。review/fix 走 targetPackages（targetUnits 空）不触发。
  */
-const UNIT_WRITE_BOUNDARY_PHASES = new Set(["analyze", "translate"])
+const UNIT_WRITE_BOUNDARY_PHASES = new Set(["translate"])
 
 /**
  * per-unit artifact 写入越界判定。匹配两级子目录的 per-unit 路径：
- *   translations/{pkg}/{ref}.json | analysis-packages/{pkg}/{ref}.json | fsd/{pkg}/{ref}.md
+ *   translations/{pkg}/{ref}.json | fsd/{pkg}/{ref}.md
  * 聚合文件（translations/{pkg}/translation.json 等只一级目录）不匹配 → 放行。
  *
  * @param relPath 相对 artifactsDir 的路径（或 normalized 后的 artifacts 子路径）
@@ -2526,7 +2300,10 @@ export function unitWriteBoundaryViolation(
 ): string | null {
   if (!allowedRefs || allowedRefs.size === 0) return null
   const normalized = relPath.replace(/\\/g, '/')
-  const m = normalized.match(/(?:translations|analysis-packages|fsd)\/[^/]+\/([^/]+)\.(?:json|md)$/)
+  // 捕获主 ref（不含点），可选中间副后缀段（如 `.lint`）不参与匹配——
+  // translations/{pkg}/FORMAT_ERROR_STACK.lint.json 的 ref 是 FORMAT_ERROR_STACK 而非 FORMAT_ERROR_STACK.lint。
+  // 否则贪婪 [^/]+ 会把 `.lint` 吃进 ref，匹配不上 targetUnits，误拦 static-check 的 lint 产物。
+  const m = normalized.match(/(?:translations|fsd)\/[^/]+\/([^/.]+)(?:\.lint)?\.(?:json|md)$/)
   if (!m) return null
   const ref = m[1]
   // 聚合文件名保险（理论上两级路径下不会出现，显式放行避免误伤）
@@ -2700,13 +2477,12 @@ function classifyWritePath(
  * 规则：
  *  - translations 通配（translations 下所有 translation.json）→ 展开为已完成分片各包
  *  - packages 通配  → 收窄为本分片 targetPackages 各包
- *  - analysis-packages 通配   → 收窄为本分片 targetPackages 各包
  *  - fsd 通配（fsd 下所有 .md）→ 收窄为本分片 targetPackages 各包的 fsd/{pkg}/*.md
  *  - translate 阶段额外追加已完成分片的 translation.json（跨包调用依赖，translator.md 承诺）
  *  - 全局只读 artifact（dependency-graph.json、plan.json 等）原样保留
  *
- * 跨包调用关系不需要读别的包的 packages/subprograms/analysis-packages：analyze 从依赖图（按需推导）
- * 的 callGraph 取，translate 从已完成分片的 translation.json.subprogramMethods 取。
+ * 跨包调用关系不需要读别的包的 packages/subprograms：translate 从已完成分片的
+ * translation.json.subprogramMethods 取（依赖签名预注入）。
  */
 export function narrowUpstreamForShard(
   upstream: readonly string[],
@@ -2724,41 +2500,23 @@ export function narrowUpstreamForShard(
   const targetUnits = opts?.targetUnits ?? []
   const constOnlyInvFiles = (opts?.scopeConstOnlyPkgs ?? []).map(p => `packages/${p}.json`)
 
-  // ── translate/analyze PROCEDURE 级（unit 模式）：shards 元素是 unit id `PKG.refName` ──
+  // ── translate PROCEDURE 级（unit 模式）：shards 元素是 unit id `PKG.refName` ──
   // 每个 subprogram 独立成 unit。收窄到本分片 unit 的源码/FSD + 已完成 unit 所属包的聚合
   // translation.json（translate 跨包 + 同包跨单元调用解析）。
-  // analyze 的 upstream 不含 fsd/analysis-packages/translations（它是产出方），下列分支对 analyze
-  // 仅 packages/subprograms 收窄生效，其余 no-op。
-  if ((phase === "translate" || phase === "analyze") && targetUnits.length > 0) {
-    // ── analyze：切片硬隔离 ──
-    // 整包 packages/{pkg}.json + subprograms/{pkg}.*.json（含同包全部 proc）→ per-unit 切片
-    //（source.sql + inventory-slice.json + meta.json，由 generateUnitSlices 在 dispatch 时落盘）。
-    // worker 物理上拿不到同包其他 proc。analyze upstream = [inventory.json, packages/*.json,
-    // subprograms/*.json, tables/*.json, analysis-packages/*.json]，packages/subprograms 被替换为切片，
-    // inventory.json/tables/*.json/analysis-packages/*.json 原样保留（表 DDL + 兜底空包聚合）。
-    if (phase === "analyze") {
-      const sliceFiles = targetUnits.flatMap(u => unitSliceRelPaths(u, "analyze"))
-      return upstream.flatMap(a => {
-        if (a === "packages/*.json") return sliceFiles
-        if (a === "subprograms/*.json") return []
-        return [a]
-      })
-    }
-
+  if (phase === "translate" && targetUnits.length > 0) {
     // ── translate：切片硬隔离（Phase 2） ──
-    // 整包 packages/subprograms/analysis-packages → per-unit 切片（source.sql + analysis-slice.json + meta.json）。
+    // 整包 packages/subprograms → per-unit 切片（source.sql + meta.json）。
     // translations/*/translation.json 清空——跨包/同包跨单元调用签名由 buildDependencySignaturesBlock
     // 预注入到 workOrder，worker 不再读 translation.json（消除"读聚合 translation 顺手全做"）。
     // FSD 已是 per-unit，收窄到本分片 unit 根 FSD。
     const fsdFiles = targetUnits.map(u => `fsd/${pkgOf(u)}/${refOf(u)}.md`)
     const sliceFiles = targetUnits.flatMap(u => unitSliceRelPaths(u, "translate"))
     const translated = upstream.flatMap(a => {
-      // 三个整包结构 glob 都由 per-unit 切片取代（切片含 analysis-slice.json + source.sql + meta.json）
+      // 整包结构 glob 由 per-unit 切片取代（切片含 source.sql + meta.json）
       // packages 额外保留闭包内 const-only 包的整包文件（取常量/类型定义，无 proc 源码不破坏隔离）；
       // subprograms 仅含元数据（directCalls/bodyLocation），切片已含所需结构，整体丢弃。
       if (a === "packages/*.json") return [...sliceFiles, ...constOnlyInvFiles]
       if (a === "subprograms/*.json") return []
-      if (a === "analysis-packages/*.json") return sliceFiles
       if (a === "fsd/*/*.md") return fsdFiles
       if (a === "translations/*/translation.json") return []   // 依赖签名预注入，不再注入
       return [a]
@@ -2786,9 +2544,6 @@ export function narrowUpstreamForShard(
     result = result.flatMap(a => {
       if (a === "packages/*.json") {
         return targetPkgs.map(pkg => `packages/${pkg}.json`)
-      }
-      if (a === "analysis-packages/*.json") {
-        return targetPkgs.map(pkg => `analysis-packages/${pkg}.json`)
       }
       // subprograms/*.json：每包多文件（per-method），无法纯字符串按包收窄——保留 glob
       //（仅含元数据 directCalls/bodyLocation，无源码体，泄漏风险低；review/verify 不依赖它）。
@@ -2820,10 +2575,9 @@ export function narrowUpstreamForShard(
  *
  * 与 narrowUpstreamForShard 互斥：分片模式（有 shardIndex）走 shard 那套（含 completedPkgs
  * 跨包依赖、unit 切片）；增量回环 entry 无 shardIndex，仅按 fixedPackages 收窄 per-package glob，
- * 全局只读 artifact 不动。fix 修一个包就不必读全量 translations/analysis-packages。
+ * 全局只读 artifact 不动。fix 修一个包就不必读全量 translations。
  *
  * 规则（per-package glob 展开为具体包路径）：
- *  - analysis-packages/<pkg>.json        → fixedPackages 各包
  *  - translations/<pkg>/translation.json → fixedPackages 各包
  *  - translations/<pkg>/verify.json      → fixedPackages 各包（fix 专属）
  *  - packages/<pkg>.json                 → fixedPackages 各包（防御性，当前 fix/review/verify upstream 无此 glob）
@@ -2846,8 +2600,6 @@ export function narrowUpstreamForIncremental(
     switch (a) {
       case "packages/*.json":
         return pkgs.map(p => `packages/${p}.json`)
-      case "analysis-packages/*.json":
-        return pkgs.map(p => `analysis-packages/${p}.json`)
       case "translations/*/translation.json":
         return pkgs.map(p => `translations/${p}/translation.json`)
       case "translations/*/verify.json":
@@ -2873,14 +2625,11 @@ export function unitSliceRelPaths(unitId: string, _phase: string): string[] {
 /**
  * 引擎预切 per-unit 切片文件（硬输入边界）。dispatch 前调用，对本分片每个 targetUnit 落盘：
  *   shard-inputs/{pkg}/{ref}/
- *     source.sql            本 unit 根源码片段（按 lineRange 抽取，注释分隔）
- *     inventory-slice.json  analyze 用：根的 inventory proc 条目（name/type/params/lineRange/bodyFile）
- *     analysis-slice.json   translate 用：根的 subprogram 结构（从 analysis-packages/{pkg}.json 过滤）
- *     meta.json             { unitId, pkg, ref, cargoFuncs:[], sourceFiles, analysisMissing? }
+ *     source.sql   本 unit 根源码片段（按 lineRange 抽取，注释分隔）
+ *     meta.json    { unitId, pkg, ref, cargoFuncs:[], sourceFiles }
  *
- * 目的：worker 物理上只拿到本 unit 的源码/结构，看不到同包其他 proc（消除"读整包顺手全做"）。
- * 复用 buildUnitScopeBlock 已验证的 refMapForPkg / ownership 展开逻辑。确定性：每次 dispatch 总是
- * 重新生成（sed 级开销，避免 resume 过期）。容错：源码/聚合缺失写空片段 + meta 标记，不阻断 dispatch。
+ * analyze 砍后切片只含 source.sql + meta.json（translate 读 source.sql 翻译，不读结构切片）；
+ * 旧 inventory-slice/analysis-slice 已删。
  *
  * 返回所有生成的切片相对路径（供测试断言；dispatch 不强依赖返回值，路径由 narrowUpstreamForShard 算）。
  */
@@ -3090,9 +2839,9 @@ export function buildDependencySignaturesBlock(
  * packages/subprograms（bodyLocation.lineRange）+ 依赖图（callGraph，按需推导）。
  *
  * 目的：把「读取单元」收紧到「工作单元」——agent 按清单 sed -n 抽片段，不再读整包 body 顺手全做
- * （详见 [[translate-procedure-level]] / analyze 下沉）。analyze 与 translate 共用。
+ * （详见 [[translate-procedure-level]]）。
  *
- * 返回文本块（含分片信息后注入）；targetUnits 为空或非 unit 阶段时返回空串。
+ * 返回文本块（含分片信息后注入）；targetUnits 为空或非 translate 阶段时返回空串。
  */
 export function buildUnitScopeBlock(
   artifactsDir: string,
@@ -3102,7 +2851,7 @@ export function buildUnitScopeBlock(
   sourcePath = "",
 ): string {
   if (targetUnits.length === 0) return ""
-  if (phase !== "analyze" && phase !== "translate") return ""
+  if (phase !== "translate") return ""
   // 切片由 generateUnitSlices 在 dispatch 时落盘（用 sourcePath）；本函数仅生成「单元读取清单」文本，
   // 引导 worker read 切片文件。sourcePath/completedUnitIds 保留入参以兼容调用方（依赖签名由
   // buildDependencySignaturesBlock 独立生成，不复用此处）。
@@ -3111,7 +2860,7 @@ export function buildUnitScopeBlock(
 
   const lines: string[] = [
     `## 本分片单元读取清单（精准范围 — 只读这些，禁止 read 整包源码）`,
-    `引擎已为本分片每个 unit 预切源码/结构到 shard-inputs/{pkg}/{ref}/，直接 read 切片文件；禁止 read 整个包 body/header 文件、packages/{pkg}.json、subprograms/{pkg}.*.json、analysis-packages/{pkg}.json。`,
+    `引擎已为本分片每个 unit 预切源码/结构到 shard-inputs/{pkg}/{ref}/，直接 read 切片文件；禁止 read 整个包 body/header 文件、packages/{pkg}.json、subprograms/{pkg}.*.json。`,
   ]
 
   for (const u of targetUnits) {
@@ -3120,17 +2869,11 @@ export function buildUnitScopeBlock(
     lines.push(`### unit ${u}`)
     const sliceDir = `${artifactsDir}/shard-inputs/${pkg}/${rootRef}`
 
-    if (phase === "analyze") {
-      lines.push(`- 切片目录：${sliceDir}/（source.sql + inventory-slice.json + meta.json，引擎已预切，本 unit 根）`)
-      const outParts = [`${artifactsDir}/analysis-packages/${pkg}/${rootRef}.json（结构）`, `${artifactsDir}/fsd/${pkg}/${rootRef}.md（FSD）`]
-      lines.push(`- 输出：${outParts.join(" + ")}`)
-    } else {
-      // translate
-      lines.push(`- 切片目录：${sliceDir}/（source.sql + analysis-slice.json + meta.json，引擎已预切，本 unit 根）`)
-      lines.push(`- FSD 输入：${artifactsDir}/fsd/${pkg}/${rootRef}.md`)
-      lines.push(`- 输出：${artifactsDir}/translations/${pkg}/${rootRef}.json（per-unit 翻译产物）`)
-      lines.push(`- 依赖签名：见 workOrder「依赖签名」预注入块（已内联跨包/同包跨单元调用签名，⛔ 勿 read translations/*/translation.json）`)
-    }
+    // translate
+    lines.push(`- 切片目录：${sliceDir}/（source.sql + meta.json，引擎已预切，本 unit 根）`)
+    lines.push(`- FSD 输入：${artifactsDir}/fsd/${pkg}/${rootRef}.md`)
+    lines.push(`- 输出：${artifactsDir}/translations/${pkg}/${rootRef}.json（per-unit 翻译产物）`)
+    lines.push(`- 依赖签名：见 workOrder「依赖签名」预注入块（已内联跨包/同包跨单元调用签名，⛔ 勿 read translations/*/translation.json）`)
   }
 
   lines.push(`⛔ 只处理以上 unit，只读以上列出的切片与文件。其他包/单元由别的分片处理。`)
@@ -3190,7 +2933,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
       args: {
         action: zFn.enum([
           "start", "scan", "advance", "confirm", "retry", "abort", "status", "list",
-          "prerequisites", "resume", "fixContinue", "dispatch", "progress",
+          "prerequisites", "resume", "fixContinue", "dispatch", "progress", "subdispatch",
         ]),
         runId: zFn.string().optional(),
         sourcePath: zFn.string().optional(),
@@ -3204,6 +2947,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
         mainEntry: zFn.string().optional(),     // 翻译起点/对外门面包，自然语言提取或 --mainEntry
         dedupRules: zFn.string().optional(),    // --dedupRules 用：dedup-rules.json 路径（exclude/force 覆盖）
         originalInput: zFn.string().optional(), // 用户原始 $ARGUMENTS 文字，写入 run-context.json 供回溯
+        subStage: zFn.string().optional(),      // subdispatch 用：请求渲染的 sub-stage 名（skeleton/translate-core/test-gen/static-check/compile/fsd）
       },
       execute: async (args: any, context: any) => {
         // ── Worker 编排工具拦截（L1 防线）──
@@ -3218,6 +2962,10 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
         if (isWorker && ORCHESTRATOR_ONLY_ACTIONS.has(args.action)) {
           return `⛔ Worker（${agentName}）不能调用 workflow ${args.action}——这是编排者的职责。\n` +
             `请完成当前阶段工作，写入 artifact，输出 WORKER_SUMMARY + TASK_STATUS 即可。编排者会推进流程。`
+        }
+        // subdispatch：translator master 专用——渲染某 sub-stage slave 的 workOrder 供 master 经 Task 工具派发。
+        if (args.action === "subdispatch" && agentName !== "translator") {
+          return `⛔ subdispatch 仅 translator master 可调（当前 caller: ${agentName || "unknown"}）。`
         }
 
         // opencode 1.4.6: execute 必须返回 string，title/metadata 通过 context.metadata() 设置
@@ -3728,7 +3476,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 : ""
               return {
                 title: "Inventory Generated",
-                output: `✔ inventory 代码生成完成：${r.packageCount} 包 / ${r.tableCount} 表（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进到 analyze。`,
+                output: `✔ inventory 代码生成完成：${r.packageCount} 包 / ${r.tableCount} 表（已过 Zod 校验）。${warn}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进到 plan。`,
                 metadata: { runId, packageCount: r.packageCount, tableCount: r.tableCount, warnings: r.warnings },
               }
             } catch (e: any) {
@@ -3743,8 +3491,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
           // ── generateDependencyGraph — inventory 阶段 reduce（零 LLM）──
           // dependency-graph.json 已删——调用图（callGraph/packageDependency/translationOrder/sccGroups/
           // procedureOrder）由 dependency-graph.ts 从 subprograms/*.json 的 directCalls
-          // 按需推导，不再落盘。本 action 仅做：complexity 启发式写入 packages/{PKG}.json + 无子程序包
-          // 空 analysis-packages/{PKG}.json 兜底。agent 在调完 generateInventory 后调本 action。
+          // 按需推导，不再落盘。本 action 仅做：complexity 启发式写入 packages/{PKG}.json。
+          // agent 在调完 generateInventory 后调本 action。
           // advance 失败时编排者重新 dispatch，workOrder 带校验错误，agent 最小修复 json。
           case "generateDependencyGraph": {
             if (!args.runId) throw new Error("runId required")
@@ -3754,13 +3502,13 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               const r = buildDependencyGraphFromIndex(artifactsDir)
               return {
                 title: "Analysis Meta Generated",
-                output: `✔ analysis reduce 完成：complexity 写入 ${r.packageCount} 个 packages/*.json + 无子程序包空 analysis-packages 兜底；依赖图 ${r.sccGroupCount} SCC 组（按需从 subprograms.directCalls 推导，不落盘）。${r.warnings.length ? `\n⚠️ ${r.warnings.join("; ")}` : ""}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
+                output: `✔ analysis reduce 完成：complexity 写入 ${r.packageCount} 个 packages/*.json；依赖图 ${r.sccGroupCount} SCC 组（按需从 subprograms.directCalls 推导，不落盘）。${r.warnings.length ? `\n⚠️ ${r.warnings.join("; ")}` : ""}\n\n⏹ 请输出 WORKER_SUMMARY + TASK_STATUS 并结束——编排者会调用 advance 推进。`,
                 metadata: { runId, packageCount: r.packageCount, sccGroupCount: r.sccGroupCount, warnings: r.warnings },
               }
             } catch (e: any) {
               return {
                 title: "Analysis Meta Generation Failed",
-                output: `✖ analysis reduce（complexity/analysis-packages 兜底）生成失败：${e.message}\n\n可重试 workflow({action:"generateDependencyGraph", runId:"${runId}"})；若反复失败，检查 inventory.json + packages/*.json + subprograms/*.json 是否完整。`,
+                output: `✖ analysis reduce（complexity）生成失败：${e.message}\n\n可重试 workflow({action:"generateDependencyGraph", runId:"${runId}"})；若反复失败，检查 inventory.json + packages/*.json + subprograms/*.json 是否完整。`,
                 metadata: { runId, error: e.message },
               }
             }
@@ -4275,6 +4023,56 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             }
           }
 
+          // ── subdispatch — translator master 专用：渲染某 sub-stage slave 的 workOrder ──
+          // master 拿到 minimalSubtaskPrompt + slave agent 名后用 Task 工具派 slave（prompt=trigger，
+          // slave 系统提示由 system.transform hook 注入 workOrder 全文）。
+          case "subdispatch": {
+            const runId = (args.runId as string) || currentWorkflowContext?.runId
+            if (!runId) throw new Error("runId required (subdispatch)")
+            const subStage = args.subStage as string | undefined
+            let run = engine.status(runId) ?? (() => { try { return engine.loadFromDisk(runId) } catch { return null } })()
+            if (!run) {
+              return { title: "Error", output: `Run ${runId} not found`, metadata: { runId, dispatch: false } }
+            }
+            const phaseConfig = SQL2JAVA_WORKFLOW.phases.find(p => p.name === run.currentPhase)
+            const subStageConfig = subStage
+              ? phaseConfig?.subStages?.find(s => s.name === subStage)
+              : undefined
+            if (!subStage || !subStageConfig) {
+              const available = (phaseConfig?.subStages ?? []).map(s => s.name).join("/")
+              return {
+                title: "subdispatch error",
+                output: `⛔ subStage 缺失或非法：${subStage ?? "(空)"}。可用：${available}`,
+                metadata: { runId, dispatch: false, subStage },
+              }
+            }
+            // 确保 WorkflowContext（写入边界依赖 currentWorkflowContext 同进程持续）
+            if (currentWorkflowContext?.runId !== runId) setWorkflowContext(run)
+            const currentEntry = engine.findCurrentEntry(run)
+            const artifactsDir = `${ARTIFACT_DIR}/${runId}`
+            // 渲染并持久化 slave workOrder（落盘 dispatch-logs/translate-{subStage}-shardN.workOrder.md），
+            // system.transform hook 按 slave session 注入其系统提示。master 只拿最小 trigger 派 Task，保持上下文干净。
+            buildShardedWorkerOrder(run, currentEntry, artifactsDir, null, subStage)
+            const slaveAgent = agentFileToName(subStageConfig.agentFile)
+            const minimalPrompt = getSubtaskTriggerPrompt()
+            const ic = currentEntry?.incrementalContext
+            return {
+              title: `subdispatch: ${subStage}`,
+              output: `🔧 sub-stage ${subStage} workOrder 已渲染并落盘（slave agent: ${slaveAgent}）。用 Task 工具派 ${slaveAgent}，prompt 用**静态触发器**（metadata.minimalSubtaskPrompt，勿含 workOrder 全文——slave 系统提示已自动注入 workOrder）。阻塞等 slave TASK_STATUS 后再 subdispatch 下一 stage。`,
+              metadata: {
+                runId,
+                phase: run.currentPhase,
+                dispatch: true,
+                agent: slaveAgent,
+                subStage,
+                shardIndex: ic?.shardIndex,
+                targetUnits: ic?.targetUnits,
+                minimalSubtaskPrompt: minimalPrompt,
+                nextAction: "dispatch",
+              },
+            }
+          }
+
           // ── dispatch — 编排指令：返回 Worker 调度信息 ──
           case "dispatch": {
             if (!args.runId) throw new Error("runId required")
@@ -4354,8 +4152,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 // 此处为缓存读（幂等；inventory 未跑的边缘路径下兜底计算）。硬失败已在 inventory 拦截，此处不会命中。
                 const scopeOutcome = ensureRunScope(run, analysis, `${ARTIFACT_DIR}/${run.runId}`)
                 const scope = scopeOutcome?.ok ? scopeOutcome.scope : null
-                // translate/analyze 优先用单元级 procedureOrder（PROCEDURE 级下沉）；缺失时回退包级 translationOrder
-                const isUnitPhase = run.currentPhase === "translate" || run.currentPhase === "analyze"
+                // translate 优先用单元级 procedureOrder（PROCEDURE 级下沉）；缺失时回退包级 translationOrder
+                const isUnitPhase = run.currentPhase === "translate"
                 const procedureOrder = analysis.procedureOrder
                 const useUnits = isUnitPhase && procedureOrder.length > 0
                 let translationOrder = useUnits
@@ -4394,8 +4192,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                   // sizeOf 取 unitLines（body 源码行数）供按行数预算切分。
                   const unitLines = analysis.unitLines
                   const unitLevels = analysis.unitLevels
-                  // A-2：phase 配了 subStages 时强制 1 unit = 1 shard（sub-stage 是 per-unit 内推进，
-                  // 多 unit 同 shard 会与 sub-stage 推进维度冲突）。超长过程按 TODO 批次切分留二期。
+                  // translate 主从架构：1 unit = 1 shard（master 每 shard 派 6 slave 跑该 unit 的 6 sub-stage）。
                   const forceOneUnitPerShard = !!(phaseConfig.subStages && phaseConfig.subStages.length > 0)
                   const plan = engine.computeShardPlan(
                     effectiveOrder, run.currentPhase!,
@@ -4416,16 +4213,10 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                     // 多分片：设置 shardPlan 到 run.metadata，更新 currentEntry 的 incrementalContext
                     plan.unitMode = useUnits
                     run.metadata.shardPlan = plan
-                    // A-2：phase 配了 subStages 时，首分片首 entry 从首个 sub-stage 起步
-                    const ss0 = phaseConfig.subStages
-                    currentEntry.incrementalContext = {
-                      ...(useUnits
-                        ? { targetUnits: plan.shards[0], shardIndex: 0, totalShards: plan.shards.length }
-                        : { targetPackages: plan.shards[0], shardIndex: 0, totalShards: plan.shards.length }),
-                      ...(ss0 && ss0.length > 0
-                        ? { currentSubStage: ss0[0].name, currentBatch: 1, totalBatches: 1 }
-                        : {}),
-                    }
+                    // sub-stage 由 translator master 内部调度，entry 不带 currentSubStage
+                    currentEntry.incrementalContext = useUnits
+                      ? { targetUnits: plan.shards[0], shardIndex: 0, totalShards: plan.shards.length }
+                      : { targetPackages: plan.shards[0], shardIndex: 0, totalShards: plan.shards.length }
                     engine.persist(run)
                   }
                   // 非 scope 单分片不需要分片机制（单包项目或单元很少）
@@ -4433,11 +4224,9 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               }
             }
 
-            // 从 agentFile 提取 agent 名。A-2：phase 有 subStages 时按当前 entry 的 currentSubStage
-            // 路由到对应 sub-stage agentFile；currentSubStage 缺失回退 phaseConfig.agentFile。
-            const _curSubName = currentEntry?.incrementalContext?.currentSubStage
-            const _curSubStage = _curSubName ? phaseConfig.subStages?.find(s => s.name === _curSubName) : undefined
-            const agentName = agentFileToName(_curSubStage?.agentFile ?? phaseConfig.agentFile)
+            // 从 agentFile 提取 agent 名。translate 主从架构：引擎只 dispatch translator master，
+            // sub-stage slave 由 master 内部经 Task 工具派发，故始终用 phaseConfig.agentFile。
+            const agentName = agentFileToName(phaseConfig.agentFile)
             const artifactsDir = `${ARTIFACT_DIR}/${run.runId}`
 
             // dedup：dispatch 前 run PMD CPD 确定性扫描 → dedup-duplicates.json（零 LLM）。
@@ -4509,7 +4298,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             // analyze/translate 分片模式：用 .md 模板渲染 workOrder（取代编排者即兴拼凑）。
             // 仅真分片（activeShardPlan + shardIndex 已设）走模板——单分片（shards.length===1，不设
             // shardPlan）回退 workOrderParts，否则模板「只处理 targetUnits」硬约束在 targetUnits 空时误导 worker。
-            const isShardedWorkerPhase = (run.currentPhase === "analyze" || run.currentPhase === "translate")
+            const isShardedWorkerPhase = run.currentPhase === "translate"
               && !!activeShardPlan
               && currentEntry?.incrementalContext?.shardIndex !== undefined
             let workOrder: string
@@ -4681,10 +4470,10 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                   .flatMap(i => activeShardPlan.shards[i] ?? [])
                 const shardTargetPkgs = currentEntry?.incrementalContext?.targetPackages ?? []
                 const shardTargetUnits = currentEntry?.incrementalContext?.targetUnits ?? []
-                // analyze/translate unit 模式 → dispatch 前预切 per-unit 切片（硬输入边界）。
-                // narrowUpstreamForShard 的 unit 路径会把整包 packages/subprograms/analysis-packages 替换为
+                // translate unit 模式 → dispatch 前预切 per-unit 切片（硬输入边界）。
+                // narrowUpstreamForShard 的 unit 路径会把整包 packages/subprograms 替换为
                 // 这些切片路径，故必须先落盘。容错：切片生成失败不阻断 dispatch（warn，回退整包 upstream）。
-                if (shardTargetUnits.length > 0 && (run.currentPhase === "analyze" || run.currentPhase === "translate")) {
+                if (shardTargetUnits.length > 0 && run.currentPhase === "translate") {
                   try {
                     const srcPath = String((run.metadata as Record<string, unknown>).sourcePath ?? "")
                     generateUnitSlices(`${ARTIFACT_DIR}/${run.runId}`, shardTargetUnits, run.currentPhase, srcPath)
@@ -4817,7 +4606,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 `## 📂 文件写入路径（强制）`,
                 `- JSON artifact（scaffold.json、translation.json 等）→ saveArtifact 工具 → artifactsDir`,
                 `- Java/.xml/.yml/.properties/.sql 项目文件 → write 工具 → projectRoot（${projectRoot}）`,
-                `- ❌ 禁止将项目文件写入 artifactsDir/（任何子目录，包括 translations/、analysis-packages/ 等）`,
+                `- ❌ 禁止将项目文件写入 artifactsDir/（任何子目录，包括 translations/ 等）`,
                 `- ❌ 禁止写入 .git/、.claude/、node_modules/ 等敏感目录`,
                 `- ❌ 禁止写入 sourcePath 目录（只读）`,
                 `- scaffold.json 的 projectRoot 必须使用注入值，不可自行编造`,
@@ -4875,7 +4664,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             const shardLine = (si !== undefined && ts !== undefined)
               ? `\n📦 分片 ${si + 1}/${ts}（${isUnit ? "PROCEDURE 单元" : "包"}: ${shardTarget.join(", ")}）—— 只处理以上目标，勿越界（workOrder 含 scope 硬约束 + 切片读取清单）`
               : ""
-            // A-2：当前 sub-stage（phase 内子阶段），让编排者知晓本 turn 派的是哪个 sub-stage worker
+            // translate 主从架构：dispatch 派的是 translator master（无 sub-stage 维度），
+            // sub-stage 由 master 内部调度。currentSubStage 恒 undefined，subStageLine 留空。
             const currentSubStage = ic?.currentSubStage as string | undefined
             const subStageLine = currentSubStage ? `\n🔧 sub-stage: ${currentSubStage}` : ""
 
@@ -5132,6 +4922,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
   "chat.params": async (input: any, output: any) => {
     // 编排 session 识别：非 subagent agent 名称 → 编排 session
     const agentName = input?.agent ?? ""
+    // 记录 sessionID → agent 名，供 system.transform hook 识别 slave session（其 input 无 agent 字段）
+    if (input?.sessionID && agentName) sessionAgentMap.set(input.sessionID, agentName)
     if (!getSubagentNames().includes(agentName)) {
       const sid = input?.sessionID
       if (sid) orchestratorSessionIds.add(sid)
@@ -5154,8 +4946,15 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
     if (sid && orchestratorSessionIds.has(sid)) return
     if (!currentWorkflowContext) return
     try {
+      // translate 主从架构：按 session 识别当前是 master 还是某 slave。
+      // master（translator）走 currentWorkflowContext.agentFile；slave（translate-{stage}）用其自身 .md，
+      // 并按 subStage 读对应 sub-stage workOrder（否则会误注入 master 的 translator.md + master workOrder）。
+      const sidAgent = sid ? sessionAgentMap.get(sid) : undefined
+      const slaveInfo = sidAgent ? getSlaveAgentMap().get(sidAgent) : undefined
+      const effectiveAgentFile = slaveInfo?.agentFile ?? currentWorkflowContext.agentFile
+      const effectiveSubStage = slaveInfo?.subStage
       // 使用共享路径工具定位 agent 文件，不依赖 process.cwd()
-      const agentPath = join(findOpencodeDir(), currentWorkflowContext.agentFile)
+      const agentPath = join(findOpencodeDir(), effectiveAgentFile)
       if (existsSync(agentPath)) {
         // 1. 读取 agent .md 全文
         let c = readFileSync(agentPath, "utf-8").replace(/^---[\s\S]*?---\n*/, "")
@@ -5181,8 +4980,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
 
         // 4. 拼接 system prompt
         const sharedInstructions = run ? buildSharedInstructions(run) : ""
-        // 仅对白名单中的 agent 注入代码规约
-        const needsJavaSpec = JAVA_SPEC_AGENTS.some(a => currentWorkflowContext.agentFile.includes(a))
+        // 仅对白名单中的 agent 注入代码规约（按 effective agent 文件判定，slave 也命中 translate-* 写 Java 的）
+        const needsJavaSpec = JAVA_SPEC_AGENTS.some(a => effectiveAgentFile.includes(a))
         const rawSpec = needsJavaSpec ? readJavaCodeSpec() : ""
         // 合并用户自定义规约（--spec）：用户章节覆盖同名内置章节，独有章节追加
         let javaCodeSpec: string
@@ -5221,7 +5020,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
           try {
             const ce = engine.findCurrentEntry(run)
             const si = ce?.incrementalContext?.shardIndex as number | undefined
-            const ss = ce?.incrementalContext?.currentSubStage as string | undefined
+            // slave session 用其 subStage 读对应 sub-stage workOrder；master session 用 entry 的 currentSubStage（恒 undefined → master workOrder）
+            const ss = effectiveSubStage ?? (ce?.incrementalContext?.currentSubStage as string | undefined)
             persistedWorkOrder = readPersistedWorkOrder(join(ARTIFACT_DIR, currentWorkflowContext.runId), currentWorkflowContext.phase, si, ss)
           } catch (e: any) {
             getLogger().warn("[workflow-engine]", `读取持久化 workOrder 失败（回退 banner+runtimeContext）: ${e.message}`)

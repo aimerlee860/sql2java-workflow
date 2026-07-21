@@ -57,17 +57,17 @@ describe("inventory 零 LLM 接线", () => {
     expect(run.currentPhase).toBe("inventory")
   })
 
-  it("engine.advance 无需 Worker 即可推进 inventory → analyze", () => {
+  it("engine.advance 无需 Worker 即可推进 inventory → plan", () => {
     const adv = engine.advance(runId, { result: "passed" })
     expect(adv.rejected).toBe(false)
-    expect(adv.run.currentPhase).toBe("analyze")
+    expect(adv.run.currentPhase).toBe("plan")
   })
 
-  it("analyze 阶段能读到 inventory 产物（下游可消费）", () => {
+  it("plan 阶段能读到 inventory 产物（下游可消费）", () => {
     const artifactsDir = join(dir, runId)
     expect(existsSync(join(artifactsDir, "inventory.json"))).toBe(true)
     expect(existsSync(join(artifactsDir, "packages", "CORE_PKG.json"))).toBe(true)
     const run = engine.status(runId)!
-    expect(run.currentPhase).toBe("analyze")
+    expect(run.currentPhase).toBe("plan")
   })
 })

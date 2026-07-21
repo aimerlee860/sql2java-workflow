@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
-import { refNameOf, refNamesForPackage } from "./refname"
+import { refNameOf } from "./refname"
 
 // ── packages/{pkg}.json + subprograms/{pkg}.*.json ────────────────────────────
 
@@ -85,33 +85,5 @@ export function parseInventoryPackage(artifactsDir: string, pkg: string): Invent
   const headerPath = pkgInfo.headerPath ?? null
   const bodyPath = pkgInfo.bodyPath ?? null
   return { refNames, subprograms, pkgInfo, headerPath, bodyPath }
-}
-
-// ── analysis-packages/{pkg}.json ───────────────────────────────────────────────
-
-/** parseAnalysisPackage 的返回结构。subprograms 为原始 subprograms 数组（原样，含 cursors/exceptionHandlers 等）。 */
-export interface AnalysisPackageParsed {
-  /** 重载 refName 列表（refNamesForPackage 处理 {name}__序号），与 subprograms 一一对应。 */
-  refNames: string[]
-  /** 原始 subprograms 数组（顺序与 refNames 对齐）。 */
-  subprograms: any[]
-}
-
-/**
- * 读取并解析 analysis-packages/{pkg}.json。
- * @returns 解析结构；文件缺失或解析失败返回 null
- */
-export function parseAnalysisPackage(artifactsDir: string, pkg: string): AnalysisPackageParsed | null {
-  const p = join(artifactsDir, "analysis-packages", `${pkg}.json`)
-  if (!existsSync(p)) return null
-  let ana: any
-  try {
-    ana = JSON.parse(readFileSync(p, "utf-8"))
-  } catch {
-    return null
-  }
-  const subprograms: any[] = Array.isArray(ana.subprograms) ? ana.subprograms : []
-  const refNames = refNamesForPackage(subprograms.map((s: any) => s.name))
-  return { refNames, subprograms }
 }
 

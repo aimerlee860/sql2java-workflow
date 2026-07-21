@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
@@ -21,7 +21,6 @@ import {
   buildDependencyGraph, tarjanSCC, buildProcedureOrder, computeUnitLevels,
   type RefIndexEntry,
 } from "@workflow/dependency-graph"
-import { AnalysisPackageSchema } from "@workflow/artifact-schemas"
 import { refNamesForPackage } from "@workflow/refname"
 
 const FIXTURE_TINY = resolve(import.meta.dirname, "../fixtures/sql/tiny")
@@ -51,13 +50,7 @@ describe("buildDependencyGraphFromIndex (tiny fixture)", () => {
     expect(base.complexity.score).toBeLessThanOrEqual(3)
   })
 
-  it("无子程序包写空 analysis-packages/{PKG}.json（过 AnalysisPackageSchema）", () => {
-    const base = JSON.parse(readFileSync(join(dir, "analysis-packages", "BASE_PKG.json"), "utf-8"))
-    expect(base).toEqual({ packageName: "BASE_PKG", subprograms: [] })
-    expect(AnalysisPackageSchema.safeParse(base).success).toBe(true)
-    // 有子程序的包此处不写（由 analyze map 阶段填充）
-    expect(existsSync(join(dir, "analysis-packages", "CORE_PKG.json"))).toBe(false)
-  })
+  //（空 analysis-packages 兜底用例已删：analyze 砍后不再产 analysis-packages artifact。）
 })
 
 describe("buildDependencyGraph (tiny fixture)", () => {

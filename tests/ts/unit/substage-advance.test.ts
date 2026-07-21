@@ -1,12 +1,12 @@
 /**
- * substage-advance.test.ts — A-2 translate sub-stage 推进短路测试
+ * substage-advance.test.ts — translate 主从架构 advance 测试
+ *
+ * sub-stage 现由 translator master 子 agent 内部经 Task 工具调度，引擎不再逐 sub-stage 推进
+ * （Step 2.5 短路已删）。advance 直走 G1-unit 质量门控 + crossSchema + shard advance。
  *
  * 验证：
- * 1. 中间 sub-stage（skeleton→translate-core→test-gen→static-check→compile）advance 短路推进，
- *    不跑 G1-unit / crossSchema 校验（即使无 per-unit JSON 也不拒绝）。
- * 2. 最后 sub-stage（compile）advance 不短路，走 G1-unit 校验：无 per-unit JSON → 拒绝；
- *    写 status=completed per-unit JSON → 通过。
- * 3. 新 unit 首 entry currentSubStage = "skeleton"。
+ * 1. advance 不再短路：无 per-unit JSON / status=partial → G1-unit 拒绝；status=completed → 通过。
+ * 2. 新 shard entry 不带 currentSubStage（sub-stage 由 master 内部管）。
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
@@ -37,8 +37,8 @@ beforeAll(async () => {
   buildDependencyGraphFromIndex(artifactsDir)
 }, 60000)
 
-/** 推进到 translate phase（inventory→plan→scaffold→translate，analyze 已砍） */
-function advanceToTranslate(rid: string, artifactsDir: string) {
+/** 推进到 translate phase（inventory→plan→scaffold→translate） */
+function advanceToTranslate(rid: string) {
   engine.start("sql2java", rid, { sourcePath: FIXTURE_TINY })
   for (const _ of ["inventory", "plan", "scaffold"]) {
     let r = engine.advance(rid, { result: "passed" })
@@ -52,42 +52,13 @@ function advanceToTranslate(rid: string, artifactsDir: string) {
   return run
 }
 
-describe("A-2 sub-stage 推进短路", () => {
-  it("中间 sub-stage advance 短路推进，不跑 G1-unit（无 per-unit JSON 也不拒绝）", () => {
-    const artifactsDir = join(dir, runId)
-    const run = advanceToTranslate(runId, artifactsDir)
-
-    // 注入 1 unit shardPlan + skeleton sub-stage 的 entry
-    run.metadata.shardPlan = {
-      phase: "translate", unitMode: true,
-      shards: [["CORE_PKG.get_item"]], completedShards: [],
-    }
-    const entry = engine.findCurrentEntry(run)!
-    entry.incrementalContext = {
-      targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 1,
-      currentSubStage: "skeleton", currentBatch: 1, totalBatches: 1,
-    }
-    engine.persist(run)
-
-    // 中间 sub-stage 推进：skeleton → translate-core → test-gen → static-check → compile → fsd
-    // 全程不写 per-unit JSON，短路应放行（不跑 G1-unit）。fsd 是最后 sub-stage，循环停在 fsd 不调其 advance。
-    const expected = ["translate-core", "test-gen", "static-check", "compile", "fsd"]
-    for (const next of expected) {
-      const adv = engine.advance(runId, { result: "passed" })
-      expect(adv.rejected, `推进到 ${next} 不应拒绝: ${adv.rejectionReason}`).toBe(false)
-      const cur = engine.findCurrentEntry(engine.status(runId)!)!
-      expect(cur.incrementalContext?.currentSubStage).toBe(next)
-      expect(cur.incrementalContext?.shardIndex).toBe(0) // 仍同 shard，未 shard advance
-    }
-  })
-
-  it("最后 sub-stage(fsd) advance 走 G1-unit：partial 拒绝，completed 通过", () => {
-    const rid = "test-substage-fsd"
+describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
+  it("advance 直走 G1-unit：partial 拒绝，completed 通过并阶段推进", () => {
+    const rid = "test-substage-advance"
     const artifactsDir = join(dir, rid)
-    mkdirSync(artifactsDir, { recursive: true })
-    cpSync(join(dir, runId), artifactsDir, { recursive: true })
+    const run = advanceToTranslate(rid)
 
-    const run = advanceToTranslate(rid, artifactsDir)
+    // 注入 1 unit shardPlan（entry 不带 currentSubStage——sub-stage 由 master 内部管）
     run.metadata.shardPlan = {
       phase: "translate", unitMode: true,
       shards: [["CORE_PKG.get_item"]], completedShards: [],
@@ -95,11 +66,10 @@ describe("A-2 sub-stage 推进短路", () => {
     const entry = engine.findCurrentEntry(run)!
     entry.incrementalContext = {
       targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 1,
-      currentSubStage: "fsd", currentBatch: 1, totalBatches: 1,
     }
     engine.persist(run)
 
-    // fsd 是最后 sub-stage → 不短路 → 走 G1-unit。写 status=partial per-unit JSON → 拒绝
+    // 无 per-unit JSON 短路已删 → advance 直走 G1-unit → status=partial 拒绝
     mkdirSync(join(artifactsDir, "translations", "CORE_PKG"), { recursive: true })
     writeFileSync(join(artifactsDir, "translations", "CORE_PKG", "get_item.json"), JSON.stringify({
       unitRefName: "get_item", packageName: "CORE_PKG", status: "partial",
@@ -113,19 +83,89 @@ describe("A-2 sub-stage 推进短路", () => {
     expect(adv.rejected).toBe(true)
     expect(adv.rejectionReason).toMatch(/completed|status/i)
 
-    // 改写 status=completed per-unit JSON → 通过（1 shard → transition 到 dedup）
+    // 改写 status=completed → 通过（1 shard → transition 到 dedup）
     writeFileSync(join(artifactsDir, "translations", "CORE_PKG", "get_item.json"), JSON.stringify({
       unitRefName: "get_item", packageName: "CORE_PKG", status: "completed",
       completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
       subprogramMethods: [{ oracleName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
     }), "utf-8")
-
     let adv2 = engine.advance(rid, { result: "passed" })
     if (adv2.rejected && (adv2 as any).warningPending) {
       adv2 = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
     }
-    expect(adv2.rejected, `fsd 通过应推进: ${adv2.rejectionReason}`).toBe(false)
-    // 1 shard 完成 → 阶段推进到 dedup
+    expect(adv2.rejected, `completed 应推进: ${adv2.rejectionReason}`).toBe(false)
     expect(adv2.run.currentPhase).toBe("dedup")
+  })
+
+  it("新 shard entry 不带 currentSubStage（sub-stage 由 master 内部调度）", () => {
+    const rid = "test-substage-shard-entry"
+    const artifactsDir = join(dir, rid)
+    mkdirSync(artifactsDir, { recursive: true })
+    cpSync(join(dir, runId), artifactsDir, { recursive: true })
+    const run = advanceToTranslate(rid)
+
+    // 2 unit shardPlan：shard0 完成后 advance → shard advance 到 shard1
+    run.metadata.shardPlan = {
+      phase: "translate", unitMode: true,
+      shards: [["CORE_PKG.get_item"], ["CORE_PKG.put_item"]], completedShards: [],
+    }
+    const entry = engine.findCurrentEntry(run)!
+    entry.incrementalContext = {
+      targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 2,
+    }
+    engine.persist(run)
+
+    // shard0 per-unit JSON completed → advance 触发 shard advance 到 shard1
+    mkdirSync(join(artifactsDir, "translations", "CORE_PKG"), { recursive: true })
+    writeFileSync(join(artifactsDir, "translations", "CORE_PKG", "get_item.json"), JSON.stringify({
+      unitRefName: "get_item", packageName: "CORE_PKG", status: "completed",
+      completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
+      subprogramMethods: [{ oracleName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
+    }), "utf-8")
+    let adv = engine.advance(rid, { result: "passed" })
+    if (adv.rejected && (adv as any).warningPending) {
+      adv = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
+    }
+    expect(adv.rejected, `shard0 完成应 shard advance: ${adv.rejectionReason}`).toBe(false)
+
+    const nextEntry = engine.findCurrentEntry(engine.status(rid)!)!
+    expect(nextEntry.incrementalContext?.shardIndex).toBe(1)
+    expect(nextEntry.incrementalContext?.targetUnits).toEqual(["CORE_PKG.put_item"])
+    // 关键：新 entry 不带 currentSubStage
+    expect(nextEntry.incrementalContext?.currentSubStage).toBeUndefined()
+  })
+
+  it("lint.json / fsd.md 缺失只记 warning 不阻断（master 漏派 slave 观测兜底）", () => {
+    const rid = "test-substage-lintfsd-warning"
+    const artifactsDir = join(dir, rid)
+    mkdirSync(artifactsDir, { recursive: true })
+    cpSync(join(dir, runId), artifactsDir, { recursive: true })
+    const run = advanceToTranslate(rid)
+    run.metadata.shardPlan = {
+      phase: "translate", unitMode: true,
+      shards: [["CORE_PKG.get_item"]], completedShards: [],
+    }
+    const entry = engine.findCurrentEntry(run)!
+    entry.incrementalContext = { targetUnits: ["CORE_PKG.get_item"], shardIndex: 0, totalShards: 1 }
+    engine.persist(run)
+
+    // per-unit JSON completed，但缺 lint.json + fsd .md（master 漏派 static-check/fsd）
+    mkdirSync(join(artifactsDir, "translations", "CORE_PKG"), { recursive: true })
+    writeFileSync(join(artifactsDir, "translations", "CORE_PKG", "get_item.json"), JSON.stringify({
+      unitRefName: "get_item", packageName: "CORE_PKG", status: "completed",
+      completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
+      subprogramMethods: [{ oracleName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
+    }), "utf-8")
+    let adv = engine.advance(rid, { result: "passed" })
+    if (adv.rejected && (adv as any).warningPending) {
+      adv = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
+    }
+    // 缺 lint/fsd 只 warning → 不阻断，advance 通过（1 shard → transition dedup）
+    expect(adv.rejected, `缺 lint/fsd 应 warning 放行不阻断: ${adv.rejectionReason}`).toBe(false)
+    expect(adv.run.currentPhase).toBe("dedup")
+    // warning 可见
+    const warns = (adv as any).crossSchemaWarnings as string[] | undefined
+    expect(warns?.some(w => w.includes("lint.json 缺失"))).toBe(true)
+    expect(warns?.some(w => w.includes("fsd") && w.includes(".md 缺失"))).toBe(true)
   })
 })
