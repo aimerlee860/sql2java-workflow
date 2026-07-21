@@ -8,7 +8,7 @@
 
 适用于 PL/SQL 存储过程 → 基于 **DDD 领域驱动分层** 的 Spring Boot + MyBatis 工程翻译场景。规约主体为分层架构与存储过程→Java 组件映射规约；版本与框架配置见末尾【强制】段落。
 
-> **包根项目特定**：规约中出现的 `com.icbc.fmhm` 仅为举例，实际包根由 plan 阶段按目标项目推导（如 `com.example.mfgerp`、`com.icbc.fmhm` 等），规约不规定固定包根。工程结构路径用 `{packageBase}`（项目根包）与 `{module}`（模块名）占位符表达。
+> **包根项目特定**：规约中出现的 `com.icbc.fmhm` 仅为举例，实际包根由 scaffold 阶段按目标项目推导（如 `com.example.mfgerp`、`com.icbc.fmhm` 等），规约不规定固定包根。工程结构路径用 `{packageBase}`（项目根包）与 `{module}`（模块名）占位符表达。
 
 > **工程结构章节**：下方 `## 工程结构` 为单模块的 DDD 分层目录布局模板。`{packageBase}` = plan.json 的 targetProject.packageBase（项目根包）；`{module}` = packageMapping 的模块名。scaffold 按每个 Oracle 包对应的模块复制此布局（基础设施层 `common/infrastructure` 为项目级共享，按 packageBase 只建一次）。该章节正文仅含可解析路径（行内 `#` 注释由引擎剥离），供 `--spec` 结构提取与 scaffold 消费。
 
@@ -356,7 +356,7 @@ public void saveDeal(XxxBean bean) throws TranFailException {
 4. 【强制】命名不得以下划线或美元符号开始或结束；严禁拼音与英文混合，禁止直接使用中文。
 5. 【强制】抽象类用 `Abstract`/`Base` 开头；异常类用 `Exception` 结尾；测试类以被测类名开头、`Test` 结尾。
 6. 【推荐】Service/DAO 层方法前缀：`get` 取单个、`list` 取多个、`count` 取统计、`save/insert` 插入、`remove/delete` 删除、`update` 修改。
-7. 【参考】类名前缀（如示例中的 `Int`/`Cfc` 等）为**项目特定的命名约定**，由 plan 阶段按目标项目推导，非强制；非该约定项目不得照抄此前缀。
+7. 【参考】类名前缀（如示例中的 `Int`/`Cfc` 等）为**项目特定的命名约定**，由 scaffold 阶段按目标项目推导，非强制；非该约定项目不得照抄此前缀。
 
 ### 4.2 注释规范
 
@@ -381,7 +381,7 @@ public class IrsCcsDealProcessor {
 **规约要点：**
 1. 【强制】所有注释必须使用中文（Javadoc、行内注释、TODO 标记等），专有名词（Spring、MyBatis、Mapper 等）与 Java 关键字保持英文原文。
 2. 【强制】类、类属性、类方法的注释使用 Javadoc 规范（`/** 内容 */`），不得使用 `// xxx`。
-3. 【强制】类注释必须包含：职责描述、主要流程、`@author`、`@version`、`@since`。`@author` 为**项目特定的开发者标识**，由 plan 阶段按目标项目推导（示例 `kfzx-zhangc` 仅 ICBC 举例），非该项目不得照抄。
+3. 【强制】类注释必须包含：职责描述、主要流程、`@author`、`@version`、`@since`。`@author` 为**项目特定的开发者标识**，由 scaffold 阶段按目标项目推导（示例 `kfzx-zhangc` 仅 ICBC 举例），非该项目不得照抄。
 4. 【强制】方法注释必须包含：功能描述、参数说明、返回值、异常说明。
 5. 【推荐】复杂逻辑使用 `<ol>`/`<ul>` 列表说明步骤。
 
@@ -578,7 +578,7 @@ public interface IntCfcIrsDealMapper {
 
 ## 十二、转换检查清单
 
-> 以下为**单个存储过程**的翻译落位顺序（Builder→Validator→Aggregate→…→Access），指导 translator 把同一 SP 的逻辑拆到各层组件；与工作流 stage 顺序（inventory→analyze→plan→scaffold→translate→dedup→review→verify）是两个维度，勿混淆。
+> 以下为**单个存储过程**的翻译落位顺序（Builder→Validator→Aggregate→…→Access），指导 translator 把同一 SP 的逻辑拆到各层组件；与工作流 stage 顺序（inventory→scaffold→translate→dedup→review→verify）是两个维度，勿混淆。
 
 转换 PL/SQL 存储过程时，按以下顺序执行：
 

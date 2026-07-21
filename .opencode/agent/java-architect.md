@@ -46,7 +46,7 @@ permission:
 
 工作完成后，输出 WORKER_SUMMARY + TASK_STATUS（最后一段）并结束。编排者会在你完成后推进工作流。
 
-plan、scaffold 和 dedup 都是 `condition: "always"` 阶段，完成后直接输出摘要即可。
+scaffold 和 dedup 都是 `condition: "always"` 阶段，完成后直接输出摘要即可。
 
 ## Oracle → Java 类型映射参考
 

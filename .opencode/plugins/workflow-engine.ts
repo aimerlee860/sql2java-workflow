@@ -1591,7 +1591,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
     }
   }
 
-  // analyze 阶段已砍（inventory→plan 直连），analyze artifact 校验分支删除。
+  // analyze/plan 阶段已砍（inventory→scaffold 直连），analyze/plan artifact 校验分支删除。
 
   // translate PROCEDURE 级（unit 模式）：agent 写 per-unit translations/{pkg}/{unitRef}.json，
   // 此处合并 → 聚合 translation.json + 校验 per-unit 文件，短路掉下方的包级 translation.json 校验。
@@ -1655,7 +1655,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
     }
   }
 
-  // 1. 顶层 schema（inventory / plan / scaffold / fix）—— analyze 已在上面提前返回
+  // 1. 顶层 schema（inventory / scaffold / fix）—— analyze/plan 已砍
   const topLevelSchema = getSchemaForPhase(phase)
   if (topLevelSchema) {
     const artifactFileName = getArtifactFilename(phase)

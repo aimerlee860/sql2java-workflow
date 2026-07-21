@@ -228,8 +228,7 @@ function buildEnrichments(phase: string): string {
 /** 阶段中文描述映射 */
 const PHASE_DESCRIPTIONS: Record<string, string> = {
   inventory: "源码扫描编目",
-  plan: "Java 架构规划",
-  scaffold: "Spring Boot 项目骨架生成",
+  scaffold: "Spring Boot 项目骨架生成（含 targetProject + packageMappings 决策）",
   translate: "PL/SQL → Java/MyBatis 逐包翻译",
   dedup: "跨包重复代码检测 + 公共模块抽取",
   review: "翻译质量审查",
@@ -285,7 +284,7 @@ export function renderSchemaHint(phase: string | null | undefined): string {
   //     聚合 translation.json 由 engine merge，不渲染。
   //   - inventory 的 packages/{PKG}.json + subprograms/{PKG.METHOD}.json 由 generateInventory 代码生成（非 worker 手写），不渲染。
   //   - review/verify：per-package 产物。
-  //   analyze 已砍（inventory→plan 直连），不再渲染 analysis-packages schema。
+  //   analyze 已砍（inventory→scaffold 直连），不再渲染 analysis-packages schema。
   const perUnitSchema = (phase === "translate") ? getPerUnitSchema(phase) : null
   const perPackageSchema = perUnitSchema ? null : getPerPackageSchema(phase)
   if (perUnitSchema) {

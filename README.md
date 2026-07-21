@@ -14,14 +14,14 @@
 Schema 预获取（可选，有 db.properties 时触发）→ ddl-output/
   │
   ▼
-inventory → analyze → plan（人工确认）→ scaffold → translate → dedup → review → verify → 完成
-                                              ↑       │             │            │
-                                              │       │             ↓ (failed)   ↓ (failed)
-                                              │       │             fix ←────────┘
-                                              └───────┘             └→ fix → review（增量回环）
+inventory → scaffold → translate → dedup → review → verify → 完成
+                              ↑       │             │            │
+                              │       │             ↓ (failed)   ↓ (failed)
+                              │       │             fix ←────────┘
+                              └───────┘             └→ fix → review（增量回环）
 ```
 
-**单流水线**：8 阶段 + 1 条件分支（fix），一个 runId，无条件前进；review/verify 失败进 fix 循环（增量重做），fix 完成回到 review。dedup 只在主线 translate 后跑一次。
+**单流水线**：6 阶段 + 1 条件分支（fix），一个 runId，无条件前进；review/verify 失败进 fix 循环（增量重做），fix 完成回到 review。dedup 只在主线 translate 后跑一次。analyze/plan 阶段已先后合并（analyze 砍、plan 合并入 scaffold）。
 
 ## 命令用法
 
@@ -53,7 +53,7 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → d
 /sql2java --mainEntry pkg/CORE_PKG.bulk_receive <path>    # 过程级入口：只译入口闭包；纯包名=全量
 /sql2java --dedupRules dedup-rules.json <path>            # dedup 排除/强制复用规则
 /sql2java --header <h> --body <b>                         # 双目录兜底（仅当包头/包体在无共同父目录的两棵树）
-/sql2java --phases plan,scaffold <path>                   # 指定阶段执行
+/sql2java --phases scaffold,translate <path>              # 指定阶段执行
 /sql2java status | resume                                 # 状态 / 续传
 ```
 
@@ -77,16 +77,14 @@ inventory → analyze → plan（人工确认）→ scaffold → translate → d
 | 阶段 | Agent | 重试 | 说明 |
 |------|-------|------|------|
 | inventory | sql-analyst | 2 | 确定性 regex 预扫描（零 LLM）+ per-package 编目 + 依赖图 |
-| analyze | sql-analyst | 2 | 子程序结构解析 + FSD 生成（按包分片） |
-| plan | java-architect | 1 | Java 架构规划（需人工确认） |
-| scaffold | java-architect | 1 | Spring Boot 骨架 + Entity/Mapper/DDD 组件壳 |
+| scaffold | java-architect | 1 | targetProject + packageMappings 决策 + Spring Boot 骨架 + Entity/Mapper/常量持有类（DDD 行为层壳由 translate-skeleton 建） |
 | translate | translator | 3 | 按拓扑序逐包翻译（按包分片，SCC 组共处） |
 | dedup | java-architect | 2 | 跨包重复检测 + 公共模块抽取 |
 | review | reviewer | 1 | 静态扫描 + LLM 语义审查 |
 | verify | reviewer | 2 | mvn compile + MyBatis 校验 + 测试 |
 | fix | translator | 5 | 修复 mustFix 项，完成后回到 review |
 
-- **分片**：analyze/translate 按包分片（`maxPackagesPerShard=1`），基于 Tarjan SCC 拓扑序；translate 保留 SCC 组共处（互依赖包同 session 拿对方签名），分片上游 artifact 收窄到本包。
+- **分片**：translate 按包分片（`maxPackagesPerShard=1`），基于 Tarjan SCC 拓扑序；translate 保留 SCC 组共处（互依赖包同 session 拿对方签名），分片上游 artifact 收窄到本包。
 - **fix 循环**：review/verify failed → fix → review；双层 exhausted 策略（globalMax=5 / phaseMax=5），达限 → `completed_with_issues`。
 - **质量门控**：翻译完成率 ≥0.8、review 分数 ≥70、测试通过率 ≥0.7。
 
@@ -118,7 +116,7 @@ nohup opencode run "/sql2java resume" --dangerously-skip-permissions --format js
   -m zai-coding-plan/glm-5.1 >> sql2java-output.json 2>&1 &
 ```
 
-`--dangerously-skip-permissions` 自动批准权限（含 plan 的 confirm）；`resume` 在上下文溢出/中断后断点续传。`opencode models` 查可用模型。
+`--dangerously-skip-permissions` 自动批准权限（各阶段 advance 无需人工 confirm）；`resume` 在上下文溢出/中断后断点续传。`opencode models` 查可用模型。
 
 ## Artifact 存储
 
@@ -130,8 +128,8 @@ nohup opencode run "/sql2java resume" --dangerously-skip-permissions --format js
 ├── inventory-packages/       # 逐包 inventory（LLM enriched）
 ├── analysis-packages/        # 逐包子程序结构
 ├── dependency-graph.json     # callGraph + topology + complexity
-├── plan.json / scaffold.json / dedup.json / fix.json
-├── fsd/{package}/{subprogram}.md        # FSD 文档（analyze 副产物）
+├── scaffold.json / dedup.json / fix.json   # scaffold.json 含 targetProject + packageMappings（原 plan.json 已合并）
+├── fsd/{package}/{subprogram}.md        # FSD 文档（translate 末尾 fsd sub-stage 产物）
 ├── translations/{package}/              # translation.json / review.json / verify.json
 ├── review-summary.json / verify-summary.json
 └── logs/                    # workflow.log / watchdog.log / _events.log
