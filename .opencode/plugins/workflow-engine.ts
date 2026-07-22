@@ -39,6 +39,7 @@ import { buildReviewSummary } from "../workflow/review-summary-builder"
 import { buildVerifySummary } from "../workflow/verify-summary-builder"
 import { scanDuplicates, type ScanResult } from "../workflow/dedup-scanner"
 import { scanReviewStatic } from "../workflow/review-scanner"
+import { generateScaffoldInput } from "../workflow/scaffold-input-builder"
 import { buildReviewFocus } from "../workflow/review-focus"
 import { ensureDeps, findOpencodeDir } from "../workflow/ensure-deps"
 import {
@@ -4639,6 +4640,17 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 }
               } else {
                 dedupScanSkipped = { skipReason: "artifactId 缺失（run-context/metadata 无），无法定位 projectRoot" }
+              }
+            }
+
+            // scaffold：dispatch 前确定性聚合 inventory + packages + tables → scaffold-input.json（零 LLM）。
+            // scaffold 子 agent 只读这一份，不再挨个 Read 60+ 原始 artifact（subprograms 完全不消费）。
+            // 仿 review 静态扫描：失败不阻断 dispatch。详见 .opencode/workflow/scaffold-input-builder.ts。
+            if (run.currentPhase === "scaffold") {
+              try {
+                generateScaffoldInput(artifactsDir)
+              } catch (e: any) {
+                getLogger().warn("[dispatch]", `scaffold-input 聚合失败（不阻断 dispatch）: ${e.message}`)
               }
             }
 

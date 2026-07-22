@@ -22,7 +22,7 @@ permission:
 
 ## 绝对规则
 
-1. **忠于分析结果** — 架构决策必须基于 inventory.json 和 packages/{pkg}.json 的实际内容，不能凭空假设
+1. **忠于分析结果** — 架构决策必须基于 `scaffold-input.json` 的实际内容，不能凭空假设
 2. **先决策后施工** — scaffold 阶段先在 Step 0 决策 targetProject + packageMappings，再生成骨架（Stage C 合并原 plan）
 3. **保持映射一致** — PL/SQL Package → Java 类的映射一旦确定，后续阶段严格遵循
 4. **命名可追溯** — 每个 Java 类名/方法名都能追溯到对应的 PL/SQL 对象
@@ -57,15 +57,16 @@ permission:
 
 ### 目标
 
-根据 inventory + packages/*.json + 注入的 Java 代码规约，**决策 Java 项目配置（targetProject）+ 包映射（packageMappings）**，并生成 Maven 项目骨架：pom.xml、无根包扁平分层目录、数据对象（DO）、基础设施类、**per-package 包级常量类（{Pkg}Constant）与变量 DTO（{Pkg}StateDTO）**、per-proc 去重类名映射（procClassNames）、schema-h2、测试配置。产出 `scaffold.json`。
+根据 `scaffold-input.json` + 注入的 Java 代码规约，**决策 Java 项目配置（targetProject）+ 包映射（packageMappings）**，并生成 Maven 项目骨架：pom.xml、无根包扁平分层目录、数据对象（DO）、基础设施类、**per-package 包级常量类（{Pkg}Constant）与变量 DTO（{Pkg}StateDTO）**、per-proc 去重类名映射（procClassNames）、schema-h2、测试配置。产出 `scaffold.json`。
 
 > **per-proc 业务类不在 scaffold 创建**——每个过程/函数的 per-proc 角色类（规约 §一/§3.2 定义的业务接口/业务实现/Mapper 角色）由 translate-skeleton 子阶段按过程独立 write 创建（一文件一类，各分片独占）。scaffold 只建项目级全局件 + per-package 常量类与变量 DTO + procClassNames 去重映射。Mapper 接口空壳、测试类骨架均不由 scaffold 生成（下放 translate）。
 
 ### 输入
 
-- `${artifactsDir}/inventory.json` — 包名列表 + 表、触发器、视图、序列编目
-- `${artifactsDir}/packages/{PKG}.json` — 包结构 + 子程序编目 + complexity（按需读取）
+- `${artifactsDir}/scaffold-input.json` — **唯一上游 artifact**（dispatch 前引擎聚合自 inventory + packages + tables 的窄字段）：`packageNames`、`packages[]`（`packageName`/`sourcePath`/`constants`/`variables`/`procedures`/`functions`）、`tables[]`（`name`/`columns`/`primaryKey`/`foreignKeys`）、`sequences[]`、`views[]`
 - **注入的 Java 代码规约** — 架构模型/命名/异常/日志/事务/MyBatis 约定、PL/SQL→Java 类型表（§3.1）
+
+> ⛔ **禁止 Read 原始上游文件**——`inventory.json`/`packages/*.json`/`tables/*.json`/`subprograms/*.json` 一律不读（scaffold-input.json 已含所需全部窄字段）。唯一例外：某包 `constants`/`variables` 为空数组时（扫描器按设计留空），可读该包 `packages[].sourcePath` 指向的 source.sql 抽取包级常量/变量兜底。
 
 ### 输出
 
@@ -76,7 +77,7 @@ permission:
 
 #### Step 0: 决策 targetProject + packageMappings（施工前）
 
-**0.1 读取上游 + 翻译闭包 scope**：读 inventory.json（`packageNames`）+ 按需读 `packages/{pkg}.json`。若 workOrder 注入 `## 翻译闭包 scope` 段：只处理 `scopePackages`；`mainEntry` 为过程级 `subdir/PKG.refName`。无 scope 段 = 全量翻译。
+**0.1 读取上游 + 翻译闭包 scope**：读 `scaffold-input.json`（`packageNames` + `packages[]`）。若 workOrder 注入 `## 翻译闭包 scope` 段：只处理 `scopePackages`；`mainEntry` 为过程级 `subdir/PKG.refName`。无 scope 段 = 全量翻译。
 
 **0.2 决策 targetProject**（不含 artifactId）：
 - `groupId` — 基于源码项目名（maven groupId；无根包模型下不设 `packageBase`）
@@ -89,7 +90,7 @@ permission:
 - **纯常量包（const-only，procedures 与 functions 均空）**：仅填规约定义的常量持有角色 `constant`（有变量再加 `state-dto`；无业务角色/mapper），常量类/变量 DTO 由 Step 5 生成
 - **scope 下 unit 不在 scopeUnits 的包**：有子程序者只映射角色集（per-proc 类壳由 skeleton 建，不译方法体）；纯常量包只映射常量持有角色
 
-**0.4 全局去重产 `procClassNames`**（无根包模型核心契约）：枚举 inventory 所有包的所有 subprogram（`packages/{pkg}.json` 的 procedures/functions 名 + subprograms 详情），每个过程名转 PascalCase 得基名 `{ProcPascal}`，按 inventory 稳定顺序（packageNames 顺序 → 包内 subprogram 顺序）全局分组：
+**0.4 全局去重产 `procClassNames`**（无根包模型核心契约）：枚举 `scaffold-input.json` 所有包的所有 subprogram 名（仅 `packages[].procedures`/`functions` 名数组，**不读 subprograms 详情**），每个过程名转 PascalCase 得基名 `{ProcPascal}`，按稳定顺序（`packageNames` 顺序 → 包内 procedures/functions 数组原序）全局分组：
 - 首现保持 `{ProcPascal}`，跨包同名碰撞者加数字后缀 `{ProcPascal}2`/`{ProcPascal}3`（无特殊字符，仅追加数字）
 - 产出 `generated.procClassNames: [{plsqlSchema, plsqlPackage, refName, className}]`，`className` = 去重后基名（不含角色后缀）
 - translate-core/skeleton 据此 + 角色后缀派生类名与文件名（`{className}{RoleSuffix}`，RoleSuffix 按规约 §4.1 由 role 派生），跨包调用按 `service.{className}Service` 派生；verify 据此归因测试类→包
@@ -138,7 +139,7 @@ scaffold 生成**确定的、可直接完成**的公共模块（其余由 dedup 
 
 #### Step 4: 生成数据对象
 
-从 inventory.json 的 `tables` 数组生成数据对象（项目级共享，写入规约定义的数据对象目录）：
+从 `scaffold-input.json` 的 `tables[]` 数组生成数据对象（项目级共享，写入规约定义的数据对象目录）：
 - 类名：表名转 PascalCase + 规约命名章节定义的后缀
 - 字段：列名转 camelCase，类型按规约 §3.1；POJO 属性用包装类型，不设默认值
 - 注解：`@Data`（Lombok）、`@TableName`（如适用）；布尔属性不加 `is` 前缀
@@ -149,12 +150,12 @@ scaffold 生成**确定的、可直接完成**的公共模块（其余由 dedup 
 > per-proc 业务类（业务接口/业务实现/Mapper）由 translate-skeleton 按过程独立创建，scaffold 不生成。本 Step 只生成 per-package 的**包级常量类**（规约 §3.4，落 `constant/`）与**包级变量 DTO**（规约 §3.5，落 `dto/`）。
 
 为每个有包级常量的 PL/SQL 包生成 `{Pkg}Constant` 常量类，位于 `constant/{PkgPascal}Constant.java`：
-- 读 `packages/{pkg}.json` 的 `constants`，生成 `public static final` 字段，PL/SQL 类型→Java 类型按规约 §3.1，常量名/值/类型保真，跨包引用对齐，按功能分组加中文注释
+- 读 `scaffold-input.json` 的 `packages[].constants`；**若该包 `constants` 为空数组**（扫描器按设计留空），读该包 `packages[].sourcePath` 指向的 source.sql 抽取包级常量兜底。生成 `public static final` 字段，PL/SQL 类型→Java 类型按规约 §3.1，常量名/值/类型保真，跨包引用对齐，按功能分组加中文注释
 - 类名 `{PkgPascal}Constant`（`PkgPascal` = 包名转 PascalCase）；`public final class` + 私有构造，纯 `static final` 字段
 - 记入 `generated.constants`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
 
 为每个有包级变量的 PL/SQL 包生成 `{Pkg}StateDTO` 变量 DTO，位于 `dto/{PkgPascal}StateDTO.java`：
-- 读 `packages/{pkg}.json` 的 `variables`，生成 session 作用域 bean 实例字段 + getter/setter（`@Component @Scope("session")`），`defaultValue` 转字段初始化；PL/SQL 类型→Java 类型按规约 §3.1
+- 读 `scaffold-input.json` 的 `packages[].variables`；**若该包 `variables` 为空数组**，读该包 `packages[].sourcePath` 指向的 source.sql 抽取包级变量兜底。生成 session 作用域 bean 实例字段 + getter/setter（`@Component @Scope("session")`），`defaultValue` 转字段初始化；PL/SQL 类型→Java 类型按规约 §3.1
 - 类名 `{PkgPascal}StateDTO`；`@Component @Scope("session")` 普通类
 - 记入 `generated.stateDtos`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
 
@@ -170,7 +171,7 @@ scaffold 生成**确定的、可直接完成**的公共模块（其余由 dedup 
 
 #### Step 6: 生成 schema-h2.sql
 
-从 `inventory.json` 的 tables + sequences + views 生成 H2 兼容 DDL，写入 `src/test/resources/schema-h2.sql`：
+从 `scaffold-input.json` 的 `tables` + `sequences` + `views` 生成 H2 兼容 DDL，写入 `src/test/resources/schema-h2.sql`：
 1. 建表：逐列生成 DDL，PL/SQL→H2 类型按规约 §3.1 推导（H2 PL/SQL 模式可直接用 VARCHAR2/NUMBER/DATE）；PK 加 `PRIMARY KEY`，`nullable=false` 加 `NOT NULL`，有默认值加 `DEFAULT`；PL/SQL UDT 列跳过加注释；移除分区子句
 2. 序列：`CREATE SEQUENCE IF NOT EXISTS {name} START WITH {startWith} INCREMENT BY {incrementBy}`
 3. 视图：简化视图（跳过 UDT 列加注释）

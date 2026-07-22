@@ -129,9 +129,11 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   // inventory 无外部 upstream：scan action 扫描源码产出内存 InventoryIndex，generateInventory 据此落盘
   // packages/+subprograms/+tables/+inventory.json。inventory-index.json 不再落盘。
   inventory: [],
-  // Stage C：plan 阶段已合并入 scaffold。scaffold 自行从 inventory + 注入规约推导 targetProject +
+  // Stage C：plan 阶段已合并入 scaffold。scaffold 自行从 scaffold-input + 注入规约推导 targetProject +
   // packageMappings（含组件类名），写入 scaffold.json。原 plan.json 不复存在。
-  scaffold: [..._INV_BASE],
+  // scaffold 不读原始 _INV_BASE：dispatch 前 engine 跑 generateScaffoldInput 聚合 inventory/packages/tables
+  // 的窄字段成 scaffold-input.json，scaffold 只读这一份（subprograms 完全不消费，packages/tables 噪声字段丢弃）。
+  scaffold: ["scaffold-input.json"],
   // translate：FSD 是末尾 fsd sub-stage 产出的人工审核总结文档，纯末端产物——任何阶段都不读 FSD 作输入，
   // 故 translate UPSTREAM 不含 fsd。translate 读 source.sql 翻译（不读 analysis-slice，analyze 已砍）。
   translate: [..._INV_BASE, ..._SCAFFOLD],
