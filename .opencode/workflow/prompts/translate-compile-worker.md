@@ -15,7 +15,7 @@
 ### 2. 封口（语法通过后）
 写 per-unit JSON `translations/{pkg}/{ref}.json`：
 - `status: "completed"`
-- `subprogramMethods`：本 unit 所有子程序（根 + cargo）→ Java 类/方法/文件映射，**javaFile 填全**。`javaClass` = 对外入口角色类全限定名，无根包模型下 = `service.{className}Service`（`className` 查 `scaffold.json.generated.procClassNames`，跨包去重后基名）；`javaMethod` = 入口方法名；`javaFile` = 相对 projectRoot 的入口类文件路径（`src/main/java/service/{className}Service.java`）。
+- `subprogramMethods`：本 unit 所有子程序（根 + cargo）→ Java 类/方法/文件映射，**javaFile 填全**。`javaClass` = 对外入口角色类全限定名，无根包模型下 = `service.{className}Service`（`className` 见上方「本 unit 文件清单」已注入，跨包去重后基名，勿查 scaffold.json）；`javaMethod` = 入口方法名；`javaFile` = 相对 projectRoot 的入口类文件路径（`src/main/java/service/{className}Service.java`）。
 - `completedSubprograms` / `files` / `decisions` / `todos` 按 UnitTranslationSchema 填。
 - 聚合 `translations/{pkg}/translation.json` 由 engine 自动 merge，**不直接写**。
 
@@ -30,6 +30,7 @@
 - ⛔ 只检查/修复本分片 targetUnits 的文件，禁止越界改其他 unit。
 - ⛔ 修复仅限语法错，不动翻译逻辑（逻辑问题交 review/fix）。
 - ⛔ 禁止 read `translations/{pkg}/translation.json`（聚合由 engine 做）。
+- ⛔ **禁止 glob/ls/find/Grep 扫描 `src/`、`translations/`、`generated/` 目录**（数百文件平铺，一扫即爆上下文）；只 read/write 下方「本 unit 文件清单」列出的绝对路径。
 
 ## Runtime Context + 本 unit 数据
 
@@ -49,6 +50,8 @@
 
 {{shardInfoBlock}}
 {{scopeBlock}}
+
+{{unitFilesBlock}}
 
 {{schemaHint}}
 {{rejectionErrorBlock}}

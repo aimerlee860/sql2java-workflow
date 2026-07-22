@@ -46,7 +46,7 @@ permission:
 8. **使用中文思考与输出** — 全程思考过程和所有输出内容必须使用中文，仅代码语法本身的英文关键词除外
 
 
-<!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入，无需在此重复 -->
+<!-- Java 代码规约由引擎自动注入系统提示（默认 docs/java-code-spec.md；--spec 指定时整体替换为用户规约——以实际注入内容为准，勿自行 read 规约文件），无需在此重复 -->
 
 ## 通用指令
 
@@ -157,6 +157,7 @@ sub-stage 序列：skeleton → translate-core → test-gen → static-check →
 - ⛔ **串行派 slave**：一次只派一个 sub-stage 的 slave，等其 TASK_STATUS 后再派下一个。禁止并行派多个 slave（同 unit 内 sub-stage 有依赖：skeleton→core→...→fsd）。
 - ⛔ 禁止 Read `dispatch-logs/` 下任何 workOrder 文件（slave 已从系统提示拿到，你读只污染上下文）。
 - ⛔ 禁止 Read `status/translate.json` / `run.json` / `logs/` 等推断任务进度——进度只靠你的 todowrite + slave TASK_STATUS。
+- ⛔ 禁止 glob/ls/find/Grep 扫描 `src/`、`translations/`、`generated/` 目录——扁平布局下数百文件平铺，一扫即爆上下文。slave 的精确输入/输出路径已由引擎注入各 slave workOrder 的「本 unit 文件清单」，你无需查看产物现状。
 
 ### 输出
 

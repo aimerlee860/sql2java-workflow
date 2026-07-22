@@ -1106,6 +1106,102 @@ export function buildScopeBanner(run: WorkflowRun): string {
   ].join("\n")
 }
 
+/** 读 JSON 文件（不存在/解析失败返回 null）。供 unitFilesBlock 解析 scaffold.json 复用。 */
+function readJsonOrNull(path: string): any {
+  if (!existsSync(path)) return null
+  try { return JSON.parse(readFileSync(path, "utf-8")) } catch { return null }
+}
+
+/** 过程名 → PascalCase 基名：去 `__序号` 重载后缀 + 下划线分段首字母大写（如 `get_item__1` → `GetItem`）。 */
+function procNameToPascal(ref: string): string {
+  const base = ref.replace(/__\d+$/, "")
+  return base.split(/[_\s]+/).filter(Boolean).map(s => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()).join("")
+}
+
+/**
+ * 解析本 unit 的去重 className（scaffold 全局去重后的基名，不含角色后缀）。
+ * 从 scaffold.json.generated.procClassNames 按 (plsqlPackage, refName) 大小写不敏感查；未查到则
+ * fallback procNameToPascal(ref) + warning（旧 run / scaffold 漏盖时兜底，正常 post-scaffold 不会走）。
+ */
+function resolveUnitClassName(artifactsDir: string, pkg: string, ref: string): string {
+  const scaffold = readJsonOrNull(join(artifactsDir, "scaffold.json"))
+  const arr = scaffold?.generated?.procClassNames
+  if (Array.isArray(arr)) {
+    const pkgU = pkg.toUpperCase()
+    const refU = ref.toUpperCase()
+    for (const pc of arr) {
+      if (String(pc?.plsqlPackage ?? "").toUpperCase() === pkgU && String(pc?.refName ?? "").toUpperCase() === refU) {
+        return String(pc.className ?? procNameToPascal(ref))
+      }
+    }
+  }
+  getLogger().warn("[dispatch]", `resolveUnitClassName 未命中 procClassNames: pkg=${pkg} ref=${ref}，fallback PascalCase`)
+  return procNameToPascal(ref)
+}
+
+/** 从 scaffold.json.generated.constants/stateDtos 按 plsqlPackage 查 {Pkg}Constant/{Pkg}StateDTO 的 file（projectRoot 相对）。 */
+function lookupPkgHolderFile(artifactsDir: string, pkg: string, kind: "constants" | "stateDtos"): string | null {
+  const scaffold = readJsonOrNull(join(artifactsDir, "scaffold.json"))
+  const arr = scaffold?.generated?.[kind]
+  if (!Array.isArray(arr)) return null
+  const pkgU = pkg.toUpperCase()
+  for (const e of arr) {
+    if (String(e?.plsqlPackage ?? "").toUpperCase() === pkgU && typeof e?.file === "string") return e.file
+  }
+  return null
+}
+
+/**
+ * 构造「本 unit 派生值与路径规则」块（仅 slave workOrder 注入）：注入**模型无关**的确定性部分
+ * （className、source.sql 切片、{Pkg}Constant/{Pkg}StateDTO 的 manifest 路径）+ 反 glob 硬约束 +
+ * 「Java 路径按注入规约派生」指针。**不硬编码角色→包/命名/每 stage 矩阵**——那些由注入的 Java 代码规约
+ * （可被 `--spec` 整体替换）定义，agent 据规约 + className 派生 Java 路径，保证架构无关。
+ *
+ * {Pkg}Constant/{Pkg}StateDTO 路径取自 scaffold.json.generated.constants/stateDtos 的 file 字段
+ * （scaffold LLM 按规约生成的模型特定路径，引擎只读不算，故仍架构无关）。
+ *
+ * subStage 为空（master）或非 unit 模式时返回 ""。
+ */
+function buildUnitFilesBlock(
+  subStage: string | undefined,
+  pkg: string,
+  ref: string,
+  projectRoot: string | null,
+  artifactsDir: string,
+): string {
+  if (!subStage) return ""
+  const cn = resolveUnitClassName(artifactsDir, pkg, ref)
+  const pr = projectRoot ?? "{projectRoot}"
+  const constRel = lookupPkgHolderFile(artifactsDir, pkg, "constants")
+  const dtoRel = lookupPkgHolderFile(artifactsDir, pkg, "stateDtos")
+  const constFile = constRel ? `${pr}/${constRel}` : null
+  const dtoFile = dtoRel ? `${pr}/${dtoRel}` : null
+  const source = `${artifactsDir}/shard-inputs/${pkg}/${ref}/source.sql`
+
+  const holderLines: string[] = []
+  if (constFile) holderLines.push(`- 包常量类（只读，scaffold 生成）：\`${constFile}\``)
+  if (dtoFile) holderLines.push(`- 包变量 DTO（只读，scaffold 生成）：\`${dtoFile}\``)
+
+  const lines: string[] = [
+    `## 本 unit 派生值与路径规则（⛔ 禁止 glob/ls/find 扫描目录）`,
+    `- plsqlPackage: \`${pkg}\` / refName: \`${ref}\``,
+    `- className: \`${cn}\`（跨包去重后基名，类名/文件名用此值；无碰撞时 = 过程名 PascalCase。勿自拼过程名、勿查 scaffold.json）`,
+    `- SQL 切片（只读）：\`${source}\``,
+    ...holderLines,
+    ``,
+    `### Java 文件路径派生（按注入规约，勿 glob 扫描）`,
+    `- per-proc Java 文件路径 = **注入的 Java 代码规约 §工程结构 的「角色→顶层包」映射 + §4.1 角色后缀 + 上面 className** 派生。规约可被 \`--spec\` 整体替换——以你系统提示里注入的规约为准，不要假设固定路径。`,
+    `- 本 sub-stage 读写哪些角色类：见本 worker「职责」段 + 规约 §3.2（不枚举，按规约角色集）。`,
+    `- 跨包/同包被调方签名见「依赖签名」块，不读其 Java 文件；签名缺了在 notes 说明，不要自行扫描。`,
+    ``,
+    `### ⛔ 文件操作硬约束`,
+    `- 禁止 glob/ls/find/Grep 扫描 \`src/\`、\`src/test/\`、\`translations/\`、\`generated/\` 目录——扁平布局下数百文件平铺，一扫即爆上下文。`,
+    `- Java 路径由规约 + className 派生（上方已给 className 与包件路径）；不得扫描目录找文件，不得自行拼接 \`${pkg}\`/\`${ref}\`/\`${cn}\` 以外的不符规约的路径。`,
+    `- 不读 scaffold.json 全文（className/包件路径已注入）；不读其他 unit 的产物。`,
+  ].filter(Boolean)
+  return lines.join("\n")
+}
+
 /**
  * 为 translate 分片 worker 渲染 .md 模板 workOrder（取代编排者即兴拼凑的任务提示）。
  *
@@ -1244,6 +1340,14 @@ export function buildShardedWorkerOrder(
     ].join("\n")
   }
 
+  // 11) unitFilesBlock（仅 slave workOrder 注入）：本 unit 精确输入/输出绝对路径 + className 直注 + 反 glob。
+  //     1 unit = 1 shard，slave 处理单 unit；master 不需要（不读写 Java），留空。
+  let unitFilesBlock = ""
+  if (subStageOverride && isUnitMode && shardTargetUnits.length > 0) {
+    const u = shardTargetUnits[0]
+    unitFilesBlock = buildUnitFilesBlock(subStageOverride, pkgOf(u), refOf(u), projectRoot, artDir)
+  }
+
   const ctx = {
     shardLabelSuffix,
     scopeBanner,
@@ -1260,6 +1364,7 @@ export function buildShardedWorkerOrder(
     schemaHint,
     rejectionErrorBlock,
     subStageProgressBlock,
+    unitFilesBlock,
   }
   // translate 主从架构：dispatch 渲染的是 translator master 的 workOrder（currentSubStage 恒 undefined →
   // translate-worker.md 模板）。各 sub-stage slave 的 workOrder 由 master 调 workflow `subdispatch` action 渲染

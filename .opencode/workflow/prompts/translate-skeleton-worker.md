@@ -7,7 +7,7 @@
 ## 职责（稳定）
 
 - 为本 unit（单个过程/函数）创建**未实现的 per-proc Java 文件**——按规约 §一/§3.2 的 per-proc 角色集，每个角色一个独立文件（一 public 类一文件）。scaffold 只建项目框架/全局公共件/per-package 常量类与变量 DTO，**不建 per-proc 业务类**——你直接 `write` 建 per-proc 类壳。
-- 类名 = `{className}{RoleSuffix}`，`className` 查 `scaffold.json.generated.procClassNames`（本 unit 的 `plsqlPackage`+`refName` 对应项的 `className`——已跨包去重，无碰撞时 = `{ProcPascal}`，碰撞时带数字后缀）。路径按角色落顶层包（规约 §工程结构，无根包）：service→`{projectRoot}/src/main/java/service/`、service-impl→`src/main/java/service/impl/`、mapper→`src/main/java/mapper/`，文件名 `{className}{RoleSuffix}.java`；Mapper 角色额外建 XML（`{projectRoot}/src/main/resources/mapper/{className}Mapper.xml`，namespace = `mapper.{className}Mapper`）。角色集查 `scaffold.json.packageMappings`（`plsqlSchema`/`components[]`，**无 javaPackage**）。⛔ 禁止自行编造类名/路径。
+- 类名 = `{className}{RoleSuffix}`，`className` 见下方「本 unit 派生值与路径规则」块（引擎直注，跨包去重后基名）——**勿查 scaffold.json**。Java 文件路径按**注入规约 §工程结构 的角色→顶层包 + §4.1 角色后缀 + className** 派生（规约可被 `--spec` 替换，以注入规约为准，勿假设固定路径）；Mapper 角色额外建 XML（namespace 按规约派生）。⛔ 禁止 glob 扫描目录、禁止自行编造类名/路径。
 - 方法签名桩：入参/出参从 SQL 切片 + 依赖签名块推导；桩体 `return null;`/`return 0;` 等默认值 + `// TODO: [translate] 标记人 标记时间 中文说明`，保证可编译。
 - 包级常量只读引用 scaffold 的 `{Pkg}Constant`（`constant/`，静态访问）、包级变量只读引用 `{Pkg}StateDTO`（`dto/`，注入 bean getter/setter）（不重建/不修改）。
 - **不翻译方法体**（translate-core 的事）；**不写 per-unit JSON**（compile 封口）。
@@ -23,6 +23,7 @@
 - ⛔ 只处理本分片 targetUnits，禁止越界。
 - ⛔ 源码只读 `shard-inputs/{pkg}/{ref}/source.sql`，禁止 read 整包 body/header。
 - ⛔ 跨包/同包跨单元调用签名查下方「依赖签名」预注入块，禁止 read `translations/`。
+- ⛔ **禁止 glob/ls/find/Grep 扫描 `src/`、`translations/`、`generated/` 目录**（数百文件平铺，一扫即爆上下文）；只 read/write 下方「本 unit 文件清单」列出的绝对路径。
 
 ## Runtime Context + 本 unit 数据
 
@@ -43,6 +44,8 @@
 {{shardInfoBlock}}
 {{scopeBlock}}
 {{depSignaturesBlock}}
+
+{{unitFilesBlock}}
 
 {{schemaHint}}
 {{rejectionErrorBlock}}

@@ -26,6 +26,7 @@
 
 - ⛔ 只检查本分片 targetUnits 的文件，禁止越界。
 - ⛔ 源码只读 `shard-inputs/{pkg}/{ref}/source.sql`；只读 + bash 跑检查，不改翻译产物。
+- ⛔ **禁止 glob/ls/find/Grep 扫描 `src/`、`translations/`、`generated/` 目录**（数百文件平铺，一扫即爆上下文）；只 read 下方「本 unit 文件清单」列出的绝对路径。
 
 ## Runtime Context + 本 unit 数据
 
@@ -44,6 +45,8 @@
 {{upstreamArtifactsList}}
 
 {{shardInfoBlock}}
+
+{{unitFilesBlock}}
 
 {{rejectionErrorBlock}}
 

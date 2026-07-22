@@ -45,6 +45,7 @@
 - ⛔ **串行派 slave**：一次一个 sub-stage，等 TASK_STATUS 后再派下一个；禁止并行。
 - ⛔ 禁止 Read `dispatch-logs/` 下任何 workOrder 文件（slave 系统提示已注入，你读只污染上下文）。
 - ⛔ 禁止 Read `run.json` / `logs/` / `status/translate.json` 等推断任务进度——进度只靠你的 todowrite + slave TASK_STATUS。`status/translate.json` 是你的 advance 门控**输出**，仅你在 6 sub-stage 全过后写一次；slave 不写它（slave 只回 TASK_STATUS 文本）。
+- ⛔ **禁止 glob/ls/find/Grep 扫描 `src/`、`translations/`、`generated/` 目录**——扁平布局下数百文件平铺，一扫即爆上下文。slave 的精确输入/输出路径已由引擎注入各 slave workOrder 的「本 unit 文件清单」，master 无需查看产物现状；进度靠 slave TASK_STATUS。
 
 ## 指令
 
