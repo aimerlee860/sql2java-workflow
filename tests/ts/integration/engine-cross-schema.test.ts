@@ -105,12 +105,12 @@ describe("validateCrossSchema — scaffold packageMappings 覆盖（Stage C：�
     setupBaseline(ctx.dir)
     writeArtifact(ctx.dir, RUN_ID, "scaffold.json", {
       targetProject: {
-        groupId: "com.example", packageBase: "com.example",
+        groupId: "com.example",
         javaVersion: "1.8", springBootVersion: "2.7.x",
       },
       packageMappings: [
-        { plsqlPackage: "CORE_PKG", javaPackage: "com.example.core",
-          components: [{role:"service",className:"CoreService"},{role:"service-impl",className:"CoreServiceImpl"},{role:"mapper",className:"CoreMapper"}] },
+        { plsqlPackage: "CORE_PKG",
+          components: [{role:"service"},{role:"service-impl"},{role:"mapper"}] },
         // 缺少 EXTRA_PKG 映射
       ],
     })
@@ -129,15 +129,15 @@ describe("validateCrossSchema — scaffold packageMappings 覆盖（Stage C：�
     setupBaseline(ctx.dir)
     writeArtifact(ctx.dir, RUN_ID, "scaffold.json", {
       targetProject: {
-        groupId: "com.example", packageBase: "com.example",
+        groupId: "com.example",
         javaVersion: "1.8", springBootVersion: "2.7.x",
       },
       // scope 只覆盖 CORE_PKG，但 packageMappings 把 out-of-scope 的 EXTRA_PKG 也映射了
       packageMappings: [
-        { plsqlPackage: "CORE_PKG", javaPackage: "com.example.core",
-          components: [{role:"service",className:"CoreService"},{role:"service-impl",className:"CoreServiceImpl"},{role:"mapper",className:"CoreMapper"}] },
-        { plsqlPackage: "EXTRA_PKG", javaPackage: "com.example.extra",
-          components: [{role:"service",className:"ExtraService"},{role:"service-impl",className:"ExtraServiceImpl"},{role:"mapper",className:"ExtraMapper"}] },
+        { plsqlPackage: "CORE_PKG",
+          components: [{role:"service"},{role:"service-impl"},{role:"mapper"}] },
+        { plsqlPackage: "EXTRA_PKG",
+          components: [{role:"service"},{role:"service-impl"},{role:"mapper"}] },
       ],
     })
 
@@ -157,12 +157,12 @@ describe("validateCrossSchema — scaffold packageMappings 覆盖（Stage C：�
     setupBaseline(ctx.dir)
     writeArtifact(ctx.dir, RUN_ID, "scaffold.json", {
       targetProject: {
-        groupId: "com.example", packageBase: "com.example",
+        groupId: "com.example",
         javaVersion: "1.8", springBootVersion: "2.7.x",
       },
       packageMappings: [
-        { plsqlPackage: "CORE_PKG", javaPackage: "com.example.core",
-          components: [{role:"service",className:"CoreService"},{role:"service-impl",className:"CoreServiceImpl"},{role:"mapper",className:"CoreMapper"}] },
+        { plsqlPackage: "CORE_PKG",
+          components: [{role:"service"},{role:"service-impl"},{role:"mapper"}] },
       ],
     })
 

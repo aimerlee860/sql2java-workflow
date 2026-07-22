@@ -54,21 +54,22 @@ describe("Schema 有效数据通过校验", () => {
     const data = {
       targetProject: {
         groupId: "com.example",
-        packageBase: "com.example",
         javaVersion: "1.8",
         springBootVersion: "2.7.x",
       },
       packageMappings: [
-        { plsqlSchema: "MFG", plsqlPackage: "PKG_A", javaPackage: "com.example.a", components: [{ role: "service-impl" }, { role: "mapper" }] },
+        { plsqlSchema: "MFG", plsqlPackage: "PKG_A", components: [{ role: "service-impl" }, { role: "mapper" }] },
       ],
       projectRoot: "/abs/path/generated/item-service",
       structure: {
-        directories: ["src/main/java/com/example"],
+        directories: ["src/main/java/mapper", "src/main/java/service"],
         pomXml: "pom.xml",
       },
       generated: {
         entities: [],
-        stateHolders: [{ file: "src/main/java/com/example/a/PkgAState.java", plsqlSchema: "MFG", plsqlPackage: "PKG_A" }],
+        procClassNames: [{ plsqlSchema: "MFG", plsqlPackage: "PKG_A", refName: "CREATE_A", className: "CreateA" }],
+        constants: [{ file: "src/main/java/constant/PkgAConstant.java", plsqlSchema: "MFG", plsqlPackage: "PKG_A" }],
+        stateDtos: [{ file: "src/main/java/dto/PkgAStateDTO.java", plsqlSchema: "MFG", plsqlPackage: "PKG_A" }],
         commonClasses: [],
       },
       conventions: "Standard Spring Boot conventions",
@@ -352,8 +353,8 @@ describe("Schema 无效数据被拒绝", () => {
   it("ScaffoldSchema 拒绝无 components 的 packageMapping（components 空数组）", () => {
     const data = makeScaffold({
       packageMappings: [
-        // 仅 plsqlPackage/javaPackage，无任何组件
-        { plsqlPackage: "PKG_A", javaPackage: "com.example.item.a", components: [] },
+        // 仅 plsqlPackage，无任何组件（无 javaPackage）
+        { plsqlPackage: "PKG_A", components: [] },
       ],
     })
     const result = ScaffoldSchema.safeParse(data)
@@ -364,7 +365,7 @@ describe("Schema 无效数据被拒绝", () => {
     const data = makeScaffold({
       packageMappings: [
         // 纯常量包：无子程序，只映射常量持有角色
-        { plsqlSchema: "", plsqlPackage: "PKG_CONST", javaPackage: "com.example.item.consts", components: [{ role: "constant" }] },
+        { plsqlSchema: "", plsqlPackage: "PKG_CONST", components: [{ role: "constant" }] },
       ],
     })
     const result = ScaffoldSchema.safeParse(data)

@@ -108,7 +108,7 @@ review 是**项目级单次审核**（无分片）。当 `incrementalContext.tar
 ### 输入
 
 - **上游 artifact**：
-  - `${artifactsDir}/scaffold.json` — 项目结构 + 包映射（packageMappings：plsqlPackage→javaPackage/components[] 组件类名）
+  - `${artifactsDir}/scaffold.json` — 项目结构 + 包映射（packageMappings：plsqlPackage→components[] 角色集；generated.procClassNames：per-proc 去重类名）
   - `${artifactsDir}/packages/{pkg}.json` — 逐包 inventory + complexity（依赖图由引擎按需推导，不落盘）
   - `${artifactsDir}/translations/*/translation.json` — 翻译记录
 - **Java 文件**：Runtime Context 中 `projectRoot` 指定的目录下的 Java 代码（使用 `read` 工具读取，路径为 `{projectRoot}/src/...`）

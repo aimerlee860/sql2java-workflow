@@ -18,25 +18,27 @@
 1. **去除 SQL 前缀**：禁止保留 `f_`/`r_`/`sp_` 等 SQL 函数/存储过程前缀。
 2. **PascalCase** 大驼峰命名，文件名清晰表达业务功能。
 3. **类型后缀**：必须含相应类型后缀（Service/ServiceImpl/Request/Response/Mapper/DO 等）。
-4. **类名派生**：`{ProcPascal}{RoleSuffix}`（`ProcPascal` = 本过程名转 PascalCase；`RoleSuffix` 按 Java 代码规约 §4.1 命名约定由 role 派生）。**禁止自行编造类名**——查 `{artifactsDir}/scaffold.json` 的 `packageMappings`（本 unit 所属 `plsqlPackage` → 映射的 `components[]` 角色集）。
-5. **命名冲突检查**：同目录不得已有同名文件；不得与相似名混淆；文件名/路径层不得用 Java 关键字（`import`/`package`/`class` 等）。
+4. **类名派生**：`{className}{RoleSuffix}`（`className` 查 `{artifactsDir}/scaffold.json` 的 `generated.procClassNames`——本 unit 的 `plsqlPackage`+`refName` 对应项，已跨包去重，无碰撞 = `{ProcPascal}`，碰撞带数字后缀；`RoleSuffix` 按 Java 代码规约 §4.1 命名约定由 role 派生）。**禁止自行编造类名**——角色集查 `packageMappings` 的 `components[]`（无 javaPackage）。
+5. **命名冲突检查**：跨包同名过程由 `procClassNames.className` 去重保证文件名不冲突，**必须用 `className` 派生文件名，不得自拼过程名**；文件名/路径层不得用 Java 关键字（`import`/`package`/`class` 等）。
 
 ## 四、包路径规范
 
+无根包扁平分层（Java 代码规约 §工程结构，角色→顶层包固定）：
+
 | 分类 | 路径（相对 projectRoot） |
 |---|---|
-| Service 接口 | `src/main/java/.../service/` |
-| ServiceImpl | `src/main/java/.../service/impl/` |
-| Request | `src/main/java/.../service/dto/request/` |
-| Response | `src/main/java/.../service/dto/response/` |
-| 工具类 | `src/main/java/.../util/` |
-| Mapper 接口 | `src/main/java/.../infra/mapper/` |
-| Mapper XML | `src/main/resources/.../infra/mapper/`（或 `mapper/{schema}/{pkg}/`） |
-| DO 实体类 | `src/main/java/.../infra/mapper/dataobject/` |
+| Service 接口 | `src/main/java/service/` |
+| ServiceImpl | `src/main/java/service/impl/` |
+| Mapper 接口 | `src/main/java/mapper/` |
+| Mapper XML | `src/main/resources/mapper/`（扁平） |
+| 包级常量类 | `src/main/java/constant/`（scaffold 生成，只读） |
+| 包级变量 DTO | `src/main/java/dto/`（scaffold 生成，只读） |
+| DO 实体类 | `src/main/java/entity/`（scaffold 生成，只读） |
+| 工具类 | `src/main/java/util/` |
 
-- 实际 javaPackage 由 `scaffold.json.packageMappings` 给出，文件位置 = `{projectRoot}/src/main/java/{javaPackage 以 / 分隔}/{ProcPascal}{RoleSuffix}.java`。
+- 文件位置 = `{projectRoot}/src/main/java/{角色顶层包}/{className}{RoleSuffix}.java`（service→`service`、service-impl→`service.impl`、mapper→`mapper`）。
 - ❌ 路径层禁含 `import`/`package`/`class` 关键字、空格、中文、特殊符号。
-- Mapper XML：`{projectRoot}/src/main/resources/mapper/{schema}/{pkg}/{ProcPascal}Mapper.xml`，namespace = `{javaPackage}.{ProcPascal}Mapper`。
+- Mapper XML：`{projectRoot}/src/main/resources/mapper/{className}Mapper.xml`，namespace = `mapper.{className}Mapper`。
 
 ## 五、DO 实体类
 
@@ -52,7 +54,7 @@
 
 ## 七、包级常量/变量
 
-- scaffold 已生成 per-package `{Pkg}State` 持有类（Java 代码规约 §3.4）。skeleton **只读引用**（业务实现类注入该 holder），不重建、不修改。
+- scaffold 已生成 per-package `{Pkg}Constant`（`constant/`，Java 代码规约 §3.4，常量 `static final` 直引）与 `{Pkg}StateDTO`（`dto/`，§3.5，变量注入 DTO bean getter/setter）。skeleton **只读引用**，不重建、不修改。
 
 ## 八、注释规范
 
@@ -62,10 +64,10 @@
 
 ## 九、自检清单
 
-- [ ] 对照 scaffold packageMappings，本 unit 各角色 per-proc 文件均已创建，路径与 javaPackage 一致
+- [ ] 对照 scaffold procClassNames + packageMappings，本 unit 各角色 per-proc 文件均已创建，文件名用 className 派生、路径按角色顶层包
 - [ ] 无遗漏、无增加（除角色集模板外不擅自加文件）
 - [ ] 未覆盖/删除/修改任何已存在文件
 - [ ] 桩体可被 javac parse 通过
-- [ ] 类名按 `{ProcPascal}{RoleSuffix}` 派生，无命名冲突、无 Java 关键字路径
+- [ ] 类名按 `{className}{RoleSuffix}` 派生（className 查 procClassNames），跨包同名已去重，无 Java 关键字路径
 - [ ] 注释含生成来源
 - [ ] DO 只引用未重建；Mapper XML namespace 正确

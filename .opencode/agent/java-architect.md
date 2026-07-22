@@ -57,9 +57,9 @@ permission:
 
 ### 目标
 
-根据 inventory + packages/*.json + 注入的 Java 代码规约，**决策 Java 项目配置（targetProject）+ 包映射（packageMappings）**，并生成 Maven 项目骨架：pom.xml、全局目录结构、数据对象（DO）、基础设施类、**per-package 包级状态持有类（{Pkg}State）**、schema-h2、测试配置。产出 `scaffold.json`。
+根据 inventory + packages/*.json + 注入的 Java 代码规约，**决策 Java 项目配置（targetProject）+ 包映射（packageMappings）**，并生成 Maven 项目骨架：pom.xml、无根包扁平分层目录、数据对象（DO）、基础设施类、**per-package 包级常量类（{Pkg}Constant）与变量 DTO（{Pkg}StateDTO）**、per-proc 去重类名映射（procClassNames）、schema-h2、测试配置。产出 `scaffold.json`。
 
-> **per-proc 业务类不在 scaffold 创建**——每个过程/函数的 per-proc 角色类（规约 §一/§3.2 定义的业务接口/业务实现/Mapper 角色）由 translate-skeleton 子阶段按过程独立 write 创建（一文件一类，各分片独占）。scaffold 只建项目级全局件 + per-package 状态持有类。Mapper 接口空壳、测试类骨架均不由 scaffold 生成（下放 translate）。
+> **per-proc 业务类不在 scaffold 创建**——每个过程/函数的 per-proc 角色类（规约 §一/§3.2 定义的业务接口/业务实现/Mapper 角色）由 translate-skeleton 子阶段按过程独立 write 创建（一文件一类，各分片独占）。scaffold 只建项目级全局件 + per-package 常量类与变量 DTO + procClassNames 去重映射。Mapper 接口空壳、测试类骨架均不由 scaffold 生成（下放 translate）。
 
 ### 输入
 
@@ -79,22 +79,26 @@ permission:
 **0.1 读取上游 + 翻译闭包 scope**：读 inventory.json（`packageNames`）+ 按需读 `packages/{pkg}.json`。若 workOrder 注入 `## 翻译闭包 scope` 段：只处理 `scopePackages`；`mainEntry` 为过程级 `subdir/PKG.refName`。无 scope 段 = 全量翻译。
 
 **0.2 决策 targetProject**（不含 artifactId）：
-- `groupId` / `packageBase` — 基于源码项目名
+- `groupId` — 基于源码项目名（maven groupId；无根包模型下不设 `packageBase`）
 - `javaVersion` / `springBootVersion` — **必须严格使用规约"Java 版本与框架配置"段落的值**
 
-**0.3 决策 packageMappings**（写入 `packageMappings[]`，每项含 `plsqlSchema`/`plsqlPackage`/`javaPackage`/`components[]`）：按规约分层架构/工程结构章节定义的 per-proc 角色集，为每个期望包填 `components[]`（每项仅 `{role}`——角色集模板，per-proc 类名由 `{ProcPascal}{RoleSuffix}` 约定派生，**不逐类枚举 className**）：
+**0.3 决策 packageMappings**（写入 `packageMappings[]`，每项含 `plsqlSchema`/`plsqlPackage`/`components[]`，**无 `javaPackage`**）：按规约分层架构/工程结构章节定义的 per-proc 角色集，为每个期望包填 `components[]`（每项仅 `{role}`——角色集模板，per-proc 类名由 `procClassNames` 去重基名 + 角色后缀派生，**不逐类枚举 className**）。角色→顶层包由规约固定（service→`service`、service-impl→`service.impl`、mapper→`mapper`、constant→`constant`、state-dto→`dto`），scaffold 不再派生 javaPackage：
 - `plsqlSchema`：inventory `packageName` 拆首个 `.` 的前段（大写）；无 schema 前缀的包填空串
 - `plsqlPackage`：包名（与 inventory 包标识同形，用于下游包匹配）
-- `javaPackage`：`{packageBase}.{schema-lower}.{pkg-lower}`（规约 §工程结构 命名空间嵌套；无 schema 时为 `{packageBase}.{pkg-lower}`）
 - **有子程序的包**：填规约定义的 per-proc 业务角色集（业务接口 + 业务实现 + mapper 角色）
-- **纯常量包（const-only，procedures 与 functions 均空）**：仅填规约定义的常量持有角色（无业务角色/mapper），状态持有类由 Step 6 生成
+- **纯常量包（const-only，procedures 与 functions 均空）**：仅填规约定义的常量持有角色 `constant`（有变量再加 `state-dto`；无业务角色/mapper），常量类/变量 DTO 由 Step 5 生成
 - **scope 下 unit 不在 scopeUnits 的包**：有子程序者只映射角色集（per-proc 类壳由 skeleton 建，不译方法体）；纯常量包只映射常量持有角色
+
+**0.4 全局去重产 `procClassNames`**（无根包模型核心契约）：枚举 inventory 所有包的所有 subprogram（`packages/{pkg}.json` 的 procedures/functions 名 + subprograms 详情），每个过程名转 PascalCase 得基名 `{ProcPascal}`，按 inventory 稳定顺序（packageNames 顺序 → 包内 subprogram 顺序）全局分组：
+- 首现保持 `{ProcPascal}`，跨包同名碰撞者加数字后缀 `{ProcPascal}2`/`{ProcPascal}3`（无特殊字符，仅追加数字）
+- 产出 `generated.procClassNames: [{plsqlSchema, plsqlPackage, refName, className}]`，`className` = 去重后基名（不含角色后缀）
+- translate-core/skeleton 据此 + 角色后缀派生类名与文件名（`{className}{RoleSuffix}`，RoleSuffix 按规约 §4.1 由 role 派生），跨包调用按 `service.{className}Service` 派生；verify 据此归因测试类→包
 
 #### Step 1: 创建 Maven 项目结构
 
-使用 `projectRoot` 作项目根。**优先使用自定义 `projectStructure`**（Runtime Context 有则严格按其路径列表创建，`{packageBase}`/`{schema}`/`{pkg}` 替换为实际段）。无 `projectStructure` 时按**注入规约 §工程结构**章节创建目录：全局公共目录（数据对象/异常/工具/配置）+ 每个 PL/SQL 包的命名空间目录 `{packageBase}/{schema}/{pkg}`（放 per-package 状态持有类）。
+使用 `projectRoot` 作项目根。**优先使用自定义 `projectStructure`**（Runtime Context 有则严格按其路径列表创建）。无 `projectStructure` 时按**注入规约 §工程结构**章节创建无根包扁平分层目录：规约列出的全部角色顶层包（main 侧 + 测试侧）+ `src/main/resources/mapper` + `src/test/resources`。
 
-> per-proc 业务类目录 `{packageBase}/{schema}/{pkg}` 由 translate-skeleton 写 per-proc 类时隐式创建，scaffold 不预建业务类文件。scaffold 只创建它自己写文件的目录（全局公共目录 + 各包状态持有类目录）。
+> per-proc 业务类目录（`service/`/`service.impl/`/`mapper/`）由 translate-skeleton 写 per-proc 类时隐式创建，scaffold 不预建业务类文件。scaffold 只创建它自己写文件的目录（全局顶层包目录 + `resources/mapper`）。
 
 #### Step 2: 生成 pom.xml
 
@@ -140,18 +144,21 @@ scaffold 生成**确定的、可直接完成**的公共模块（其余由 dedup 
 - 注解：`@Data`（Lombok）、`@TableName`（如适用）；布尔属性不加 `is` 前缀
 - 必须写 `toString`；注释格式遵循规约
 
-#### Step 5: 生成 per-package 状态持有类 {Pkg}State
+#### Step 5: 生成 per-package 包级常量类 {Pkg}Constant 与变量 DTO {Pkg}StateDTO
 
-> per-proc 业务类（业务接口/业务实现/Mapper）由 translate-skeleton 按过程独立创建，scaffold 不生成。本 Step 只生成 per-package 的**包级状态持有类**（规约 §3.4）。
+> per-proc 业务类（业务接口/业务实现/Mapper）由 translate-skeleton 按过程独立创建，scaffold 不生成。本 Step 只生成 per-package 的**包级常量类**（规约 §3.4，落 `constant/`）与**包级变量 DTO**（规约 §3.5，落 `dto/`）。
 
-为每个有包级常量或变量的 PL/SQL 包生成 `{Pkg}State` 持有类，位于该包命名空间目录 `{packageBase}/{schema}/{pkg}/{PkgPascal}State.java`：
-- 读 `packages/{pkg}.json` 的 `constants` + `variables`，一次性生成完整字段
-- **包级常量**（`constants`）→ `public static final` 字段，PL/SQL 类型→Java 类型按规约 §3.1，常量名/值/类型保真，跨包引用对齐，按功能分组加中文注释
-- **包级变量**（`variables`）→ session 作用域 bean 实例字段 + getter/setter（`@Component @Scope("session")`），`defaultValue` 转字段初始化；无包变量的包退化为纯常量类（字段全 `static final`，可省 `@Scope`）
-- 类名 `{PkgPascal}State`（`PkgPascal` = 包名转 PascalCase）；纯常量类用 `public final class` + 私有构造，有可变变量用普通 `@Component` 类
-- 该类记入 `generated.stateHolders`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
+为每个有包级常量的 PL/SQL 包生成 `{Pkg}Constant` 常量类，位于 `constant/{PkgPascal}Constant.java`：
+- 读 `packages/{pkg}.json` 的 `constants`，生成 `public static final` 字段，PL/SQL 类型→Java 类型按规约 §3.1，常量名/值/类型保真，跨包引用对齐，按功能分组加中文注释
+- 类名 `{PkgPascal}Constant`（`PkgPascal` = 包名转 PascalCase）；`public final class` + 私有构造，纯 `static final` 字段
+- 记入 `generated.constants`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
 
-> 无子程序且无包级常量/变量的包不生成状态持有类。纯常量包（无子程序）的 `{Pkg}State` 即其唯一 Java 产物（退化为纯常量类）。
+为每个有包级变量的 PL/SQL 包生成 `{Pkg}StateDTO` 变量 DTO，位于 `dto/{PkgPascal}StateDTO.java`：
+- 读 `packages/{pkg}.json` 的 `variables`，生成 session 作用域 bean 实例字段 + getter/setter（`@Component @Scope("session")`），`defaultValue` 转字段初始化；PL/SQL 类型→Java 类型按规约 §3.1
+- 类名 `{PkgPascal}StateDTO`；`@Component @Scope("session")` 普通类
+- 记入 `generated.stateDtos`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
+
+> 无子程序且无包级常量/变量的包不生成任何持有类。纯常量包（无子程序）的 `{Pkg}Constant` 即其唯一 Java 产物。仅有常量无变量的包不生成 StateDTO；仅有变量无常量的包不生成 Constant。
 
 #### Step 5.5: Mapper 接口 / 测试类（不下放说明）
 
@@ -184,59 +191,79 @@ spring:
       mode: never   # 使用 @Sql 注解控制 schema 加载
 mybatis:
   mapper-locations: classpath:mapper/*.xml
-  type-aliases-package: {typeAliasesPackage}
+  type-aliases-package: entity
   configuration:
     map-underscore-to-camel-case: true
 ```
-- `MODE=PL/SQL`：H2 PL/SQL 兼容；`DB_CLOSE_DELAY=-1`：JVM 关闭前保持连接；`DATABASE_TO_LOWER=TRUE`：配合 `map-underscore-to-camel-case`；`{typeAliasesPackage}` 从 packageBase 推导
+- `MODE=PL/SQL`：H2 PL/SQL 兼容；`DB_CLOSE_DELAY=-1`：JVM 关闭前保持连接；`DATABASE_TO_LOWER=TRUE`：配合 `map-underscore-to-camel-case`；`type-aliases-package: entity`（无根包，entity 顶层包固定）；`mapper-locations: classpath:mapper/*.xml`（扁平，无 schema/pkg 子目录）
+
+> **主类与组件扫描**（无根包必需）：scaffold 在 `config/Application.java` 生成主类，因无根包、各层包互为兄弟，`@SpringBootApplication` 默认只扫 `config` 子包，必须显式 `scanBasePackages` 列全部业务层包 + `@MapperScan("mapper")`：
+> ```java
+> package config;
+> import org.springframework.boot.SpringApplication;
+> import org.springframework.boot.autoconfigure.SpringBootApplication;
+> import org.mybatis.spring.annotation.MapperScan;
+>
+> @SpringBootApplication(scanBasePackages = {"config", "service", "service.impl", "mapper", "constant", "dto", "entity", "exception", "util"})
+> @MapperScan("mapper")
+> public class Application {
+>     public static void main(String[] args) { SpringApplication.run(Application.class, args); }
+> }
+> ```
+> 该类记入 `generated.commonClasses`（purpose="Spring Boot 启动类"）。
 
 #### Step 8: 写入 scaffold.json
 
 组装符合 ScaffoldSchema 的 JSON：
 - `targetProject`：Step 0 决策（不含 artifactId）
-- `packageMappings`：Step 0 决策（`plsqlSchema`/`plsqlPackage`/`javaPackage`/`components[]`；`components[]` 为 per-proc 角色集模板 `{role}`，无 className；纯常量包仅常量持有角色）
-- `coverageExcludes`：**规约 §工程结构 中非业务目录的路径子串列表**（如数据对象/异常/工具/配置目录的 `"{dir}/"` 形式）——verify 阶段 excludeReason 读此过滤 jacoco class，pom jacoco excludes 与此同步
+- `packageMappings`：Step 0 决策（`plsqlSchema`/`plsqlPackage`/`components[]`，**无 `javaPackage`**；`components[]` 为 per-proc 角色集模板 `{role}`，无 className；纯常量包仅常量持有角色）
+- `coverageExcludes`：**规约 §工程结构 中非业务目录的路径子串列表**（无根包下为 `config/`/`entity/`/`exception/`/`util/`/`constant/`/`dto/`）——verify 阶段 excludeReason 读此过滤 jacoco class，pom jacoco excludes 与此同步
 - `projectRoot`：原样使用 Runtime Context 注入值
 - `structure`：目录列表 + pomXml 内容
-- `generated`：scaffold 自身产出清单（entities、stateHolders、h2SchemaFile、testApplicationConfig、commonClasses）。per-proc 业务类/Mapper/测试类由 translate 产出，不在此
+- `generated`：scaffold 自身产出清单（entities、procClassNames、constants、stateDtos、h2SchemaFile、testApplicationConfig、commonClasses）。per-proc 业务类/Mapper/测试类由 translate 产出，不在此
 - 编码约定不写入 scaffold.json（`conventions` 字段已移除）——由注入规约提供
 
 示例（角色名/路径仅为占位，实际以规约为准）：
 ```json
 {
-  "targetProject": { "groupId": "com.example", "packageBase": "com.example.app", "javaVersion": "1.8", "springBootVersion": "2.7.x" },
+  "targetProject": { "groupId": "com.example", "javaVersion": "1.8", "springBootVersion": "2.7.x" },
   "packageMappings": [
-    { "plsqlSchema": "MFG_ERP", "plsqlPackage": "MFG_ERP.F_ORDER", "javaPackage": "com.example.app.mfg_erp.f_order",
+    { "plsqlSchema": "MFG_ERP", "plsqlPackage": "MFG_ERP.F_ORDER",
       "components": [ {"role": "<业务接口角色>"}, {"role": "<业务实现角色>"}, {"role": "mapper"} ] }
   ],
-  "coverageExcludes": ["<数据对象目录>/", "<异常目录>/", "<工具目录>/", "<配置目录>/"],
+  "coverageExcludes": ["config/", "entity/", "exception/", "util/", "constant/", "dto/"],
   "projectRoot": "/path/to/generated/app",
-  "structure": { "directories": ["src/main/java/com/example/app", "..."], "pomXml": "<?xml ..." },
+  "structure": { "directories": ["src/main/java/mapper", "src/main/java/service", "..."], "pomXml": "<?xml ..." },
   "generated": {
-    "entities": [{ "file": ".../{数据对象目录}/Order<后缀>.java", "tableName": "T_ORDER" }],
-    "stateHolders": [{ "file": ".../mfg_erp/f_order/FOrderState.java", "plsqlSchema": "MFG_ERP", "plsqlPackage": "MFG_ERP.F_ORDER" }],
+    "entities": [{ "file": "src/main/java/entity/OrderDO.java", "tableName": "T_ORDER" }],
+    "procClassNames": [{ "plsqlSchema": "MFG_ERP", "plsqlPackage": "MFG_ERP.F_ORDER", "refName": "CREATE_ORDER", "className": "CreateOrder" }],
+    "constants": [{ "file": "src/main/java/constant/FOrderConstant.java", "plsqlSchema": "MFG_ERP", "plsqlPackage": "MFG_ERP.F_ORDER" }],
+    "stateDtos": [{ "file": "src/main/java/dto/FOrderStateDTO.java", "plsqlSchema": "MFG_ERP", "plsqlPackage": "MFG_ERP.F_ORDER" }],
     "h2SchemaFile": "src/test/resources/schema-h2.sql",
     "testApplicationConfig": "src/test/resources/application-test.yml",
-    "commonClasses": [],
+    "commonClasses": [{ "file": "src/main/java/config/Application.java", "purpose": "Spring Boot 启动类" }],
     "commonModules": { "classes": [], "directories": [] }
   }
 }
 ```
 
 **字段说明**：
-- `packageMappings.components`：per-proc 角色集模板（`{role}`，无 className）；per-proc 类名由 translate 按规约 §4.1 `{ProcPascal}{RoleSuffix}` 派生
-- `stateHolders`：per-package `{Pkg}State` 持有类清单；per-proc 业务类/Mapper/测试类由 translate 产出，不在此记录
+- `packageMappings.components`：per-proc 角色集模板（`{role}`，无 className）；per-proc 类名由 translate 按规约 §4.1 `{procClassNames.className}{RoleSuffix}` 派生
+- `procClassNames`：per-proc 去重类名映射（跨包同名碰撞加数字后缀）；translate 据此派生类名/文件名 + 跨包引用，verify 据此归因
+- `constants`：per-package `{Pkg}Constant` 常量类清单；`stateDtos`：per-package `{Pkg}StateDTO` 变量 DTO 清单；per-proc 业务类/Mapper/测试类由 translate 产出，不在此记录
 - `coverageExcludes`：路径子串列表，与 pom jacoco excludes 同源
 
 ### 质量检查
 
 - [ ] pom.xml 可被 Maven 解析；含 JUnit5+Mockito（spring-boot-starter-test）、H2、mybatis-spring-boot-starter-test、jacoco-maven-plugin（prepare-agent+report 无 check；excludes 与 coverageExcludes 同步）
-- [ ] 目录结构按规约 §工程结构；全局公共目录由 scaffold 创建，per-proc 业务类目录由 translate-skeleton 创建
+- [ ] 目录结构按规约 §工程结构 无根包扁平分层；全局顶层包目录由 scaffold 创建，per-proc 业务类目录由 translate-skeleton 创建
+- [ ] `config/Application.java` 主类已生成（@SpringBootApplication(scanBasePackages=...) + @MapperScan("mapper")）
 - [ ] 数据对象覆盖 inventory 所有表（后缀按规约命名章节）
-- [ ] `targetProject` + `packageMappings`（含 `plsqlSchema`/`components[]` 角色集）+ `coverageExcludes` 已写入 scaffold.json
+- [ ] `targetProject`（无 packageBase）+ `packageMappings`（含 `plsqlSchema`/`components[]` 角色集，无 javaPackage）+ `coverageExcludes` 已写入 scaffold.json
+- [ ] `generated.procClassNames` 覆盖 inventory 所有 subprogram，跨包同名已去重加数字后缀
 - [ ] packageMappings 覆盖期望包
 - [ ] **scaffold 不生成 per-proc 业务类/Mapper/测试类**（由 translate 创建）
-- [ ] per-package `{Pkg}State` 持有类覆盖有包级常量/变量的包（constants→static final，variables→session bean 字段），记入 stateHolders
+- [ ] per-package `{Pkg}Constant`（constants）+ `{Pkg}StateDTO`（variables）覆盖有包级常量/变量的包，分别记入 constants/stateDtos
 - [ ] 基础设施类（按规约 §十四）已生成
 - [ ] schema-h2.sql 覆盖 inventory 所有 tables/sequences；UDT 列跳过加注释
 - [ ] application-test.yml 配 H2（MODE=PL/SQL）

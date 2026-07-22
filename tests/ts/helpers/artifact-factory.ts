@@ -121,7 +121,6 @@ export function makeScaffold(overrides: Record<string, unknown> = {}) {
   return {
     targetProject: {
       groupId: "com.example",
-      packageBase: "com.example.item",
       javaVersion: "1.8",
       springBootVersion: "2.7.x",
     },
@@ -129,7 +128,6 @@ export function makeScaffold(overrides: Record<string, unknown> = {}) {
       {
         plsqlSchema: "",
         plsqlPackage: "CORE_PKG",
-        javaPackage: "com.example.item",
         components: [
           { role: "service" },
           { role: "service-impl" },
@@ -137,25 +135,27 @@ export function makeScaffold(overrides: Record<string, unknown> = {}) {
         ],
       },
     ],
-    coverageExcludes: ["exception/", "entity/", "config/", "util/"],
+    coverageExcludes: ["exception/", "entity/", "config/", "util/", "constant/", "dto/"],
     projectRoot: "/abs/path/generated/item-service",
     structure: {
-      directories: ["src/main/java/com/example/item"],
+      directories: ["src/main/java/mapper", "src/main/java/service"],
       pomXml: "pom.xml",
     },
     generated: {
       entities: [],
-      stateHolders: [{ file: "src/main/java/com/example/item/CorePkgState.java", plsqlSchema: "", plsqlPackage: "CORE_PKG" }],
+      procClassNames: [{ plsqlSchema: "", plsqlPackage: "CORE_PKG", refName: "GET_ITEM", className: "GetItem" }],
+      constants: [{ file: "src/main/java/constant/CorePkgConstant.java", plsqlSchema: "", plsqlPackage: "CORE_PKG" }],
+      stateDtos: [{ file: "src/main/java/dto/CorePkgStateDTO.java", plsqlSchema: "", plsqlPackage: "CORE_PKG" }],
       commonClasses: [
-        { file: "src/main/java/com/example/item/exception/BusinessException.java", purpose: "业务异常基类" },
-        { file: "src/main/java/com/example/item/exception/DataNotFoundException.java", purpose: "数据未找到" },
+        { file: "src/main/java/exception/BusinessException.java", purpose: "业务异常基类" },
+        { file: "src/main/java/exception/DataNotFoundException.java", purpose: "数据未找到" },
       ],
       commonModules: {
         classes: [
-          { file: "src/main/java/com/example/item/exception/BusinessException.java", purpose: "业务异常基类", category: "exception" },
-          { file: "src/main/java/com/example/item/exception/DataNotFoundException.java", purpose: "数据未找到", category: "exception" },
+          { file: "src/main/java/exception/BusinessException.java", purpose: "业务异常基类", category: "exception" },
+          { file: "src/main/java/exception/DataNotFoundException.java", purpose: "数据未找到", category: "exception" },
         ],
-        directories: ["src/main/java/com/example/item/exception"],
+        directories: ["src/main/java/exception"],
       },
     },
     conventions: "Standard conventions",

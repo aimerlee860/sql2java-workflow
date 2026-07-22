@@ -6,15 +6,15 @@
 
 ## 职责（稳定）
 
-- 为本 unit（单个过程/函数）创建**未实现的 per-proc Java 文件**——按规约 §一/§3.2 的 per-proc 角色集，每个角色一个独立文件（一 public 类一文件）。scaffold 只建项目框架/全局公共件/per-package 状态持有类，**不建 per-proc 业务类**——你直接 `write` 建 per-proc 类壳。
-- 类名 = `{ProcPascal}{RoleSuffix}`（规约 §4.1 派生），路径 = `{projectRoot}/src/main/java/{javaPackage 以 / 分隔}/{ProcPascal}{RoleSuffix}.java`；Mapper 角色额外建 XML（namespace = `{javaPackage}.{ProcPascal}Mapper`）。类名/路径查 `scaffold.json.packageMappings`（`plsqlSchema`/`javaPackage`/`components[]` 角色集）。
+- 为本 unit（单个过程/函数）创建**未实现的 per-proc Java 文件**——按规约 §一/§3.2 的 per-proc 角色集，每个角色一个独立文件（一 public 类一文件）。scaffold 只建项目框架/全局公共件/per-package 常量类与变量 DTO，**不建 per-proc 业务类**——你直接 `write` 建 per-proc 类壳。
+- 类名 = `{className}{RoleSuffix}`，`className` 查 `scaffold.json.generated.procClassNames`（本 unit 的 `plsqlPackage`+`refName` 对应项的 `className`——已跨包去重，无碰撞时 = `{ProcPascal}`，碰撞时带数字后缀）。路径按角色落顶层包（规约 §工程结构，无根包）：service→`{projectRoot}/src/main/java/service/`、service-impl→`src/main/java/service/impl/`、mapper→`src/main/java/mapper/`，文件名 `{className}{RoleSuffix}.java`；Mapper 角色额外建 XML（`{projectRoot}/src/main/resources/mapper/{className}Mapper.xml`，namespace = `mapper.{className}Mapper`）。角色集查 `scaffold.json.packageMappings`（`plsqlSchema`/`components[]`，**无 javaPackage**）。⛔ 禁止自行编造类名/路径。
 - 方法签名桩：入参/出参从 SQL 切片 + 依赖签名块推导；桩体 `return null;`/`return 0;` 等默认值 + `// TODO: [translate] 标记人 标记时间 中文说明`，保证可编译。
-- 包级常量/变量只读引用 scaffold 的 `{Pkg}State`（不重建/不修改）。
+- 包级常量只读引用 scaffold 的 `{Pkg}Constant`（`constant/`，静态访问）、包级变量只读引用 `{Pkg}StateDTO`（`dto/`，注入 bean getter/setter）（不重建/不修改）。
 - **不翻译方法体**（translate-core 的事）；**不写 per-unit JSON**（compile 封口）。
 
 ## 输出（稳定）
 
-- per-proc Java 文件 + Mapper XML：`write` 到 `projectRoot` 目录。每个 unit 的类文件各占一文件、互不共享（无 read-or-create；同包不同 unit 落不同 per-proc 文件，天然无冲突）。
+- per-proc Java 文件 + Mapper XML：`write` 到 `projectRoot` 目录。每个 unit 的类文件各占一文件、互不共享（无 read-or-create）。跨包同名过程由 `procClassNames` 去重（数字后缀）保证文件名不冲突——必须用 `procClassNames.className` 派生文件名，不得自拼过程名。
 - ⛔ **不写 `status/translate.json`**——那是 translator master 的 advance 完成门控文件，仅 master 在 6 sub-stage 全过后写一次；slave 写会 clobber 门控、触发误 advance。你只在最后一段文本回 `TASK_STATUS` 给 master。
 
 ## 硬约束（稳定）

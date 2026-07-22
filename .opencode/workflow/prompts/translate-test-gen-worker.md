@@ -12,7 +12,7 @@
 
 ## 输出（稳定）
 
-- per-proc 测试 Java 文件：`write` 到 `projectRoot` 测试目录（`src/test/java/{javaPackage 以 / 分隔}/`，各 unit 独占测试文件，无冲突）。
+- per-proc 测试 Java 文件：`write` 到 `projectRoot` 测试目录——ServiceImpl 测试落 `src/test/java/service/impl/{className}ServiceImplTest.java`，Mapper 集成测试落 `src/test/java/mapper/{className}MapperIntegrationTest.java`（无根包，按角色顶层包；`className` 查 `scaffold.json.generated.procClassNames`，跨包同名已去重，各 unit 独占测试文件无冲突）。
 - ⛔ **不写 `status/translate.json`**——那是 translator master 的 advance 完成门控文件，仅 master 在 6 sub-stage 全过后写一次；slave 写会 clobber 门控、触发误 advance。你只在最后一段文本回 `TASK_STATUS` 给 master。
 
 ## 硬约束（稳定）

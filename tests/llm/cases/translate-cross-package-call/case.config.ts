@@ -84,15 +84,19 @@ const config: CaseConfig = {
     // scaffold（A 的骨架；Stage C：含 targetProject + 两包 packageMappings，原 plan.json 合并）
     writeArtifactJson(dir, "scaffold.json", makeScaffold({
       packageMappings: [
-        { plsqlPackage: PKG_B, javaPackage: "com.example.util", mapperInterface: "UtilMapper", serviceClass: "UtilService", serviceImplClass: "UtilServiceImpl" },
-        { plsqlPackage: PKG_A, javaPackage: "com.example.order", mapperInterface: "OrderMapper", serviceClass: "OrderService", serviceImplClass: "OrderServiceImpl" },
+        { plsqlPackage: PKG_B, components: [{ role: "service" }, { role: "service-impl" }, { role: "mapper" }] },
+        { plsqlPackage: PKG_A, components: [{ role: "service" }, { role: "service-impl" }, { role: "mapper" }] },
       ],
       projectRoot: PROJECT_ROOT_REL,
-      structure: { directories: ["src/main/java/com/example/order/service/impl"], pomXml: "pom.xml" },
+      structure: { directories: ["src/main/java/service/impl", "src/main/java/mapper"], pomXml: "pom.xml" },
       generated: {
         entities: [],
-        mapperInterfaces: [{ file: "src/main/java/com/example/order/mapper/OrderMapper.java", plsqlPackage: PKG_A }],
-        serviceShells: [{ file: "src/main/java/com/example/order/service/impl/OrderServiceImpl.java", plsqlPackage: PKG_A }],
+        procClassNames: [
+          { plsqlSchema: "", plsqlPackage: PKG_A, refName: "CREATE_ORDER", className: "CreateOrder" },
+          { plsqlSchema: "", plsqlPackage: PKG_B, refName: "GET_BY_ID", className: "GetById" },
+        ],
+        constants: [],
+        stateDtos: [],
         commonClasses: [],
       },
     }))

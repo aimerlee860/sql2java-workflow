@@ -79,6 +79,7 @@ export function buildVerifySummary(artifactsDir: string): {
   const projectRoot = readProjectRoot(artifactsDir)
   const packages = readPackageList(artifactsDir)
   const packageMappings = readPackageMappings(artifactsDir)
+  const procClassNames = readProcClassNames(artifactsDir)
   const coverageExcludes = readCoverageExcludes(artifactsDir)
 
   // ── 1. 解析 mvn 日志 ──
@@ -111,7 +112,7 @@ export function buildVerifySummary(artifactsDir: string): {
     }
     if (testExecution.testErrors) {
       for (const te of testExecution.testErrors) {
-        if (testBelongsToPkg(te.testClass, packageMappings, pkg)) passed = false
+        if (testBelongsToPkg(te.testClass, procClassNames, pkg)) passed = false
       }
     }
     // 覆盖率不达标的包也判为未通过（统一归因，供 fix 增量补测）
@@ -210,6 +211,16 @@ function readPackageMappings(artifactsDir: string): PkgMappingLite[] {
   // Stage C：packageMappings 从 plan.json 移到 scaffold.json
   const scaffold = readJson(join(artifactsDir, "scaffold.json"))
   return (scaffold?.packageMappings as PkgMappingLite[]) ?? []
+}
+
+type ProcClassNameLite = { plsqlSchema?: string; plsqlPackage?: string; refName?: string; className?: string }
+
+/** 读 scaffold.json.generated.procClassNames（无根包模型：per-proc 去重类名映射）。
+ *  旧 run（三段式布局）无此字段 → 返回空数组，testBelongsToPkg 将无法归因（兼容旧产物退化）。 */
+function readProcClassNames(artifactsDir: string): ProcClassNameLite[] {
+  const scaffold = readJson(join(artifactsDir, "scaffold.json"))
+  const arr = scaffold?.generated?.procClassNames
+  return Array.isArray(arr) ? arr as ProcClassNameLite[] : []
 }
 
 function readJson(path: string): any {
@@ -328,18 +339,34 @@ function classBelongsToPkg(classRelPath: string, files: PkgFiles): boolean {
   return false
 }
 
-/** 测试类是否属于本包（per-proc 模型：按 packageMappings.javaPackage 前缀匹配测试类 FQN）。
- *  per-proc 测试类位于 {javaPackage} 下（{ProcPascal}{RoleSuffix}Test），故按 FQN 包前缀归因。
+/** 测试类是否属于本包（无根包模型：测试类位于全局角色包 service.impl/{mapper} 下，
+ *  不再带 PL/SQL 包信息，故按测试类名解析去重基名 → 查 procClassNames 归因到 plsqlPackage）。
+ *  解析：取 FQN 末段简单类名，剥 IntegrationTest/Test 后缀 + ServiceImpl/Mapper/Service 角色后缀，
+ *  得 ResolvedBase；在 procClassNames 找 className===ResolvedBase 且 plsqlPackage===pkg（大小写不敏感）。
  *  surefire `<<< FAILURE! - [Class.method]` 中 Class 为测试类 FQN（parseTestExecution 已拆出方法名）。 */
 function testBelongsToPkg(
   testClass: string,
-  mappings: PkgMappingLite[],
+  procClassNames: ProcClassNameLite[],
   pkg: string,
 ): boolean {
-  const m = mappings.find(mp => mp.plsqlPackage?.toUpperCase() === pkg.toUpperCase())
-  if (!m || !m.javaPackage) return false
-  const tc = String(testClass ?? "").toLowerCase()
-  return tc.startsWith(String(m.javaPackage).toLowerCase() + ".")
+  const tc = String(testClass ?? "")
+  const simple = tc.split(".").pop() ?? ""
+  if (!simple) return false
+  // 剥测试后缀（先长后短）+ 角色后缀（先长后短），得去重基名 ResolvedBase
+  let base = simple
+  for (const suf of ["IntegrationTest", "Test"]) {
+    if (base.endsWith(suf) && base.length > suf.length) { base = base.slice(0, -suf.length); break }
+  }
+  for (const suf of ["ServiceImpl", "Mapper", "Service"]) {
+    if (base.endsWith(suf) && base.length > suf.length) { base = base.slice(0, -suf.length); break }
+  }
+  if (!base) return false
+  const baseLower = base.toLowerCase()
+  const pkgUpper = pkg.toUpperCase()
+  return procClassNames.some(
+    pc => String(pc.className ?? "").toLowerCase() === baseLower
+      && String(pc.plsqlPackage ?? "").toUpperCase() === pkgUpper,
+  )
 }
 
 function findDirCaseInsensitive(parent: string, name: string): string | undefined {

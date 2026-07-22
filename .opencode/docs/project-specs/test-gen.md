@@ -10,9 +10,9 @@
 
 ## 二、测试文件位置与命名
 
-- 目录：`{projectRoot}/src/test/java/{javaPackage 以 / 分隔}/`，与被测 per-proc 类同包。
-- 单元测试类名：`{ProcPascal}{业务实现后缀}Test`（如 `GetTrdDtlServiceImpl` → `GetTrdDtlServiceImplTest`）。
-- Mapper 集成测试类名：`{ProcPascal}MapperIntegrationTest`。
+- 目录（无根包，按角色顶层包）：ServiceImpl 单元测试落 `{projectRoot}/src/test/java/service/impl/`，Mapper 集成测试落 `{projectRoot}/src/test/java/mapper/`。
+- 单元测试类名：`{className}{业务实现后缀}Test`（`className` 查 `scaffold.json.generated.procClassNames`，如 `GetTrdDtl` → `GetTrdDtlServiceImplTest`）。
+- Mapper 集成测试类名：`{className}MapperIntegrationTest`。
 
 ## 三、单元测试类骨架
 

@@ -18,9 +18,9 @@
 对照 skeleton 规约的命名与包路径规范核对（lint 是核对侧）：
 
 - 文件名去 SQL 前缀、PascalCase、业务含义、类型后缀。
-- 包路径层级正确（Service/Impl/dto/request/dto/response/util/infra/mapper/dataobject）。
+- 包路径层级正确（无根包扁平分层：service/service.impl/mapper/constant/dto/entity/exception/util/config）——per-proc 类按角色落对应顶层包，文件名用 `procClassNames.className` 派生。
 - ❌ 路径层禁含 `import`/`package`/`class` 等关键字、空格、中文、特殊符号。
-- 命名冲突：同目录同名、相似名混淆。
+- 命名冲突：跨包同名过程由 `procClassNames` 去重（数字后缀）保证文件名不冲突；不得自拼过程名绕过去重。
 
 发现违规记 `{file, line, rule:"naming-convention", message}`。
 

@@ -28,7 +28,7 @@
 | 子程序 refName | inventory 算好的 refName（重载带 `__序号`） | `r_fxsp_imp` |
 | SQL 完整路径 | `schema.pkg.funcName` 格式 | `gmo.p_gmo_fx_trade_import.r_fxsp_imp` |
 | Java 方法 | `className.methodName()` 格式 | `FxspImpServiceImpl.fxspImp()` |
-| Java 文件相对路径 | 从 projectRoot 起的相对路径 | `src/main/java/.../FxspImpServiceImpl.java` |
+| Java 文件相对路径 | 从 projectRoot 起的相对路径（无根包，按角色顶层包） | `src/main/java/service/impl/FxspImpServiceImpl.java` |
 
 - 序号递增、路径可定位到文件、命名可追溯（过程名↔方法名）。
 - `completedSubprograms`、`files`、`decisions`、`todos` 等按 UnitTranslationSchema 填。

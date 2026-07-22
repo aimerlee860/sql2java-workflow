@@ -450,11 +450,12 @@ function extractScaffoldData(data: PhaseBusinessData, dir: string): void {
       // 优先计 commonModules.classes（带 category 的超集），缺失时回退 commonClasses，避免双计。
       const infraClasses = (gen.commonModules as { classes?: unknown[] } | undefined)?.classes
       const commonCount = safeArrayLen(infraClasses) > 0 ? safeArrayLen(infraClasses) : safeArrayLen(gen.commonClasses)
-      // 注：stateHolders = per-package {Pkg}State 持有类（scaffold 产出）；per-proc 业务类壳
-      // 由 translate-skeleton 创建，不在 scaffold 产出，故 generatedFiles 仅反映 scaffold 自身产出。
+      // 注：constants = per-package {Pkg}Constant、stateDtos = per-package {Pkg}StateDTO（scaffold 产出）；
+      // per-proc 业务类壳由 translate-skeleton 创建，不在 scaffold 产出，故 generatedFiles 仅反映 scaffold 自身产出。
       data.generatedFiles =
         safeArrayLen(gen.entities) +
-        safeArrayLen(gen.stateHolders) +
+        safeArrayLen(gen.constants) +
+        safeArrayLen(gen.stateDtos) +
         commonCount
     }
   } catch { /* skip */ }

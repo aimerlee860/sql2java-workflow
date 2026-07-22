@@ -661,21 +661,21 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
  * 格式 1 — Tree（含 ├── └── 连接符）：
  *   ├── src/
  *   │   └── main/
- *   │       └── java/{packageBase}/config
+ *   │       └── java/mapper
  *
  * 格式 2 — 缩进（纯空格/Tab，无 tree 字符）：
  *   src/
  *     main/
- *       java/{packageBase}/config
+ *       java/mapper
  *
  * 格式 3 — 平铺路径（每行一个完整路径）：
- *   src/main/java/{packageBase}/config
+ *   src/main/java/mapper
  *
  * 公共规则：
  *   - 空行和 # 开头的注释行跳过
  *   - {projectRoot}/ 根行跳过
  *   - 尾部 / 会被清理
- *   - {packageBase} 等占位符原样保留
+ *   - 路径占位符原样保留（新无根包布局无 {packageBase}）
  */
 function parseStructureText(text: string): string[] {
   const rawLines = text.split("\n").map(l => l.replace(/\r$/, ""))
@@ -4595,7 +4595,15 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             // 检测当前阶段是否有 artifact 校验错误（advance rejected 后重新 dispatch 的场景）
             // 重新执行 Zod 校验，如果有错误则注入到 workOrder 让 Worker 修正
             // 不查 status 门控（checkStatus=false）：dispatch 时 worker 尚未跑/刚跑完，status 缺失不应当作 artifact 错误注入
-            const artifactValidationError = validateArtifactOnDisk(run, false)
+            //
+            // ⚠️ 仅在「advance 真被拒过」时才注入：rejectionCount 按 phase:shardIndex 分桶，advance 拒绝时
+            // bumpRejectionCount 递增。fresh dispatch（count=0）绝不跑此校验——validateArtifactOnDisk 对 translate
+            // 有「每个 targetUnit 必须已有 translations/{pkg}/{ref}.json」的完整性检查（advance 期门禁），fresh dispatch
+            // 时产物还没产出是正常的，若注入会被 isStructural 误判成「结构格式问题，不需重新执行」，让 master 误以为
+            // 已完成、去查不存在的产物，而不是开跑 skeleton。
+            const artifactValidationError = engine.getRejectionCount(run) > 0
+              ? validateArtifactOnDisk(run, false)
+              : null
 
             // activeShardPlan 在分支前计算，供 workOrder 构造 + 返回块 shardLine 共用
             const activeShardPlan = engine.getShardPlan(run)

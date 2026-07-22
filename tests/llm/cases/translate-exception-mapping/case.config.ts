@@ -52,19 +52,20 @@ const config: CaseConfig = {
 
     writeArtifactJson(dir, "scaffold.json", {
       targetProject: {
-        groupId: "com.example", packageBase: "com.example.exc",
+        groupId: "com.example",
         javaVersion: "1.8", springBootVersion: "2.7.x",
       },
       packageMappings: [
-        { plsqlPackage: PACKAGE, javaPackage: "com.example.exc", mapperInterface: "ExcMapper", serviceClass: "ExcService", serviceImplClass: "ExcServiceImpl" },
+        { plsqlPackage: PACKAGE, components: [{ role: "service" }, { role: "service-impl" }, { role: "mapper" }] },
       ],
       projectRoot: PROJECT_ROOT_REL,
-      structure: { directories: ["src/main/java/com/example/exc/service/impl"], pomXml: "pom.xml" },
+      structure: { directories: ["src/main/java/service/impl", "src/main/java/mapper"], pomXml: "pom.xml" },
       generated: {
-        entities: [{ file: "src/main/java/com/example/exc/entity/AppLog.java", tableName: "T_APP_LOG" }],
-        mapperInterfaces: [{ file: "src/main/java/com/example/exc/mapper/ExcMapper.java", plsqlPackage: PACKAGE }],
-        serviceShells: [{ file: "src/main/java/com/example/exc/service/impl/ExcServiceImpl.java", plsqlPackage: PACKAGE }],
-        commonClasses: [{ file: "src/main/java/com/example/exc/exception/AppException.java", purpose: "业务异常基类" }],
+        entities: [{ file: "src/main/java/entity/AppLog.java", tableName: "T_APP_LOG" }],
+        procClassNames: [{ plsqlSchema: "", plsqlPackage: PACKAGE, refName: "SAVE_MSG", className: "SaveMsg" }],
+        constants: [],
+        stateDtos: [],
+        commonClasses: [{ file: "src/main/java/exception/AppException.java", purpose: "业务异常基类" }],
       },
       conventions: "Standard conventions",
     })

@@ -39,19 +39,20 @@ const config: CaseConfig = {
     // scaffold（Schema 形状：projectRoot 指向 fixture Java 所在工程；Stage C 含 targetProject + packageMappings）
     writeArtifactJson(dir, "scaffold.json", {
       targetProject: {
-        groupId: "com.example", packageBase: "com.example.bad",
+        groupId: "com.example",
         javaVersion: "1.8", springBootVersion: "2.7.x",
       },
       packageMappings: [
-        { plsqlPackage: PACKAGE, javaPackage: "com.example.bad", mapperInterface: "BadMapper", serviceClass: "BadService", serviceImplClass: "BadServiceImpl" },
+        { plsqlPackage: PACKAGE, components: [{ role: "service" }, { role: "service-impl" }, { role: "mapper" }] },
       ],
       projectRoot: PROJECT_ROOT_REL,
-      structure: { directories: ["src/main/java/com/example/bad/service/impl"], pomXml: "pom.xml" },
+      structure: { directories: ["src/main/java/service/impl", "src/main/java/mapper"], pomXml: "pom.xml" },
       generated: {
         entities: [],
-        mapperInterfaces: [{ file: "src/main/java/com/example/bad/mapper/BadMapper.java", plsqlPackage: PACKAGE }],
-        serviceShells: [{ file: IMPL_REL, plsqlPackage: PACKAGE }],
-        commonClasses: [{ file: "src/main/java/com/example/bad/exception/AppException.java", purpose: "业务异常基类" }],
+        procClassNames: [{ plsqlSchema: "", plsqlPackage: PACKAGE, refName: "DO_SOMETHING", className: "DoSomething" }],
+        constants: [],
+        stateDtos: [],
+        commonClasses: [{ file: "src/main/java/exception/AppException.java", purpose: "业务异常基类" }],
       },
       conventions: "Standard conventions",
     })

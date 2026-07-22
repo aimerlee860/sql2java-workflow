@@ -236,26 +236,26 @@ export const InventoryIndexSchema = z.object({
 // 共享子 schema：原 plan.json 的 targetProject + packageMappings（Stage C 合并入 scaffold.json）
 // ============================================================================
 
-/** targetProject（artifactId 不在此——由 run-context.json 提供，引擎据此算 projectRoot） */
+/** targetProject（artifactId 不在此——由 run-context.json 提供，引擎据此算 projectRoot）。
+ *  无根包模型：不设 packageBase，分层目录即顶层 package（规约 §工程结构）。 */
 export const TargetProjectSchema = z.object({
   groupId: z.string(),
-  packageBase: z.string(),
   javaVersion: z.string(),
   springBootVersion: z.string(),
 })
 
-/** PL/SQL Package → Java 包 + per-proc 角色集映射（架构无关：components[] 由注入的 Java 代码规约
+/** PL/SQL Package → per-proc 角色集映射（架构无关：components[] 由注入的 Java 代码规约
  *  分层架构/工程结构章节定义的角色决定，4 文件/DDD/自定义模型通用）。
  *  per-proc 模型：components[] 为角色集模板（role），每个 PL/SQL 过程/函数按此角色集生成一组
- *  per-proc 类，类名 {ProcPascal}{RoleSuffix} 由命名约定派生（规约 §4.1），不再逐类枚举 className。 */
+ *  per-proc 类，类名 {ResolvedBase}{RoleSuffix}（ResolvedBase 由 scaffold 全局去重决定，见
+ *  generated.procClassNames；无碰撞时 = {ProcPascal}），角色→顶层包由规约固定（无 javaPackage 字段）。 */
 export const PackageMappingSchema = z.object({
   /** PL/SQL schema（大写；inventory packageName 拆点首段）。无 schema 前缀的包为空串。 */
   plsqlSchema: z.string().default(""),
   plsqlPackage: z.string(),
-  /** Java 包 = {packageBase}.{schema-lower}.{pkg-lower}（规约 §工程结构 命名空间嵌套）。 */
-  javaPackage: z.string(),
   /** per-proc 角色集模板（规约定义，如 service/service-impl/mapper）。每个过程按此集生成 per-proc 类，
-   *  类名约定派生。至少 1 个——下游 verify 归因 / translate 跨包索引 / 测试生成据此 + 过程名派生类名。 */
+   *  类名由 procClassNames 的去重基名 + 角色后缀派生。至少 1 个——下游 verify 归因 / translate 跨包索引 /
+   *  测试生成据此 + 过程名派生类名。纯常量包（无子程序）仅含 constant（+ state-dto）角色。 */
   components: z.array(z.object({
     role: z.string(),
   })).min(1),
@@ -286,11 +286,33 @@ export const ScaffoldSchema = z.object({
       tableName: z.string(),
     })),
     /**
-     * per-package 包级状态持有类 {Pkg}State（规约 §3.4）。
-     * scaffold 从 inventory packages/{pkg}.json 的 constants+variables 一次性生成完整字段，
-     * translate 只读引用。每个有子程序或包级常量/变量的包均生成一个。
+     * per-proc 去重类名映射（无根包模型的核心契约，规约 §4.1）。
+     * scaffold 枚举 inventory 所有 subprogram，按 PascalCase 基名全局去重：首现保持 {ProcPascal}，
+     * 跨包同名碰撞者按 inventory 稳定顺序加数字后缀（CreateOrder2/CreateOrder3）。
+     * className = 去重后基名（不含角色后缀）。translate-core/skeleton 据此 + 角色后缀派生类名与文件名，
+     * 跨包调用按 service.{className}Service 派生；verify testBelongsToPkg 据此归因测试类→包。
      */
-    stateHolders: z.array(z.object({
+    procClassNames: z.array(z.object({
+      plsqlSchema: z.string(),
+      plsqlPackage: z.string(),
+      refName: z.string(),
+      className: z.string(),
+    })),
+    /**
+     * per-package 包级常量持有类 {Pkg}Constant（规约 §3.4，放 constant/ 目录，纯 static final）。
+     * scaffold 从 inventory packages/{pkg}.json 的 constants 一次性生成完整字段，translate 只读引用。
+     * 每个有包级常量的包均生成一个。
+     */
+    constants: z.array(z.object({
+      file: z.string(),
+      plsqlSchema: z.string(),
+      plsqlPackage: z.string(),
+    })),
+    /**
+     * per-package 包级变量 DTO {Pkg}StateDTO（规约 §3.5，放 dto/ 目录，可变实例字段 + getter/setter）。
+     * scaffold 从 inventory packages/{pkg}.json 的 variables 生成，仅有变量的包才生成。translate 只读引用。
+     */
+    stateDtos: z.array(z.object({
       file: z.string(),
       plsqlSchema: z.string(),
       plsqlPackage: z.string(),
@@ -370,7 +392,8 @@ export const TranslationSchema = z.object({
    *   与 callGraph key 的 refName、FSD 文件名一致。**唯一性由 refine 强制**（大小写不敏感去重），
    *   避免重载裸名重复导致跨包查找歧义。
    * - javaClass：调用入口的**全限定名**，即规约分层架构章节定义的对外入口角色类（调用方经
-   *   Spring DI 注入它）。全限定以便调用方直接 import。
+     *   Spring DI 注入它）。无根包模型下 = `service.{className}Service`（className 查 scaffold
+     *   `generated.procClassNames`，跨包去重后基名）。全限定以便调用方直接 import。
    * - javaMethod：Java 方法名（入口角色类上的方法名）。
    * - javaFile：入口角色类文件相对路径（可选，便于定位）。
    */

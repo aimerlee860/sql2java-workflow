@@ -179,7 +179,7 @@ sub-stage 序列：skeleton → translate-core → test-gen → static-check →
 
 - **上游 artifact**：
   - `${artifactsDir}/packages/{pkg}.json` — 逐包 inventory + complexity（依赖图由引擎按需推导，不落盘）
-  - `${artifactsDir}/scaffold.json` — 包映射（plsqlPackage→javaPackage/components[] 组件类名）+ 项目结构
+  - `${artifactsDir}/scaffold.json` — 包映射（plsqlPackage→components[] 角色集；generated.procClassNames：per-proc 去重类名）+ 项目结构
   - `${artifactsDir}/scaffold.json` — 项目结构
   - 触发阶段的 summary（`review-summary.json` 或 `verify-summary.json`）
   - 相关包的 per-package artifact（review.json / verify.json）
