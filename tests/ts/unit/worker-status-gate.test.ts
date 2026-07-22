@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest"
 import { mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { validateArtifactOnDisk } from "@plugins/workflow-engine"
+import { validateArtifactOnDisk } from "@plugin-impl/workflow-engine"
 import type { WorkflowRun } from "@workflow/engine-core"
 
 const RUN_ID = `test-status-gate-${process.pid}`

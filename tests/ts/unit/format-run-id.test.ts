@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { formatRunId } from "@plugins/workflow-engine"
+import { formatRunId } from "@plugin-impl/workflow-engine"
 
 describe("formatRunId", () => {
   it("格式为 run-<basename>-YYYYMMDD-HHMMSS", () => {

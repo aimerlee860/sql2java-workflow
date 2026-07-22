@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { narrowUpstreamForShard } from "@plugins/workflow-engine"
+import { narrowUpstreamForShard } from "@plugin-impl/workflow-engine"
 
 describe("narrowUpstreamForShard", () => {
   it("analyze: packages/*.json 收窄到本分片包，全局只读 artifact 保留", () => {

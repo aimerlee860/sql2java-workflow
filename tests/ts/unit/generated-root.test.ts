@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { resolveGeneratedRoot, claimGeneratedRoot, generatedRootFor } from "@plugins/workflow-engine"
+import { resolveGeneratedRoot, claimGeneratedRoot, generatedRootFor } from "@plugin-impl/workflow-engine"
 
 const MARKER = ".sql2java-run-id"
 let repo: string

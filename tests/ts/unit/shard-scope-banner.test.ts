@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { buildShardScopeBanner } from "@plugins/workflow-engine"
+import { buildShardScopeBanner } from "@plugin-impl/workflow-engine"
 import type { WorkflowRun } from "@workflow/engine-core"
 
 function makeRun(ic: Record<string, unknown> | undefined): WorkflowRun {

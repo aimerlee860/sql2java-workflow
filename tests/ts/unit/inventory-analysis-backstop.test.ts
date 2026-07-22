@@ -14,7 +14,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { scanSource } from "@workflow/plsql-scanner"
 import { buildInventoryFromIndex } from "@workflow/inventory-builder"
-import { validateArtifactOnDisk } from "@plugins/workflow-engine"
+import { validateArtifactOnDisk } from "@plugin-impl/workflow-engine"
 import type { WorkflowRun } from "@workflow/engine-core"
 
 const FIXTURE_MFG = resolve(import.meta.dirname, "../../../resources/MFG_ERP")

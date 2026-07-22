@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { unitWriteBoundaryViolation } from "@plugins/workflow-engine"
+import { unitWriteBoundaryViolation } from "@plugin-impl/workflow-engine"
 
 describe("unitWriteBoundaryViolation", () => {
   // 本分片 targetUnits 的 root ref 集合（大写）

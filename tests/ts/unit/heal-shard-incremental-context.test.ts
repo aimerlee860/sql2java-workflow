@@ -6,7 +6,7 @@
  *   串行锁卡死。healShardIncrementalContext 检测缺/错 targetUnits 并按 shards[shardIndex] 补写。
  */
 import { describe, it, expect } from "vitest"
-import { healShardIncrementalContext } from "@plugins/workflow-engine"
+import { healShardIncrementalContext } from "@plugin-impl/workflow-engine"
 
 const SHARD_PLAN = {
   phase: "translate",

@@ -26,6 +26,7 @@ export default defineConfig({
     alias: [
       { find: "@workflow", replacement: resolve(__dirname, ".opencode/workflow") },
       { find: "@plugins", replacement: resolve(__dirname, ".opencode/plugins") },
+      { find: "@plugin-impl", replacement: resolve(__dirname, ".opencode/plugin-impl") },
     ],
   },
 })

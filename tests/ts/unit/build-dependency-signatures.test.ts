@@ -11,7 +11,7 @@ import { describe, it, expect, beforeAll } from "vitest"
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { buildDependencySignaturesBlock } from "@plugins/workflow-engine"
+import { buildDependencySignaturesBlock } from "@plugin-impl/workflow-engine"
 
 let dir: string
 

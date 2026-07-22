@@ -16,7 +16,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { resolve, join } from "node:path"
 
 const AGENT_DIR = resolve(import.meta.dirname, "../../../.opencode/agent")
-const ENGINE_PATH = resolve(import.meta.dirname, "../../../.opencode/plugins/workflow-engine.ts")
+const ENGINE_PATH = resolve(import.meta.dirname, "../../../.opencode/plugin-impl/workflow-engine.ts")
 
 /** 无歧义的 Java 侧规约 token——出现即说明规约被内联进 agent 提示词。 */
 const FORBIDDEN_TOKENS = [

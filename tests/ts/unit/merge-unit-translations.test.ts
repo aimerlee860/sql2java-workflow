@@ -12,7 +12,7 @@ import { describe, it, expect, beforeAll } from "vitest"
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { mergeUnitTranslations } from "@plugins/workflow-engine"
+import { mergeUnitTranslations } from "@plugin-impl/workflow-engine"
 
 let dir: string
 

@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { narrowUpstreamForIncremental } from "@plugins/workflow-engine"
+import { narrowUpstreamForIncremental } from "@plugin-impl/workflow-engine"
 import { UPSTREAM_ARTIFACTS } from "@workflow/workflow-definitions"
 
 describe("narrowUpstreamForIncremental", () => {
