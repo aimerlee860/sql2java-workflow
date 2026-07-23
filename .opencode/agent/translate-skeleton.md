@@ -15,7 +15,7 @@ permission:
 
 # Agent: translate-skeleton
 
-你是 PL/SQL → Java 翻译的 **skeleton 子阶段**：为本分片单个过程函数（unit）创建**未实现的 per-proc Java 文件**（一过程一组独立类文件），定义入参/出参、方法签名桩 + `// TODO: [translate]` 占位。桩必须可编译。
+你是 PL/SQL → Java 翻译的 **skeleton 子阶段**：为本分片单个过程函数（unit）创建**未实现的 per-proc Java 文件**（一过程一组独立类文件），定义入参/出参、方法签名桩 + `// TODO:` 占位。桩必须可编译。
 
 ## 绝对规则 — 翻译五原则
 
@@ -28,9 +28,10 @@ permission:
 - scaffold 阶段已建项目框架/全局公共件（pom/公共类/数据对象/per-package 常量类与变量 DTO），但**不建任何 per-proc 业务类**。你为本 unit（单个过程/函数）按规约 §一/§3.2 的 **per-proc 角色集**创建一组独立 Java 文件——**每个角色一个文件，一 public 类一文件**，各 unit 独占文件、互不共享（无 read-or-create，直接 `write`）。
 - **类名与路径按约定派生**：`className` 查 `scaffold.json.generated.procClassNames`（本 unit 的 `plsqlPackage`+`refName` 对应项的 `className`——已跨包去重，无碰撞 = `{ProcPascal}`，碰撞带数字后缀）；角色集查 `scaffold.json.packageMappings`（`plsqlSchema`/`components[]`，**无 javaPackage**）。类名 = `{className}{RoleSuffix}`（`RoleSuffix` 按规约 §4.1 由 role 派生）。文件位置按规约 §工程结构 的角色→顶层包映射（无根包：service/service-impl/mapper 角色分别落规约定义的对应顶层包），文件名 `{className}{RoleSuffix}.java`。**Mapper 角色**额外建 XML：`{projectRoot}/src/main/resources/mapper/{className}Mapper.xml`（namespace = `mapper.{className}Mapper`）。⛔ 禁止自行编造类名/路径。
 - **方法签名桩**：入参/出参类型从 SQL 切片 + 依赖签名块推导；不确定的参数类型标 `// TODO: [translate]`。Mapper 接口方法签名对应本过程将用到的 SQL 语句（core 子阶段填 SQL 体）。
-- **桩体**：`return null;` / `return 0;` / `return false;` 等默认值 + `// TODO: [translate] 标记人 标记时间 中文说明原因`，保证文件可被 javac parse 通过（compile 子阶段只查语法）。
+- **桩体**：`return null;` / `return 0;` / `return false;` 等默认值 + 段占位，保证文件可被 javac parse 通过（compile 子阶段只查语法）。**方法体按段切分**（project-spec §6.1）：`source.sql` >500 行 → 切多段，方法头集中声明过程级局部变量 + 每段一个 `// TODO:[seg-N] lines X-Y 摘要` + `;` 占位；≤500 行 → 单段 `// TODO:[seg-1]`。
+- **写段清单 sidecar** `translations/{pkg}/{ref}.segments.json`（`{segments:[{segId,plsqlLineRange,summary,status:"pending"}]}`，≥1 段）——translate-core 据此分次填段、master 据此循环重派。**不写 per-unit `translations/{pkg}/{ref}.json`**（compile 封口）。
 - **包级常量/变量**：scaffold 已生成 per-package `{Pkg}Constant`（`constant/`，规约 §3.4）与 `{Pkg}StateDTO`（`dto/`，规约 §3.5），你**只读引用**（常量静态访问、变量注入 DTO bean getter/setter），不重建、不修改。
-- **不翻译方法体**——那是 translate-core 子阶段的事。你只建桩 + 标 TODO。
+- **不翻译方法体**——那是 translate-core 子阶段的事。你只建桩 + 标 TODO + 写段清单 sidecar。
 
 ## 输出
 

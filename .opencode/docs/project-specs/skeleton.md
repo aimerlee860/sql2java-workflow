@@ -53,6 +53,30 @@
 - 桩体：`return null;` / `return 0;` / `return false;` 等默认值 + `// TODO: [translate] 标记人 标记时间 中文说明原因`，保证可编译。
 - **Request/Response DTO**（若属本 unit 角色集）：用 `@Data` 注解；字段数量/类型必须与 SQL 切片 `shard-inputs/{pkg}/{ref}/source.sql` 的 IN/OUT 参数一致，不一致标 `// TODO: [translate]`，禁编造字段。
 
+### 6.1 超长过程段切分（>500 行）
+
+过程体行数 > 500 时，单次 translate-core 翻译上下文撑不住、质量差。skeleton 在此**预切多段**，core 分次填段：
+
+- **触发**：`source.sql` 体行数 > 500 → 切多段；≤500 → 1 段。**始终写 `segments[]`（≥1）到 sidecar `translations/{pkg}/{ref}.segments.json`**（独立于 compile 封口的 per-unit json），每段 `{segId, plsqlLineRange, summary, status:"pending"}`。
+- **切分算法**：`n = ceil(总行数/500)`，目标段行数 `t = 总行数/n`，在第 `i×t` 附近找**最近的有效逻辑边界**断开。有效边界 = IF/FOR/WHILE/BEGIN-END 块闭合、子程序调用前后、注释/空行分隔的业务步骤。**硬约束：任一段不得超 500 行**（边界稀疏时在段内最近子边界再切，宁可多切不过限）。601 行 → 2×~300，非 500+101。
+- **入口方法体结构**（多段时）：
+  ```java
+  public String execute(...) {
+      // === 过程级局部变量（PL/SQL 声明区 1:1，skeleton 一次性声明；core 填段不得新增过程级变量）===
+      Long docId; LocalDate bizDate; ...
+      // TODO:[seg-1] lines 10-45 参数校验
+      ;
+      // TODO:[seg-2] lines 46-120 查交易列表
+      ;
+      // TODO:[seg-N] ...
+      return result;
+  }
+  ```
+- **段 TODO 格式**：`// TODO:[seg-N] lines X-Y 中文摘要` + `;` 占位（保 javac parse）。`seg-N` 与 `segments[].segId` 一一对应。
+- **过程级局部变量集中声明**在方法头（PL/SQL 变量声明区 1:1 映射）——这是段间数据对接的唯一来源，core 填段只用这些已声明变量。
+- **≤500 行单段**：`segments[]` 1 段，方法体内一个 `// TODO:[seg-1]` 桩（等价原 `// TODO: [translate]` 单桩路径）。
+- 桩仍必须可被 javac parse 通过（段 TODO 用纯注释 + `;`，不引用未初始化变量）。
+
 ## 七、包级常量/变量
 
 - scaffold 已生成 per-package `{Pkg}Constant`（`constant/`，Java 代码规约 §3.4，常量 `static final` 直引）与 `{Pkg}StateDTO`（`dto/`，§3.5，变量注入 DTO bean getter/setter）。skeleton **只读引用**，不重建、不修改。
@@ -72,3 +96,4 @@
 - [ ] 类名按 `{className}{RoleSuffix}` 派生（className 查 procClassNames），跨包同名已去重，无 Java 关键字路径
 - [ ] 注释含生成来源
 - [ ] DO 只引用未重建；Mapper XML namespace 正确
+- [ ] `segments[]` 已写 sidecar `translations/{pkg}/{ref}.segments.json`（≥1 段）；>500 行时按算法切多段、单段 ≤500；段 TODO 标记 `seg-N` 与 `segments[].segId` 一一对应；过程级局部变量集中声明于方法头

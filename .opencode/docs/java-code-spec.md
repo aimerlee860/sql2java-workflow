@@ -27,7 +27,6 @@ src/main/java/exception                         # 业务异常体系 BusinessExc
 src/main/java/util                              # 通用工具类（全局）
 src/main/resources/mapper                       # per-proc Mapper XML（{Proc}Mapper.xml，扁平）
 src/test/java/service/impl                      # per-proc ServiceImpl 测试（{Proc}ServiceImplTest.java）
-src/test/java/mapper                            # per-proc Mapper 集成测试（{Proc}MapperIntegrationTest.java）
 src/test/resources                              # schema-h2.sql + application-test.yml
 
 ## 一、分层架构规范
@@ -54,6 +53,7 @@ src/test/resources                              # schema-h2.sql + application-te
 3. 【强制】ServiceImpl 通过**构造器注入** Mapper（与 Lombok `@RequiredArgsConstructor` 配合），禁止字段注入。
 4. 【强制】跨包调用经被调方 **Service 接口**注入，不得直接引用他包 Mapper。
 5. 【强制】主存储过程含多个子流程（子程序调用 / 顺序逻辑段 / 跨包调用）时，ServiceImpl 按原 PL/SQL 调用顺序编排，体现"主存储过程调用链"。步骤单一的主存储过程保持单方法，不强拆。拆分依据是原 SP 的调用结构（调用语句边界），属忠实呈现而非重构，不违反"不重构"原则。
+6. 【强制】**超长过程（>500 行）多段切分**：过程体 >500 行时，skeleton 在入口方法内按语义切多段（`// TODO:[seg-N]` 段块，方法头集中声明过程级局部变量），translate-core 分次填段（每 dispatch 填一段、保留其它段），仍属同一入口方法、忠实呈现，**不提成多方法、不引入 Context DTO**（见 skeleton §6.1 / translate-core §1.1）。
 
 ## 二、ServiceImpl 实现模式
 
@@ -227,7 +227,7 @@ public class FOrderStateDTO {
 | 异常类 | `XxxException` | `BusinessException` |
 | 包级常量类 | `{Pkg}Constant` | `FOrderConstant` |
 | 工具类 | `XxxUtil` | `StringUtil` |
-| 测试类 | `{Proc}ServiceImplTest` / `{Proc}MapperIntegrationTest` | `CreateOrderServiceImplTest` |
+| 测试类 | `{Proc}ServiceImplTest` | `CreateOrderServiceImplTest` |
 
 > `{Proc}` = 过程/函数名转 PascalCase（下划线分段首字母大写，如 `CREATE_ORDER` → `CreateOrder`）；**跨包同名过程碰撞时由 scaffold 全局去重，首现保持 `{ProcPascal}`，后续加数字后缀 `{ProcPascal}2`/`{ProcPascal}3`**（去重后基名记为 `{ResolvedBase}`，落 `scaffold.json.generated.procClassNames`）；`{Pkg}` = PL/SQL 包名转 PascalCase；`{Table}` = 表名转 PascalCase。Java 顶层包段全小写（`service.impl`）。
 

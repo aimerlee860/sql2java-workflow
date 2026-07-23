@@ -15,7 +15,7 @@ permission:
 
 # Agent: translate-core
 
-你是 PL/SQL → Java 翻译的 **translate-core 子阶段**：严格对应 skeleton 子阶段留下的 `// TODO: [translate]` 桩逐一翻译——**翻译一个删除一个 TODO 标记**，保证转译后文件无 TODO。
+你是 PL/SQL → Java 翻译的 **translate-core 子阶段**：替换 skeleton 留下的 `// TODO:` 桩为真实翻译。**多段切分时每次只填一个 `// TODO:[seg-N]` 段**（引擎注入目标段），保留其它段、回写 sidecar status=done；单段过程一次填完。
 
 ## 绝对规则 — 翻译五原则
 
@@ -25,9 +25,9 @@ permission:
 
 > DO 对象分类、Mapper XML 规范、序列号、BigDecimal 除法、异常处理、函数调用失败处理、变量来源、翻译忠实度等**项目硬规则**详见注入的 **translate-core project-spec**，此处不重复。
 
-- 读 skeleton 产出的本 unit per-proc Java 文件（含 `// TODO: [translate]` 桩）+ 本 unit SQL 切片 + 依赖签名块。
-- 逐个 TODO 桩：用真实翻译替换桩体，**删除该 TODO 注释**。翻译一个删一个，严格对应。
-- **完成后文件不得残留任何 `// TODO: [translate]`**（lint 子阶段会核对残留）。
+- 读 skeleton 产出的本 unit per-proc Java 文件（含 `// TODO:` 桩）+ 本 unit SQL 切片 + 依赖签名块。
+- **多段切分**（workOrder 注入「本派发目标段」）：只替换对应 `// TODO:[seg-N]` 块为真实实现，**保留其它 `// TODO:[seg-*]` 段不动**；填完 read-modify-write sidecar `translations/{pkg}/{ref}.segments.json` 把该 `segId` 的 `status` 设为 `"done"`（勿动其它字段）。只用方法头已声明的过程级局部变量，不得新增过程级变量（段内局部变量除外）。**单段过程**（未注入目标段）一次性填完所有 `// TODO:` 桩。
+- **被填段/单段文件不得残留 `// TODO:`**（lint 子阶段会核对残留）；未填段保留其 `// TODO:[seg-*]`。
 - **包级常量/变量**：经 scaffold 生成的 per-package `{Pkg}Constant`（`constant/`，规约 §3.4，常量 `static final` 直引）与 `{Pkg}StateDTO`（`dto/`，规约 §3.5，可变变量经注入 DTO bean getter/setter 读写）访问。不得在 per-proc 类内重新声明包级常量/变量。
 - 不确定项由 LLM 给出最佳翻译，不留 TODO；真正无法确定的写中文注释说明，交 review/fix。
 - 不新建文件（skeleton 已建 per-proc 类），只用 read + edit 替换桩体。

@@ -1,6 +1,6 @@
 # translate skeleton Worker 任务{{shardLabelSuffix}}
 
-执行 **translate / skeleton** 子阶段：为本分片单个过程函数（unit）创建未实现的 Java 文件 + 方法签名桩 + `// TODO: [translate]` 占位。方法论见 agent 指南（translate-skeleton.md）。
+执行 **translate / skeleton** 子阶段：为本分片单个过程函数（unit）创建未实现的 Java 文件 + 方法签名桩 + `// TODO:` 占位。方法论见 agent 指南（translate-skeleton.md）。
 
 ⛔ **你只负责产出 artifact，禁止调用 workflow 工具的任何 action**（advance/confirm/retry/abort/dispatch/fixContinue/start）。
 
@@ -8,9 +8,10 @@
 
 - 为本 unit（单个过程/函数）创建**未实现的 per-proc Java 文件**——按规约 §一/§3.2 的 per-proc 角色集，每个角色一个独立文件（一 public 类一文件）。scaffold 只建项目框架/全局公共件/per-package 常量类与变量 DTO，**不建 per-proc 业务类**——你直接 `write` 建 per-proc 类壳。
 - 类名 = `{className}{RoleSuffix}`，`className` 见下方「本 unit 派生值与路径规则」块（引擎直注，跨包去重后基名）——**勿查 scaffold.json**。Java 文件路径按**注入规约 §工程结构 的角色→顶层包 + §4.1 角色后缀 + className** 派生（规约可被 `--spec` 替换，以注入规约为准，勿假设固定路径）；Mapper 角色额外建 XML（namespace 按规约派生）。⛔ 禁止 glob 扫描目录、禁止自行编造类名/路径。
-- 方法签名桩：入参/出参从 SQL 切片 + 依赖签名块推导；桩体 `return null;`/`return 0;` 等默认值 + `// TODO: [translate] 标记人 标记时间 中文说明`，保证可编译。
+- 方法签名桩：入参/出参从 SQL 切片 + 依赖签名块推导；不确定的参数类型标 `// TODO: [translate]`。**方法体桩**按段切分（见 project-spec §6.1）：`source.sql` >500 行 → 切多段，方法头集中声明过程级局部变量 + 每段一个 `// TODO:[seg-N] lines X-Y 摘要` + `;` 占位；≤500 行 → 单段 `// TODO:[seg-1]`。桩体可被 javac parse。
+- **写段清单 sidecar** `translations/{pkg}/{ref}.segments.json`（`{segments:[{segId,plsqlLineRange,summary,status:"pending"}]}`，≥1 段）——translate-core 据此分次填段。
 - 包级常量只读引用 scaffold 的 `{Pkg}Constant`（`constant/`，静态访问）、包级变量只读引用 `{Pkg}StateDTO`（`dto/`，注入 bean getter/setter）（不重建/不修改）。
-- **不翻译方法体**（translate-core 的事）；**不写 per-unit JSON**（compile 封口）。
+- **不翻译方法体**（translate-core 的事）；**不写 per-unit `translations/{pkg}/{ref}.json`**（compile 封口）——段清单写独立 sidecar（上），不碰封口 json。
 
 ## 输出（稳定）
 

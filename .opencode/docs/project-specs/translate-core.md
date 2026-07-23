@@ -4,7 +4,20 @@
 
 ## 一、核心目标
 
-严格对应 skeleton 留下的 `// TODO: [translate]` 桩逐一翻译——**翻译一个删除一个 TODO 标记**，保证转译后文件无 TODO 残留（lint 子阶段会核对）。不确定项由 LLM 给出最佳翻译，**不留 TODO**；真正无法确定的写中文注释说明，交 review/fix。
+严格对应 skeleton 留下的 `// TODO:` 桩翻译——**翻译一段删除该段 TODO 标记**。不确定项由 LLM 给出最佳翻译，**不留 TODO**；真正无法确定的写中文注释说明，交 review/fix。
+
+### 1.1 多段切分：每次只填一段（>500 行过程）
+
+超长过程 skeleton 已预切多段（见 skeleton §6.1），engine 每次 dispatch 注入**本派发目标段**（`segId` + PL/SQL 行范围 + 摘要）：
+
+- **只替换对应 `// TODO:[seg-N]` 块**为真实实现，**保留其它 `// TODO:[seg-*]` 段不动**（它们由后续 dispatch 各自填）。
+- 填完一段后回写 sidecar `translations/{pkg}/{ref}.segments.json` 的 `segments[]`：把该 `segId` 的 `status` 设为 `"done"`（read-modify-write，勿动其它字段）。master 据剩余 pending 段循环重派，全 done 后才进 test-gen。
+- **硬约束：只用方法头已声明的过程级局部变量**，不得新增过程级变量（段内局部变量除外）——段间数据对接全靠共享的过程级局部变量，与 PL/SQL 单作用域一致。
+- **未注入目标段**（`segments[]` 缺失/空，即 ≤500 行单段过程）→ 回退原行为：一次性填完文件内所有 `// TODO:` 桩。
+
+### 1.2 单段过程
+
+`segments[]` 仅 1 段时，行为不变：一次填完该 `// TODO:[seg-1]` 桩（等价原 `// TODO: [translate]` 单桩），回写 status=done。
 
 ## 二、只增不删不覆盖
 
@@ -104,7 +117,8 @@ public Response myMethod(Request request) {
 
 ## 十一、自检清单
 
-- [ ] 文件无 `// TODO: [translate]` 残留
+- [ ] 被填段无 `// TODO:` 残留；**未填段保留其 `// TODO:[seg-*]` 不动**（多段切分时）
+- [ ] 多段切分时已回写 sidecar `translations/{pkg}/{ref}.segments.json` 的 `segments[].status="done"`；只用方法头已声明的过程级局部变量、未新增过程级变量
 - [ ] DO 分类正确，字段与 inventory 一致，未编造
 - [ ] Mapper XML 无 `SELECT *`、表名带 schema、比较符号已转义或 CDATA、未调存储过程
 - [ ] Mapper XML SQL 与 source.sql 函数定义逐行一致，未优化

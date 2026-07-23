@@ -120,15 +120,18 @@ sub-stage 序列：skeleton → translate-core → test-gen → static-check →
 3. **阻塞等 slave 完成**：读 slave 返回的 TASK_STATUS（slave 回复最后一段文本，紧凑 JSON：status/files/notes）。
    - `status: completed` → **先调 `workflow({ action: "substageDone", runId, subStage: "<本 stage 名>" })` 标记完成**（引擎据此推进 nextExpected），再进入下一 sub-stage。
    - `status: failed` → 同 sub-stage 重派 slave 一次（有限重试）；仍失败则本分片整体 failed，输出 master TASK_STATUS(status:failed, notes 填失败 stage + 原因)。
+   - **translate-core 多段循环**：超长过程（>500 行）skeleton 已切多段。core slave `completed` 后**不要急着 substageDone**——先 Read sidecar `{artifactsDir}/translations/{pkg}/{ref}.segments.json` 的 `segments[]`：
+     - 有 `status!=="done"` 的段 → core 还有段没填，**再次 `subdispatch` translate-core**（引擎会注入下一个 pending 段；它仍是 nextExpected，顺序门禁放行）。重复直至全 done。
+     - 全 done（或 sidecar 缺失/`segments[]` 空 = ≤500 行单段，core 已一次填完）→ 调 `substageDone("translate-core")` → 进 test-gen。
 4. 6 个 sub-stage 全 completed（`substageDone` 返回 `allDone=true`）→ 本 unit 完成，写 Worker Status。
 
 ### sub-stage 职责（仅供你理解，不替 slave 执行）
 
 | sub-stage | slave agent | 产物 |
 |-----------|-------------|------|
-| skeleton | translate-skeleton | 未实现 Java 文件 + 方法签名桩 + `// TODO: [translate]` 占位（可编译桩） |
-| translate-core | translate-core | 替换 TODO 桩为真实翻译，文件无 `// TODO: [translate]` 残留 |
-| test-gen | translate-test | per-proc 业务实现类单测 + Mapper 集成测试（直接 write，scaffold 不再产测试骨架） |
+| skeleton | translate-skeleton | 未实现 Java 文件 + 方法签名桩 + `// TODO:` 占位（可编译桩）；>500 行过程切多段写 `segments[]` |
+| translate-core | translate-core | 每次填一个 `// TODO:[seg-N]` 段、保留其它段、回写 `segments[].status=done`；单段过程一次填完 |
+| test-gen | translate-test | 仅 `{Proc}ServiceImplTest`（engine 已确定性生成 Mockito 壳 + 注入 `testCases[]` 清单，slave 按清单填 @Test 体） |
 | static-check | translate-lint | `translations/{pkg}/{ref}.lint.json`（TODO 残留 / checkstyle / pmd / javaFile 完整性，不修复） |
 | compile | translate-compile | javac 语法校验 + 修复循环 + 封口 `translations/{pkg}/{ref}.json`（status=completed） |
 | fsd | translate-fsd | `fsd/{pkg}/{ref}.md`（模板填空 FSD 说明书） |

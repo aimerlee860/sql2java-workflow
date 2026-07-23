@@ -1,115 +1,98 @@
-# Project Spec — test-gen 子阶段（单元测试 + Mapper 集成测试）
+# Project Spec — test-gen 子阶段（ServiceImpl 单元测试）
 
-> 本规约由引擎注入 translate-test 子 agent 系统提示词。融合自《单元测试生成规约（行覆盖率导向）》，已适配本工作流 per-proc 架构与 H2 测试配置。
+> 本规约由引擎注入 translate-test 子 agent 系统提示词。融合自《单元测试生成规约（行覆盖率导向）》，已适配本工作流 per-proc 架构。**仅对 `{Proc}ServiceImpl.java` 生成单元测试**（Mockito），不再生成 Mapper 集成测试。
 
 ## 一、核心原则
 
-- **唯一目标：行覆盖率 ≥ 90%**（建议 95%）。不关心业务逻辑正确性、断言合理性，只关心每一行都被执行到。
+- **清单驱动**：engine 派发前已确定性枚举 `testCases[]`（从 PL/SQL 结构抽 IF/ELSIF 分支、RAISE_APPLICATION_ERROR、FOR/WHILE 循环、DEFAULT NULL 参数）并注入 workOrder。**按清单逐条填 @Test，不自行发明用例**。实际覆盖率交 verify 阶段 JaCoCo 门禁兜底。
 - **万物皆可 Mock**：任何依赖、方法、异常都可 Mock。
 - 一个测试函数一个断言即可，简单断言最好（`assertNotNull(response)`）。
 
 ## 二、测试文件位置与命名
 
-- 目录（无根包，按角色顶层包）：ServiceImpl 单元测试落 `{projectRoot}/src/test/java/service/impl/`，Mapper 集成测试落 `{projectRoot}/src/test/java/mapper/`。
-- 单元测试类名：`{className}{业务实现后缀}Test`（`className` 查 `scaffold.json.generated.procClassNames`，如 `GetTrdDtl` → `GetTrdDtlServiceImplTest`）。
-- Mapper 集成测试类名：`{className}MapperIntegrationTest`。
+- 目录（无根包，按角色顶层包）：`{projectRoot}/src/test/java/service/impl/`。
+- 类名：`{className}ServiceImplTest`（`className` 查 `scaffold.json.generated.procClassNames`，如 `GetTrdDtl` → `GetTrdDtlServiceImplTest`）。
+- **只生成 ServiceImplTest，不生成 MapperIntegrationTest**。
 
-## 三、单元测试类骨架
+## 三、测试壳（engine 确定性预生成，勿重写整文件）
+
+engine 派发前已由 `test-scaffold-builder` 解析 `{className}ServiceImpl.java` 的构造器 final 字段（= 注入依赖），确定性生成 Mockito 壳并落盘 `{className}ServiceImplTest.java`：
 
 ```java
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-public class XxxServiceImplTest {
+class XxxServiceImplTest {
     @Mock private XxxMapper xxxMapper;
-    @Mock private LogUtil logUtil;          // 日志类也 Mock（触达外层 catch 用）
-    @InjectMocks private XxxServiceImpl xxxService;
-    private XxxRequest request;
+    @Mock private OtherService otherService;   // 每个 final 字段一个 @Mock
+    @InjectMocks private XxxServiceImpl service;
 
-    @BeforeEach
-    public void setUp() { request = new XxxRequest(); }
+    // @TEST_METHODS_HERE  ← 把本标记替换为 @Test 方法体，勿重写整文件、勿改 @Mock/@InjectMocks
 }
 ```
 
-- JUnit 5 + Mockito + PowerMock（反射）；**禁止 `@SpringBootTest`**（除非必要）。
-- 用 JUnit 5 `Assertions`，禁止 JUnit 4 `Assert`。
+- 你的工作：用 `edit` 把 `// @TEST_METHODS_HERE` 标记替换为 @Test 方法体。**不得重写整文件、不得改 @Mock/@InjectMocks 声明**（依赖可能你没全认出，壳已按构造器全量 mock）。
+- 若 import 缺失（壳里有 `// TODO: 补 import` 注释），补上对应 import。
+- 若壳未生成（ServiceImpl 未落盘等降级情形），自行创建完整测试类。
 
 ## 四、Mock 策略
 
-- 所有外部依赖必须 Mock：Mapper（数据库）、Service（其他服务）、Client（外部调用）、LogUtil（日志）、任何可能抛异常的对象。
+- 所有外部依赖必须 Mock：Mapper（数据库）、Service（其他服务）、Client（外部调用）、任何可能抛异常的对象。壳已为构造器 final 字段全量 @Mock。
 - 返回空值触发空指针保护、返回单值触发正常流程、返回多值触发循环、`thenThrow` 触发 catch 分支、多次调用 `thenReturn(...).thenReturn(...).thenThrow(...)` 返回不同值。
-- **Mock 日志类触达外层 catch**：内层 catch 捕获 Mapper 异常后调 `logUtil.error()`，若再 mock `logUtil.error()` 抛异常，新异常传播到外层 catch，覆盖目标行。
 - `thenThrow` 用普通异常（`RuntimeException`/`IllegalArgumentException`），**禁止** `OutOfMemoryError`/`StackOverflowError`。
 
-## 五、单函数多覆盖（首选策略）
+## 五、按清单填 @Test
 
-**在一个测试函数中覆盖连续多行代码**——减少测试数量（50+ → 10~15 个），复用 Mock 对象，每次调用只改关键参数覆盖不同分支。
+每条 `testCase` = 一个 @Test 方法，按字段填：
 
-适用：连续 if/else-if、switch/case、同逻辑不同参数组合、连续代码行。不适用：复杂独立业务逻辑、需详细断言场景、异常处理分支（建议单独测试）。
+| 清单字段 | 填法 |
+|---|---|
+| `caseId` | 方法名后缀，如 `test_case_1_raise_20001` |
+| `type=positive` | mock 使分支条件成立，`assertNotNull`/返回值断言 |
+| `type=negative` | mock 使校验失败触达 RAISE；`expectKind=throws-BusinessException:<code>` → `assertThrows(BusinessException.class, ...)` + 错误码断言 |
+| `type=boundary` | 循环：mock 返回空集/单条/满集；DEFAULT NULL：传 null 触发 NVL 分支 |
+| `setupHint` | mock 配置指引（参考，可细化） |
+| `plsqlLine` | 注释标明覆盖的 PL/SQL 行 |
 
 ```java
 @Test
-public void test_Line245_315_MultiCoverage() {
-    // ===== 第1次：覆盖 245-248 行（feeType=42）=====
-    when(mapper.selectByCondition(any())).thenReturn(mockData);
-    Response r = service.method(request);
-    Assertions.assertNotNull(r);
-
-    // ===== 第2次：覆盖 250-262 行（feeType=43, ccy1Amt>0）=====
-    mockData.setFeeType("43");
-    r = service.method(request);
-    Assertions.assertNotNull(r);
-    // ... 继续覆盖更多分支
+void test_case_2_negative_raise_20001() {
+    // L47 RAISE_APPLICATION_ERROR(-20001,'参数为空')
+    when(mapper.selectById(null)).thenReturn(null);
+    BusinessException ex = assertThrows(BusinessException.class, () -> service.execute(req));
+    assertEquals("20001", ex.getCode());
 }
 ```
 
-关键：复用 Mock 不重复 `when`、重复调用被测方法、最小断言 `assertNotNull`、注释标明覆盖行范围。
+## 六、单函数多覆盖（清单条目多时首选）
 
-## 六、覆盖所有代码结构
+清单条目多（超长过程）时，**在一个测试函数中覆盖连续多条同段用例**——复用 Mock，每次调用只改关键参数覆盖不同分支，减少方法数。
 
-- **if/else**：单函数多覆盖（同函数 if 真/假两次调用）或独立测试函数。
-- **try/catch**：try 正常 + catch 异常，`doThrow` 触发 catch。
-- **switch/case**：每个 case + default，`assertDoesNotThrow`。
+适用：连续 if/else-if、switch/case、同逻辑不同参数组合。不适用：异常处理分支（建议单独测试）。
 
 ## 七、反射（私有方法/字段）
 
 ```java
 import org.powermock.reflect.Whitebox;
-String r = (String) Whitebox.invokeMethod(xxxService, "privateMethod", data);
-Whitebox.setInternalState(xxxService, "initialized", true);
+String r = (String) Whitebox.invokeMethod(service, "privateMethod", data);
+Whitebox.setInternalState(service, "initialized", true);
 ```
 
-## 八、Mapper 集成测试
+## 八、断言要求
 
-```java
-@MybatisTest
-@AutoConfigureTestDatabase(replace = Replace.NONE)
-@Sql("classpath:schema-h2.sql")
-class XxxMapperIntegrationTest {
-    @Autowired private XxxMapper xxxMapper;
-}
-```
+最低：每个测试至少一个断言。`assertNotNull(response)` / `assertDoesNotThrow(...)` / `assertThrows(...)` + 错误码。
 
-- H2 建表脚本用 scaffold 的 `schema-h2.sql`。
-- H2 不兼容的 SQL → 修复测试数据准备 SQL 或标 `@Disabled`（不计入覆盖率）。
-- 缺表/列 → 从 `inventory.json` 补全 schema-h2.sql（**追加**到文件末尾，不修改已有表定义）。
+## 九、常见问题
 
-## 九、断言要求
-
-最低：每个测试至少一个断言。`assertNotNull(response)` / `assertDoesNotThrow(...)` / `assertNotNull(response.getFlag())`。
-
-## 十、常见问题
-
-- **Mockito 严格模式报错**：加 `@MockitoSettings(strictness = Strictness.LENIENT)`。
+- **Mockito 严格模式报错**：壳已加 `@MockitoSettings(strictness = Strictness.LENIENT)`。
 - **参数匹配器错误**：禁混用匹配器与具体值——`when(mapper.select("id", anyString()))` ❌；全用匹配器 `when(mapper.select(eq("id"), anyString()))` ✅。
-- **NPE**：检查每个 `@Mock` 配置、`@InjectMocks` 注入关系。
+- **NPE**：检查每个 @Mock 配置、@InjectMocks 注入关系。
+- JUnit 5 `Assertions`，禁止 JUnit 4 `Assert`；**禁止 `@SpringBootTest`**。
 
-## 十一、检查清单
+## 十、检查清单
 
-- [ ] 测试文件位于 `src/test/java` 正确位置，类名 = 源码类名 + Test
-- [ ] Mock 所有外部依赖（Mapper/Service/LogUtil）
-- [ ] 优先单函数多覆盖模式
-- [ ] 每个 if/else、try/catch、switch/case 分支都有测试
+- [ ] 只产 `{className}ServiceImplTest`，无 MapperIntegrationTest
+- [ ] 按注入 `testCases[]` 清单逐条填 @Test，未自发明用例
+- [ ] 用 `edit` 替换 `// @TEST_METHODS_HERE` 标记，未重写整文件、未改 @Mock/@InjectMocks
+- [ ] negative 用例用 `assertThrows(BusinessException.class)` + 错误码
 - [ ] 所有测试可编译、可运行
-- [ ] 行覆盖率 ≥ 90%
-- [ ] 测试函数数量合理（10~15，非 50+）
 - [ ] 未改翻译产物（只读 Java，写测试）；未改已有测试

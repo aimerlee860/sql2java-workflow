@@ -38,6 +38,8 @@ import { scanDuplicates, type ScanResult } from "../workflow/dedup-scanner"
 import { scanReviewStatic } from "../workflow/review-scanner"
 import { generateScaffoldInput } from "../workflow/scaffold-input-builder"
 import { generateDoAndH2Schema } from "../workflow/do-schema-builder"
+import { enumerateTestCases } from "../workflow/test-case-enumerator"
+import { buildTestScaffold } from "../workflow/test-scaffold-builder"
 import { runBuilderAction } from "../workflow/builder-actions"
 import { buildReviewFocus } from "../workflow/review-focus"
 import { ensureDeps, findOpencodeDir } from "../workflow/ensure-deps"
@@ -1162,6 +1164,112 @@ function buildUnitFilesBlock(
   return lines.join("\n")
 }
 
+/** sidecar 文件路径：承载 segments[]（skeleton 写/core 更新）+ testCases[]（engine 写），独立于 compile 封口的 per-unit json。 */
+function segmentsSidecarPath(artifactsDir: string, pkg: string, ref: string): string {
+  return join(artifactsDir, "translations", pkg, `${ref}.segments.json`)
+}
+
+/**
+ * core 段注入块：读 sidecar `translations/{pkg}/{ref}.segments.json` 的 `segments[]`，取第一个 `status!=="done"`
+ * 段，渲染"本派发目标段"块（segId/plsqlLineRange/summary）注入 core slave workOrder。slave 只填这一段、
+ * 保留其它 TODO 段、回写 sidecar status=done；master 据剩余 pending 段循环重派（复用"重派同 stage 放行"门禁）。
+ *
+ * 防御：若 pending 段的 `// TODO:[segId]` 标记已从 ServiceImpl 消失（LLM 填了段但忘记回写 status），
+ * 自动标 done 推进到下一段——避免 master 无限重派同一段（core 重派无上限）。
+ *
+ * sidecar 缺失/segments 空（≤500 行单段过程或旧 run）→ 返回 ""，core 回退"填全部 TODO"原行为。
+ */
+export function buildCoreSegmentBlock(artifactsDir: string, projectRoot: string | null, pkg: string, ref: string): string {
+  const sidecarPath = segmentsSidecarPath(artifactsDir, pkg, ref)
+  const sidecar = readJsonOrNull(sidecarPath)
+  const segments: any[] = Array.isArray(sidecar?.segments) ? sidecar.segments : []
+  if (segments.length === 0) return ""  // 无段 → 回退填全部
+  const className = resolveUnitClassName(artifactsDir, pkg, ref)
+  const implPath = projectRoot ? join(projectRoot, "src/main/java/service/impl", `${className}ServiceImpl.java`) : null
+  let implSrc: string | null = null
+  if (implPath && existsSync(implPath)) {
+    try { implSrc = readFileSync(implPath, "utf-8") } catch { /* 读失败则跳过自动判定 */ }
+  }
+  // 找下一个真正待填段：标记仍在 = 待填；标记已消失但 status 仍 pending = LLM 漏回写 → 自动标 done
+  let target: any = null
+  for (const seg of segments) {
+    if (!seg || seg.status === "done") continue
+    if (implSrc !== null && !implSrc.includes(`// TODO:[${seg.segId}]`)) {
+      seg.status = "done"  // 标记已消失，自动判定为已填
+      continue
+    }
+    target = seg
+    break
+  }
+  if (target === null) {
+    // 全部 done（含刚自动标 done 的）→ 回写 sidecar，返回空（core 无目标，master 将 advance）
+    if (implSrc !== null) {
+      try { safeWriteFile(sidecarPath, JSON.stringify({ ...sidecar, segments }, null, 2)) } catch { /* 非阻断 */ }
+    }
+    return ""
+  }
+  // 回写可能被自动标 done 改过的 sidecar
+  if (implSrc !== null) {
+    try { safeWriteFile(sidecarPath, JSON.stringify({ ...sidecar, segments }, null, 2)) } catch { /* 非阻断 */ }
+  }
+  const range = Array.isArray(target.plsqlLineRange) ? target.plsqlLineRange.join("-") : "?"
+  return [
+    "",
+    "## 本派发目标段（多段切分）",
+    `- 本过程 >500 行已切多段，core **每次只填一段**。本次目标：\`${target.segId}\``,
+    `- PL/SQL 行范围（source.sql 内）：${range}`,
+    `- 段摘要：${target.summary ?? ""}`,
+    `- ⛔ 只替换对应 \`// TODO:[${target.segId}]\` 块为实现，**保留其它 TODO 段不动**；填完回写 sidecar \`translations/{pkg}/{ref}.segments.json\` 中该 \`segId\` 的 \`status="done"\`（read-modify-write，勿动其它字段）。`,
+    `- 硬约束：只用方法头已声明的过程级局部变量，不得新增过程级变量（段内局部变量除外）。`,
+  ].join("\n")
+}
+
+/**
+ * test-gen 确定性前置 + 清单注入块：
+ *   1) enumerateTestCases → regex 抽 PL/SQL 分支/RAISE/循环/DEFAULT NULL → testCases[]，写回 sidecar
+ *   2) buildTestScaffold → 解析 ServiceImpl 构造器 final 字段生成 Mockito 壳（含 // @TEST_METHODS_HERE）
+ *   3) 渲染清单块注入 test-gen slave workOrder——slave 只按清单填 @Test 体，不重写整文件、不自发明用例
+ *
+ * 把"测什么"+样板移出 LLM 上下文。source.sql 缺失或 ServiceImpl 未落盘时降级（清单/壳缺，slave 自行处理）。
+ */
+function buildTestGenBlock(artifactsDir: string, projectRoot: string, pkg: string, ref: string): string {
+  // 1) 用例枚举 → 写回 sidecar（保留 segments）
+  const cases = enumerateTestCases(artifactsDir, pkg, ref)
+  const sidecarPath = segmentsSidecarPath(artifactsDir, pkg, ref)
+  const sidecar = readJsonOrNull(sidecarPath) ?? {}
+  if (cases !== null) sidecar.testCases = cases
+  try {
+    safeWriteFile(sidecarPath, JSON.stringify(sidecar, null, 2))
+  } catch (e: any) {
+    getLogger().warn("[dispatch]", `test-gen sidecar 回写失败（不阻断）: ${e.message}`)
+  }
+  // 2) 测试壳生成
+  const scaffoldRel = buildTestScaffold(projectRoot, artifactsDir, pkg, ref)
+  const scaffoldLine = scaffoldRel
+    ? `- 测试壳已确定性生成（**勿重写整文件**）：\`${projectRoot}/${scaffoldRel}\`——只把 \`// @TEST_METHODS_HERE\` 标记替换为 @Test 方法体。`
+    : `- 测试壳未生成（ServiceImpl 未落盘），自行创建 \`${ref}\`ServiceImplTest.java。`
+
+  if (!cases || cases.length === 0) {
+    return [
+      "",
+      "## test 用例清单（确定性枚举）",
+      "- 未能从 source.sql 枚举出用例（缺失或无控制流结构）。自行按 PL/SQL 分支设计用例。",
+      scaffoldLine,
+    ].join("\n")
+  }
+  const caseLines = cases.map(c =>
+    `  - \`${c.caseId}\` [${c.type}] L${c.plsqlLine} ${c.construct} → expect:${c.expectKind} | setup: ${c.setupHint}`,
+  ).join("\n")
+  return [
+    "",
+    "## test 用例清单（确定性枚举，按此逐条填 @Test，勿自发明用例）",
+    `- 共 ${cases.length} 条（negative > boundary > positive 优先，超长过程可能截断，剩余覆盖率交 verify JaCoCo 兜底）。`,
+    caseLines,
+    "- 每条 = 一个 @Test：按 setupHint 配 mock、按 expectKind 断言（return-value 或 assertThrows(BusinessException.class)+错误码）。",
+    scaffoldLine,
+  ].join("\n")
+}
+
 /**
  * 为 translate 分片 worker 渲染 .md 模板 workOrder（取代编排者即兴拼凑的任务提示）。
  *
@@ -1305,7 +1413,15 @@ export function buildShardedWorkerOrder(
   let unitFilesBlock = ""
   if (subStageOverride && isUnitMode && shardTargetUnits.length > 0) {
     const u = shardTargetUnits[0]
-    unitFilesBlock = buildUnitFilesBlock(subStageOverride, pkgOf(u), refOf(u), projectRoot, artDir)
+    const unitPkg = pkgOf(u)
+    const unitRef = refOf(u)
+    unitFilesBlock = buildUnitFilesBlock(subStageOverride, unitPkg, unitRef, projectRoot, artDir)
+    // 多段切分 + test-gen 确定性前置：core 注入下一 pending 段；test-gen 枚举用例+生成壳+注入清单。
+    if (subStageOverride === "translate-core") {
+      unitFilesBlock += buildCoreSegmentBlock(artDir, projectRoot, unitPkg, unitRef)
+    } else if (subStageOverride === "test-gen" && projectRoot) {
+      unitFilesBlock += buildTestGenBlock(artDir, projectRoot, unitPkg, unitRef)
+    }
   }
 
   const ctx = {
