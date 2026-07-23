@@ -1334,7 +1334,7 @@ export function buildShardedWorkerOrder(
     ? buildUnitScopeBlock(artDir, shardTargetUnits, phase, completedUnitIds, sourcePath)
     : ""
   const depSignaturesBlock = (phase === "translate" && isUnitMode)
-    ? buildDependencySignaturesBlock(artDir, shardTargetUnits, completedUnitIds)
+    ? buildDependencySignaturesBlock(artDir, shardTargetUnits, completedUnitIds, projectRoot)
     : ""
 
   // 4) projectRoot（Stage A：artifactId 由 getArtifactIdFromRun 从 metadata/run-context 取，不再读 plan）
@@ -3148,10 +3148,12 @@ export function buildDependencySignaturesBlock(
   artifactsDir: string,
   targetUnits: readonly string[],
   completedUnitIds: readonly string[],
+  projectRoot: string | null = null,
 ): string {
   if (targetUnits.length === 0) return ""
   const graph = buildDependencyGraph(artifactsDir)
   const callGraph = graph.callGraph
+  const unitPackageRefs = graph.unitPackageRefs
   const completedPkgsUpper = new Set(completedUnitIds.map(u => pkgOf(u).toUpperCase()))
   // 同分片判定：callee 本身（subprogram 独立成 unit）落在本分片 targetUnits，说明本 session
   // 会翻译它且 generateUnitSlices 已为其预切 source 切片——translator 手上有源码，直接翻译并
@@ -3181,40 +3183,70 @@ export function buildDependencySignaturesBlock(
   for (const u of targetUnits) {
     const pkg = pkgOf(u)
     const rootRef = refOf(u)
-    const callees = callGraph[`${pkg}.${rootRef}`] ?? []
-    if (callees.length === 0) continue
-
-    const lines: string[] = [`### unit ${u} 调用：`]
+    const unitKey = `${pkg}.${rootRef}`
+    const callees = callGraph[unitKey] ?? []
+    const lines: string[] = []
     let unitHas = false
-    for (const callee of callees) {
-      const tPkg = pkgOf(callee)
-      const tRef = refOf(callee)
-      // 同分片 callee 优先判定：callee 本身在本分片 targetUnits（真环 SCC 同分片场景），
-      // 本 session 会翻译它且 source 切片已预切——直接对接，不标 TODO。
-      if (targetUnitsUpper.has(callee.toUpperCase())) {
-        lines.push(
-          `- ${callee} → 同分片单元（本 session 翻译，源码见 shard-inputs/${tPkg}/${tRef}/source.sql，直接对接，勿 TODO）`,
-        )
+    if (callees.length > 0) {
+      lines.push(`### unit ${u} 调用：`)
+      for (const callee of callees) {
+        const tPkg = pkgOf(callee)
+        const tRef = refOf(callee)
+        // 同分片 callee 优先判定：callee 本身在本分片 targetUnits（真环 SCC 同分片场景），
+        // 本 session 会翻译它且 source 切片已预切——直接对接，不标 TODO。
+        if (targetUnitsUpper.has(callee.toUpperCase())) {
+          lines.push(
+            `- ${callee} → 同分片单元（本 session 翻译，源码见 shard-inputs/${tPkg}/${tRef}/source.sql，直接对接，勿 TODO）`,
+          )
+          unitHas = true
+          continue
+        }
+        // 仅已完成包（含同包 prior unit）的签名可读；未完成 → TODO
+        if (!completedPkgsUpper.has(tPkg.toUpperCase())) {
+          lines.push(`- // TODO: 跨包调用 ${callee} 待对接（目标 unit 尚未翻译）`)
+          unitHas = true
+          continue
+        }
+        const methods = methodsForPkg(tPkg)
+        const matched = (methods ?? []).filter(m => String(m.plsqlName).toUpperCase() === tRef.toUpperCase())
+        if (matched.length === 0) {
+          lines.push(`- // TODO: ${callee} 待对接（目标包已翻译但未找到该子程序签名）`)
+          unitHas = true
+          continue
+        }
+        for (const m of matched) {
+          const fileTag = m.javaFile ? `  (file: ${m.javaFile})` : ""
+          lines.push(`- ${callee} → ${m.javaClass}#${m.javaMethod}${fileTag}`)
+        }
         unitHas = true
+      }
+    }
+    // 跨包常量/变量引用（pkg.member 非调用）→ 注入目标包 holder 路径，core 据此只读引用而非重声明/硬编码。
+    // 同包引用已由 buildUnitFilesBlock 注入同包 holder，此处只处理跨包。
+    const refs = unitPackageRefs[unitKey] ?? []
+    const byPkg = new Map<string, string[]>()
+    for (const r of refs) {
+      const arr = byPkg.get(r.package) ?? []
+      arr.push(r.name)
+      byPkg.set(r.package, arr)
+    }
+    const holderLines: string[] = []
+    for (const [refPkg, names] of byPkg) {
+      const constRel = lookupPkgHolderFile(artifactsDir, refPkg, "constants")
+      const dtoRel = lookupPkgHolderFile(artifactsDir, refPkg, "stateDtos")
+      const uniqNames = [...new Set(names.map((n: string) => n.toUpperCase()))].join(", ")
+      if (!constRel && !dtoRel) {
+        holderLines.push(`- // TODO: 跨包引用 ${refPkg}.${uniqNames} 无生成 holder（类型引用或目标包无常量/变量），按源码语义处理`)
         continue
       }
-      // 仅已完成包（含同包 prior unit）的签名可读；未完成 → TODO
-      if (!completedPkgsUpper.has(tPkg.toUpperCase())) {
-        lines.push(`- // TODO: 跨包调用 ${callee} 待对接（目标 unit 尚未翻译）`)
-        unitHas = true
-        continue
-      }
-      const methods = methodsForPkg(tPkg)
-      const matched = (methods ?? []).filter(m => String(m.plsqlName).toUpperCase() === tRef.toUpperCase())
-      if (matched.length === 0) {
-        lines.push(`- // TODO: ${callee} 待对接（目标包已翻译但未找到该子程序签名）`)
-        unitHas = true
-        continue
-      }
-      for (const m of matched) {
-        const fileTag = m.javaFile ? `  (file: ${m.javaFile})` : ""
-        lines.push(`- ${callee} → ${m.javaClass}#${m.javaMethod}${fileTag}`)
-      }
+      const pr = projectRoot ?? "{projectRoot}"
+      const paths: string[] = []
+      if (constRel) paths.push(`${pr}/${constRel}`)
+      if (dtoRel) paths.push(`${pr}/${dtoRel}`)
+      holderLines.push(`- 跨包引用 ${refPkg} 的 ${uniqNames} → 只读 holder（勿重声明/硬编码：常量 static 直引、变量经 {Pkg}StateDTO bean getter/setter）：${paths.join("；")}`)
+    }
+    if (holderLines.length > 0) {
+      lines.push(`### unit ${u} 跨包常量/变量引用：`, ...holderLines)
       unitHas = true
     }
     if (unitHas) {
@@ -3227,6 +3259,7 @@ export function buildDependencySignaturesBlock(
   return [
     `## 依赖签名（已预注入，勿再 read translations/*/translation.json）`,
     `下列本分片 unit 调用的、已翻译目标的 Java 方法签名由引擎从聚合 translation.json 提取内联。`,
+    `跨包常量/变量引用同步注入目标包 holder 路径（{Pkg}Constant/{Pkg}StateDTO），只读引用勿重声明。`,
     `跨包未完成目标标 TODO，按 translator 规约占位，review/fix 兜底。`,
     ...blocks,
   ].join("\n")

@@ -105,7 +105,8 @@ public Response myMethod(Request request) {
 
 - 未识别变量（常量/配置值）：查包头/SQL 目录声明，**禁止凭经验硬编码编造**。
 - 非局部变量声明在主函数顶层，作用域覆盖整个主函数。
-- 跨包变量（`{schema}.{变量名}`）查依赖签名块/上游 artifact 推导来源。
+- **包级常量/变量复用 holder（强制）**：本包常量/变量引用 `{Pkg}Constant`/`{Pkg}StateDTO`（路径见「本 unit 派生值与路径规则」块）；**跨包**常量/变量引用见「依赖签名」块的「跨包常量/变量引用」段——引擎已注入目标包 holder 路径。常量 `static final` 直引、变量经 `{Pkg}StateDTO` bean getter/setter。**禁止重声明、禁止硬编码值**。holder 里没有的标 `// TODO` 交下游，不在 ServiceImpl 内私造。
+- 其它跨包变量（`{schema}.{变量名}`）查依赖签名块/上游 artifact 推导来源。
 
 ## 十、翻译忠实度
 

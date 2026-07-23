@@ -56,6 +56,10 @@ export interface DependencyGraph {
    *  供 computeShardPlan 按层 antichain 批量：同层 unit 互不调用（u→v 必 level(v)≥level(u)+1），
    *  可安全合并同分片——callee 必在更低层=更早分片已译完。 */
   unitLevels: Record<string, number>
+  /** unit id `PKG.refName` → 该子程序 body 内的跨包限定引用（`pkg.member` 非调用，即常量/变量/类型引用）。
+   *  供 buildDependencySignaturesBlock 注入跨包 holder 路径——core 据此引用 {Pkg}Constant.X /
+   *  {Pkg}StateDTO bean，而非硬编码/重声明。同包引用不在此（callerPkg 过滤）。 */
+  unitPackageRefs: Record<string, Array<{ package: string; name: string; line: number }>>
 }
 
 // ── 读 subprograms/*.json ──────────────────────────────────────────────────────
@@ -334,9 +338,18 @@ export function buildDependencyGraph(artifactsDir: string): DependencyGraph {
   // unit id → 拓扑层级（供 computeShardPlan 按层 antichain 批量）。
   const unitLevels = computeUnitLevels(procedureOrder, callGraph)
 
+  // unit id → 跨包限定引用（常量/变量/类型，非调用）。同包引用过滤掉（holder 已由 buildUnitFilesBlock
+  // 注入同包路径）；此处只留跨包，供 buildDependencySignaturesBlock 注入跨包 holder。
+  const unitPackageRefs: Record<string, Array<{ package: string; name: string; line: number }>> = {}
+  for (const s of subprograms) {
+    const key = `${s.belongToPackage}.${refNameOf(s)}`
+    const refs = (s.packageRefs ?? []).filter(r => r.package !== s.belongToPackage)
+    if (refs.length > 0) unitPackageRefs[key] = refs
+  }
+
   const graph: DependencyGraph = {
     callGraph, packageDependency, packageNames, refIndex,
-    translationOrder, sccGroups, procedureOrder, unitLines, unitLevels,
+    translationOrder, sccGroups, procedureOrder, unitLines, unitLevels, unitPackageRefs,
   }
   cache.set(artifactsDir, graph)
   return graph
