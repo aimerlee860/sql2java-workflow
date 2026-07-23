@@ -309,8 +309,13 @@ inventory → scaffold → translate → dedup → review → verify → 完成
 
    检查 `<path>/project-spec.md` 是否存在
 
-   - **有规约文件** → 传递给 workflow start（用户 `##` 章节覆盖内置规约同名章节，独有章节追加）
-   - **无规约文件** → 使用内置默认规约和 Maven 结构
+   - **有规约文件** → 传递给 workflow start（用户 spec **整体替换**内置默认规约，不再合并）
+   - **无规约文件** → 使用内置默认规约（`.opencode/docs/java-code-spec.md`）和 Maven 结构
+
+   **`@include` 引用机制**：主规约（默认或用户 `--spec`）支持两条指令——
+   - `@include <path>`：内联子规约进通用规约正文（对所有写 Java 的 agent 可见）；架构模型子文件（含 `## 架构模型` 段）用此方式内联，引擎解析成 `ArchitectureModel` 驱动确定性 builder。
+   - `@include <path> -> <agent>`：把子规约路由为该 agent 专属 projectSpec 段（agent basename，如 `translate-skeleton`）。
+   路径相对主 spec 文件目录 resolve，递归 include，缺失文件 warn 保留原行。默认主规约已用 7 条 `-> agent` 路由分发 `project-specs/`，用户 `--spec` 可重写路由与架构模型以切换架构（如 DDD，示例见 `.opencode/docs/examples/java-code-spec-ddd.md`）。
 
 2. **生成 runId**：格式为 `run-YYYYMMDD-HHmmss`（基于当前时间）
 
