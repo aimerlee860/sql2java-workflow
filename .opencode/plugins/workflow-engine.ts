@@ -373,12 +373,11 @@ function clearWorkflowContext(): void {
   orchestratorSessionIds.clear()
   currentWorkflowContext = null
   activeCollector = null
-  _cachedJavaCodeSpec = null
-  _cachedSpecMtime = null
   _cachedUserSpec = null
   _cachedUserSpecMtime = null
   _cachedUserSpecPath = null
-  _cachedProjectSpecs.clear()
+  _cachedDefaultBundle = null
+  _cachedDefaultBundleMtime = null
   destroyLogger()
 }
 
@@ -389,71 +388,12 @@ const JAVA_SPEC_AGENTS = [
   "translate-skeleton", "translate-core", "translate-test",
 ]
 
-/** 缓存的 Java 代码规约内容 + 文件 mtime（缺失时不缓存，每次重试） */
-let _cachedJavaCodeSpec: string | null = null
-let _cachedSpecMtime: number | null = null
-
-/** 读取共享 Java 代码规约文件（mtime 感知缓存，缺失/不可读不缓存） */
-function readJavaCodeSpec(): string {
-  const specPath = join(findOpencodeDir(), "docs", "java-code-spec.md")
-  try {
-    const stat = statSync(specPath)
-    const mtime = stat.mtimeMs
-    if (_cachedJavaCodeSpec !== null && _cachedSpecMtime === mtime) {
-      return _cachedJavaCodeSpec
-    }
-    const content = readFileSync(specPath, "utf-8").trim()
-    _cachedJavaCodeSpec = content
-    _cachedSpecMtime = mtime
-    return content
-  } catch {
-    getLogger().warn("[workflow-engine]", `Java 代码规约文件未找到或不可读: ${specPath}`)
-    return ""
-  }
-}
-
 // ── per-agent 项目规约（project-spec）注入 ──
 //
-// 与 java-code-spec（通用 Java 规约，JAVA_SPEC_AGENTS 白名单统一注入）不同，project-spec 是
-// 每个 translate 子 agent / master 各自专属的「项目硬规则」md（融合自 ~/Desktop/specs，已适配本工作流）。
-// 按 agent .md basename 查映射表，命中则读对应 md（mtime 感知缓存）注入 system prompt 的独立段。
-// 未命中 / 文件缺失返回空串（.filter 跳过），不影响其它 agent。
-const PROJECT_SPEC_MAP: Record<string, string> = {
-  "translate-skeleton.md": "docs/project-specs/skeleton.md",
-  "translate-core.md": "docs/project-specs/translate-core.md",
-  "translate-test.md": "docs/project-specs/test-gen.md",
-  "translate-lint.md": "docs/project-specs/static-check.md",
-  "translate-compile.md": "docs/project-specs/compile.md",
-  "translate-summary.md": "docs/project-specs/summary.md",
-  "translator.md": "docs/project-specs/translator.md",
-}
-
-/** 缓存：specPath → { content, mtime }（缺失时不缓存，每次重试，语义同 readJavaCodeSpec） */
-const _cachedProjectSpecs = new Map<string, { content: string; mtime: number }>()
-
-/** 读取 agent 专属 project-spec（按 effectiveAgentFile basename 查映射表，mtime 感知缓存）。
- *  未命中映射 / 文件缺失 → 返回空串。 */
-function readProjectSpec(effectiveAgentFile: string): string {
-  if (!effectiveAgentFile) return ""
-  const base = basename(effectiveAgentFile)
-  const rel = PROJECT_SPEC_MAP[base]
-  if (!rel) return ""
-  const specPath = join(findOpencodeDir(), rel)
-  try {
-    const stat = statSync(specPath)
-    const mtime = stat.mtimeMs
-    const cached = _cachedProjectSpecs.get(rel)
-    if (cached && cached.mtime === mtime) {
-      return cached.content
-    }
-    const content = readFileSync(specPath, "utf-8").trim()
-    _cachedProjectSpecs.set(rel, { content, mtime })
-    return content
-  } catch {
-    getLogger().warn("[workflow-engine]", `Project spec 文件未找到或不可读: ${specPath}`)
-    return ""
-  }
-}
+// 原硬编码 PROJECT_SPEC_MAP / readProjectSpec / readJavaCodeSpec 已退役：通用规约与 agent 专属
+// 子规约现统一由主 spec 的 `@include` 机制提供（见下方 resolveIncludes / getActiveSpecBundle）——
+// `@include <path>` 内联进通用 javaCodeSpec 段，`@include <path> -> <agent>` 路由为该 agent 专属
+// projectSpec 段。用户 `--spec` 可重写路由，默认 java-code-spec.md 已含 7 条路由指令。
 
 // ── 用户自定义规约（--spec）解析与合并 ──
 
@@ -526,7 +466,7 @@ let _cachedDefaultBundle: SpecBundle | null = null
 let _cachedDefaultBundleMtime: number | null = null
 
 /** 加载默认 java-code-spec.md（走 @include 解析） */
-function loadDefaultSpecBundle(): SpecBundle {
+export function loadDefaultSpecBundle(): SpecBundle {
   const specPath = join(findOpencodeDir(), "docs", "java-code-spec.md")
   try {
     const mtime = statSync(specPath).mtimeMs
@@ -1672,10 +1612,9 @@ function buildFullSystemPrompt(
   } else {
     javaCodeSpec = ""
   }
-  // 6. project-spec（agent 专属项目硬规则：Phase 2 起由 @include ... -> agent 路由的 agentSpecs 提供，
-  //    当前过渡期仍回退 PROJECT_SPEC_MAP，避免默认 spec 未补 @include 前丢段）
-  const agentBase = basename(effectiveAgentFile)
-  const projectSpec = bundle.agentSpecs.get(agentBase.replace(/\.md$/, "")) ?? readProjectSpec(effectiveAgentFile)
+  // 6. project-spec（agent 专属项目硬规则：由主 spec `@include ... -> agent` 路由的 agentSpecs 提供）
+  const agentBase = basename(effectiveAgentFile).replace(/\.md$/, "")
+  const projectSpec = bundle.agentSpecs.get(agentBase) ?? ""
   // 7. shardBanner（workOrder 缺失时作 parts[0] 兜底）
   const shardBanner = run ? buildShardScopeBanner(run) : ""
   const hasWorkOrder = !!workOrder

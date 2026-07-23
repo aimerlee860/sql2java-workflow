@@ -3,6 +3,16 @@
 > 此规约由工作流引擎自动注入到写 Java 的 agent（java-architect / translator / reviewer / translate-skeleton / translate-core / translate-test）的 system prompt 中。
 > 修改此文件即可全局生效，无需同步修改多个 agent 文件。
 > 用户可通过 `--spec` 参数提供自定义规约文件——指定后**整体替换**本默认规约（用户文件即唯一规约，不再与默认合并）；纯目录结构文件仅覆盖工程结构，规约仍用本默认。
+>
+> **`@include` 引用**：本主规约用 `@include <path>` 内联子规约进通用正文、用 `@include <path> -> <agent>` 把子规约路由为该 agent 专属段。下方 7 条路由把 `project-specs/` 下子规约分发到对应 translate agent；用户 `--spec` 可重写路由。路径相对本文件目录 resolve，递归 include，缺失文件 warn 保留原行。
+
+@include ./project-specs/skeleton.md -> translate-skeleton
+@include ./project-specs/translate-core.md -> translate-core
+@include ./project-specs/test-gen.md -> translate-test
+@include ./project-specs/static-check.md -> translate-lint
+@include ./project-specs/compile.md -> translate-compile
+@include ./project-specs/summary.md -> translate-summary
+@include ./project-specs/translator.md -> translator
 
 ## 适用范围
 
