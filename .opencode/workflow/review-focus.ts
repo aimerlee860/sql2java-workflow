@@ -170,9 +170,9 @@ export function buildReviewFocus(
 
     // 测试审查（#18/#20）：per-proc 模型下 scaffold 不再产 testShells/mapperTestShells
     // （已下放 translate-test-gen 直接 write per-proc 测试类）。此处 ?? [] 优雅降级——
-    // real per-proc run 暂无测试聚焦点；阶段 4 review 重构改为扫架构模型各角色 testDir/ 下
-    // per-proc 测试文件（默认 service.impl 测试目录，DDD 则 processor 测试目录等）。单测 mock
-    // 仍直供 testShells 走旧路径（passthrough 保留）。
+    // real per-proc run 暂无测试聚焦点。TODO（阶段 4 review 重构）：改为扫架构模型各角色
+    // testDir/ 下 per-proc 测试文件（默认 service.impl 测试目录，DDD 则 processor 测试目录等）。
+    // 当前未实现，仍走 testShells passthrough；单测 mock 直供 testShells 走旧路径。
     const testShells = (scaffold?.generated?.testShells ?? []) as any[]
     const mapperShells = (scaffold?.generated?.mapperTestShells ?? []) as any[]
     for (const sh of testShells) {

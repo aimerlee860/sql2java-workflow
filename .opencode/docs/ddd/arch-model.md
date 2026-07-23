@@ -35,6 +35,7 @@ com.example.mfgerp
 | stateDto | StateDTO | src/main/java/com/example/mfgerp/{module}/common/utils |
 
 ### 实体
+> 实体为项目级全局共享（不随模块变化），dir/package **不得含 `{module}` 占位**（do-schema-builder 全局生成，无 pkg 上下文）。
 - 后缀: Bean
 - 目录: src/main/java/com/example/mfgerp/beans
 - 包: com.example.mfgerp.beans

@@ -84,4 +84,24 @@ describe("resolveIncludes — 容错", () => {
     const out = resolveIncludes("@include ./sub.md\n---\n@include ./sub.md", dir, new Map())
     expect(out).toBe("X\n---")  // 第二次跳过，不重复
   })
+  it("代码围栏内的 @include 不当指令处理", () => {
+    const dir = setup()
+    writeFileSync(join(dir, "real.md"), "真实内容")
+    const main = [
+      "正文上",
+      "```",
+      "@include ./real.md   ← 代码块内示例，不应处理",
+      "@include ./nope.md -> fake-agent",
+      "```",
+      "正文下",
+    ].join("\n")
+    const agentSpecs = new Map<string, string>()
+    const out = resolveIncludes(main, dir, agentSpecs)
+    // 围栏内 @include 原样保留，不内联、不路由
+    expect(out).toContain("@include ./real.md   ← 代码块内示例，不应处理")
+    expect(agentSpecs.has("fake-agent")).toBe(false)
+    // 围栏外若有真实 @include 仍正常（此处无，仅验证围栏内被跳过）
+    expect(out).toContain("正文上")
+    expect(out).toContain("正文下")
+  })
 })

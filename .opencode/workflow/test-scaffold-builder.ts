@@ -61,23 +61,26 @@ function parseDeps(implSrc: string): DepField[] {
   }
   const deps: DepField[] = []
   const seen = new Set<string>()
-  // 字段声明：[private|protected|public] [final] Type name;  —— final 构造器注入点
-  // 或 @Autowired [private|protected|public] Type name;      —— DDD 字段注入点
-  const fieldRe = /(?:@Autowired\s+)?(?:private\s+|protected\s+|public\s+)?(?:final\s+)?([\w.]+)\s+(\w+)\s*;/g
-  let fm: RegExpExecArray | null
-  while ((fm = fieldRe.exec(implSrc)) !== null) {
-    const typeFull = fm[1]
-    const typeSimple = typeFull.split(".").pop()!
-    const name = fm[2]
-    // 仅收注入依赖字段：必须带 final（构造器注入）或 @Autowired（字段注入）；裸字段不算
-    const annotated = /@Autowired/.test(fm[0])
-    const isFinal = /\bfinal\b/.test(fm[0])
-    if (!annotated && !isFinal) continue
-    if (/logger/i.test(typeSimple)) continue        // 排除 slf4j Logger 等非业务依赖
-    if (seen.has(name)) continue
-    seen.add(name)
-    deps.push({ typeSimple, name, importLine: importMap.get(typeSimple) ?? null })
+  // 仅收类级注入依赖字段，排除方法内裸 `final Type name;` 局部变量：
+  //   ① 构造器注入（4 文件）：必须带访问修饰符 + final —— `(private|protected|public) final Type name;`
+  //   ② 字段注入（DDD）：@Autowired 标注 —— `@Autowired [private|protected|public] Type name;`
+  // 裸 `final Type name;`（无访问修饰符）通常是方法局部，不收。
+  const finalFieldRe = /(?:private|protected|public)\s+final\s+([\w.]+)\s+(\w+)\s*;/g
+  const autowiredRe = /@Autowired\s+(?:private\s+|protected\s+|public\s+)?([\w.]+)\s+(\w+)\s*;/g
+  const collect = (re: RegExp) => {
+    let fm: RegExpExecArray | null
+    while ((fm = re.exec(implSrc)) !== null) {
+      const typeFull = fm[1]
+      const typeSimple = typeFull.split(".").pop()!
+      const name = fm[2]
+      if (/logger/i.test(typeSimple)) continue        // 排除 slf4j Logger 等非业务依赖
+      if (seen.has(name)) continue
+      seen.add(name)
+      deps.push({ typeSimple, name, importLine: importMap.get(typeSimple) ?? null })
+    }
   }
+  collect(finalFieldRe)
+  collect(autowiredRe)
   return deps
 }
 

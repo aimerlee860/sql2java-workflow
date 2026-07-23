@@ -282,16 +282,31 @@ export function resolveModelPath(p: string, pkg: string): string {
   return p.replace(/\{module\}/g, moduleSeg)
 }
 
-/** 读 <artifactsDir>/architecture-model.json；缺失/解析失败回退默认并 warn */
+/** 校验 architecture-model.json 形状完整（各子对象/必填字段非空），残缺返回 false */
+function isValidModel(raw: any): boolean {
+  if (!raw || typeof raw !== "object") return false
+  if (!Array.isArray(raw.roles) || raw.roles.length === 0) return false
+  for (const r of raw.roles) {
+    if (!r || typeof r.role !== "string" || typeof r.suffix !== "string" ||
+        typeof r.package !== "string" || typeof r.dir !== "string") return false
+  }
+  const e = raw.entity, x = raw.exception, c = raw.crossPackageCall
+  if (!e || typeof e.suffix !== "string" || typeof e.dir !== "string" || typeof e.package !== "string" ||
+      !Array.isArray(e.annotations) || !Array.isArray(e.imports)) return false
+  if (!x || typeof x.baseClass !== "string" || typeof x.package !== "string" || !Array.isArray(x.subclasses)) return false
+  if (!c || typeof c.fqnPattern !== "string") return false
+  if (!Array.isArray(raw.coverageExcludes) || !Array.isArray(raw.scanBasePackages)) return false
+  return true
+}
+
+/** 读 <artifactsDir>/architecture-model.json；缺失/解析失败/形状残缺回退默认并 warn */
 export function loadArchitectureModel(artifactsDir: string): ArchitectureModel {
   const p = join(artifactsDir, "architecture-model.json")
   if (!existsSync(p)) return DEFAULT_ARCHITECTURE_MODEL
   try {
     const raw = JSON.parse(readFileSync(p, "utf-8"))
-    if (raw && typeof raw === "object" && Array.isArray(raw.roles) && raw.roles.length) {
-      return raw as ArchitectureModel
-    }
-    getLogger().warn("[architecture-model]", `architecture-model.json 内容不完整，回退默认模型: ${p}`)
+    if (isValidModel(raw)) return raw as ArchitectureModel
+    getLogger().warn("[architecture-model]", `architecture-model.json 形状不完整，回退默认模型: ${p}`)
   } catch {
     getLogger().warn("[architecture-model]", `architecture-model.json 解析失败，回退默认模型: ${p}`)
   }

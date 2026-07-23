@@ -377,6 +377,7 @@ function clearWorkflowContext(): void {
   _cachedUserSpec = null
   _cachedUserSpecMtime = null
   _cachedUserSpecPath = null
+  _cachedUserSpecIncluded = []
   _cachedDefaultBundle = null
   _cachedDefaultBundleMtime = null
   destroyLogger()
@@ -418,9 +419,14 @@ export function resolveIncludes(
   baseDir: string,
   agentSpecs: Map<string, string>,
   inlineSeen: Set<string> = new Set(),
+  outIncluded?: string[],
 ): string {
   const out: string[] = []
+  // 代码围栏状态机：``` 或 ~~~ 包裹的代码块内的 @include 不当指令（避免示例文字误触发）
+  let inFence = false
   for (const line of rawMarkdown.split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; out.push(line); continue }
+    if (inFence) { out.push(line); continue }
     const m = INCLUDE_RE.exec(line.trim())
     if (!m) { out.push(line); continue }
     const relPath = m[1]
@@ -431,6 +437,7 @@ export function resolveIncludes(
       out.push(line)
       continue
     }
+    outIncluded?.push(absPath)   // 收集被引用文件，供缓存按子文件 mtime 失效
     const content = readFileSync(absPath, "utf-8")
     if (agent) {
       // 路由型：存入 agentSpecs，不内联进通用正文
@@ -443,7 +450,7 @@ export function resolveIncludes(
       continue
     }
     inlineSeen.add(absPath)
-    out.push(resolveIncludes(content, dirname(absPath), agentSpecs, inlineSeen))
+    out.push(resolveIncludes(content, dirname(absPath), agentSpecs, inlineSeen, outIncluded))
   }
   return out.join("\n")
 }
@@ -462,19 +469,31 @@ interface SpecBundle {
   architectureModel: ArchitectureModel | null
 }
 
-/** 默认 spec bundle 缓存（mtime 感知） */
+/** 默认 spec bundle 缓存（mtime 感知，纳入 @include 子文件 mtime） */
 let _cachedDefaultBundle: SpecBundle | null = null
 let _cachedDefaultBundleMtime: number | null = null
+let _cachedDefaultBundleIncluded: string[] = []
+
+/** 取多个文件 mtime 的最大值（任一不存在跳过）；用于 spec bundle 缓存纳入 @include 子文件 mtime */
+function maxMtime(paths: string[]): number {
+  let mx = 0
+  for (const p of paths) {
+    try { const m = statSync(p).mtimeMs; if (m > mx) mx = m } catch { /* 缺失跳过 */ }
+  }
+  return mx
+}
 
 /** 加载默认 java-code-spec.md（走 @include 解析） */
 export function loadDefaultSpecBundle(): SpecBundle {
   const specPath = join(findOpencodeDir(), "docs", "java-code-spec.md")
   try {
-    const mtime = statSync(specPath).mtimeMs
-    if (_cachedDefaultBundle && _cachedDefaultBundleMtime === mtime) return _cachedDefaultBundle
+    // 缓存命中判断：主文件 + 上次收集的 @include 子文件 mtime 聚合（仅 stat 不读内容）
+    const aggMtime = maxMtime([specPath, ..._cachedDefaultBundleIncluded])
+    if (_cachedDefaultBundle && _cachedDefaultBundleMtime === aggMtime) return _cachedDefaultBundle
     const raw = readFileSync(specPath, "utf-8")
     const agentSpecs = new Map<string, string>()
-    const general = resolveIncludes(raw, dirname(specPath), agentSpecs).trim()
+    const included: string[] = []
+    const general = resolveIncludes(raw, dirname(specPath), agentSpecs, new Set(), included).trim()
     const sections = parseMarkdownSections(general)
     const bundle: SpecBundle = {
       general,
@@ -482,7 +501,8 @@ export function loadDefaultSpecBundle(): SpecBundle {
       architectureModel: extractArchitectureModel(sections),
     }
     _cachedDefaultBundle = bundle
-    _cachedDefaultBundleMtime = mtime
+    _cachedDefaultBundleIncluded = included
+    _cachedDefaultBundleMtime = maxMtime([specPath, ...included])
     return bundle
   } catch {
     getLogger().warn("[workflow-engine]", `默认 Java 代码规约文件未找到或不可读: ${specPath}`)
@@ -568,6 +588,7 @@ interface UserSpecResult {
 let _cachedUserSpec: UserSpecResult | null = null
 let _cachedUserSpecMtime: number | null = null
 let _cachedUserSpecPath: string | null = null
+let _cachedUserSpecIncluded: string[] = []   // @include 子文件路径，缓存键纳入其 mtime
 
 /** 加载用户自定义规约文件（--spec 参数）。
  *  优先级：1) specConf 指定路径  2) sourcePath/project-spec.md
@@ -607,14 +628,17 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
     }
     const stat = statSync(filePath)
     const mtime = stat.mtimeMs
-    if (_cachedUserSpec && _cachedUserSpecPath === filePath && _cachedUserSpecMtime === mtime) {
+    // 缓存命中判断：主文件 + 上次收集的 @include 子文件 mtime 聚合（仅 stat 不读内容）
+    const aggMtime = maxMtime([filePath, ..._cachedUserSpecIncluded])
+    if (_cachedUserSpec && _cachedUserSpecPath === filePath && _cachedUserSpecMtime === aggMtime) {
       return _cachedUserSpec
     }
 
     const fileContent = readFileSync(filePath, "utf-8")
     // @include 解析：内联型展开进 rawMarkdown，路由型登记进 agentSpecs
     const agentSpecs = new Map<string, string>()
-    const rawMarkdown = resolveIncludes(fileContent, dirname(filePath), agentSpecs).trim()
+    const included: string[] = []
+    const rawMarkdown = resolveIncludes(fileContent, dirname(filePath), agentSpecs, new Set(), included).trim()
 
     // 无 ## 标题的文件处理
     const hasHeadings = /^## /m.test(rawMarkdown)
@@ -631,7 +655,8 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
           architectureModel: null,
         }
         _cachedUserSpec = result
-        _cachedUserSpecMtime = mtime
+        _cachedUserSpecMtime = maxMtime([filePath, ...included])
+        _cachedUserSpecIncluded = included
         _cachedUserSpecPath = filePath
         getLogger().info("[workflow-engine]", `加载无标题结构定义: ${filePath} (${paths.length} 个路径)`)
         return result
@@ -670,7 +695,8 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
       architectureModel,
     }
     _cachedUserSpec = result
-    _cachedUserSpecMtime = mtime
+    _cachedUserSpecMtime = maxMtime([filePath, ...included])
+    _cachedUserSpecIncluded = included
     _cachedUserSpecPath = filePath
 
     getLogger().info("[workflow-engine]",
