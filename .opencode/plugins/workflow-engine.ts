@@ -39,6 +39,10 @@ import { scanDuplicates, type ScanResult } from "../workflow/dedup-scanner"
 import { scanReviewStatic } from "../workflow/review-scanner"
 import { generateScaffoldInput } from "../workflow/scaffold-input-builder"
 import { generateDoAndH2Schema } from "../workflow/do-schema-builder"
+import {
+  parseArchitectureModel, DEFAULT_ARCHITECTURE_MODEL, formatArchitectureModel,
+  type ArchitectureModel,
+} from "../workflow/architecture-model"
 import { enumerateTestCases } from "../workflow/test-case-enumerator"
 import { buildTestScaffold } from "../workflow/test-scaffold-builder"
 import { runBuilderAction } from "../workflow/builder-actions"
@@ -459,6 +463,112 @@ function readProjectSpec(effectiveAgentFile: string): string {
  *  - 首个 ## 之前的内容存为 `__preamble__`
  *  - ### 及更深层标题保留在章节正文中，不作为章节边界
  */
+// ── @include 解析（内联 + 路由）+ 活跃 spec bundle ──
+//
+// 主 spec（默认 java-code-spec.md 或用户 --spec）用 `@include <path>` 内联子文件进通用规约，
+// 用 `@include <path> -> <agent>` 把子 spec 路由为该 agent 专属 projectSpec 段（取代 PROJECT_SPEC_MAP）。
+// 路径相对主 spec 文件目录 resolve；递归 include，inlineSeen 防环/防重复内联；缺失文件 warn 保留原行。
+
+const INCLUDE_RE = /^@include\s+(\S+)(?:\s*->\s*(\S+))?\s*$/
+
+/** 解析 @include 指令：内联型展开进返回文本，路由型登记进 agentSpecs。返回内联后的文本。 */
+export function resolveIncludes(
+  rawMarkdown: string,
+  baseDir: string,
+  agentSpecs: Map<string, string>,
+  inlineSeen: Set<string> = new Set(),
+): string {
+  const out: string[] = []
+  for (const line of rawMarkdown.split("\n")) {
+    const m = INCLUDE_RE.exec(line.trim())
+    if (!m) { out.push(line); continue }
+    const relPath = m[1]
+    const agent = m[2]
+    const absPath = resolve(baseDir, relPath)
+    if (!existsSync(absPath)) {
+      getLogger().warn("[workflow-engine]", `@include 文件不存在: ${relPath}（基目录 ${baseDir}），保留原指令行`)
+      out.push(line)
+      continue
+    }
+    const content = readFileSync(absPath, "utf-8")
+    if (agent) {
+      // 路由型：存入 agentSpecs，不内联进通用正文
+      agentSpecs.set(agent, content.trim())
+      continue
+    }
+    // 内联型：递归解析子文件的 include，防环/防重复
+    if (inlineSeen.has(absPath)) {
+      getLogger().warn("[workflow-engine]", `@include 循环或重复引用已跳过: ${relPath}`)
+      continue
+    }
+    inlineSeen.add(absPath)
+    out.push(resolveIncludes(content, dirname(absPath), agentSpecs, inlineSeen))
+  }
+  return out.join("\n")
+}
+
+/** 从章节 Map 提取架构模型（`## 架构模型` 段正文 → ArchitectureModel）；缺失返回 null */
+function extractArchitectureModel(sections: Map<string, string>): ArchitectureModel | null {
+  const body = sections.get("架构模型")
+  if (!body) return null
+  return parseArchitectureModel(body)
+}
+
+/** 活跃 spec bundle：通用规约(内联后) + 路由子 spec + 架构模型 */
+interface SpecBundle {
+  general: string
+  agentSpecs: Map<string, string>
+  architectureModel: ArchitectureModel | null
+}
+
+/** 默认 spec bundle 缓存（mtime 感知） */
+let _cachedDefaultBundle: SpecBundle | null = null
+let _cachedDefaultBundleMtime: number | null = null
+
+/** 加载默认 java-code-spec.md（走 @include 解析） */
+function loadDefaultSpecBundle(): SpecBundle {
+  const specPath = join(findOpencodeDir(), "docs", "java-code-spec.md")
+  try {
+    const mtime = statSync(specPath).mtimeMs
+    if (_cachedDefaultBundle && _cachedDefaultBundleMtime === mtime) return _cachedDefaultBundle
+    const raw = readFileSync(specPath, "utf-8")
+    const agentSpecs = new Map<string, string>()
+    const general = resolveIncludes(raw, dirname(specPath), agentSpecs).trim()
+    const sections = parseMarkdownSections(general)
+    const bundle: SpecBundle = {
+      general,
+      agentSpecs,
+      architectureModel: extractArchitectureModel(sections),
+    }
+    _cachedDefaultBundle = bundle
+    _cachedDefaultBundleMtime = mtime
+    return bundle
+  } catch {
+    getLogger().warn("[workflow-engine]", `默认 Java 代码规约文件未找到或不可读: ${specPath}`)
+    return { general: "", agentSpecs: new Map(), architectureModel: null }
+  }
+}
+
+/** 取当前 run 的活跃 spec bundle：用户 --spec 优先，否则默认 */
+function getActiveSpecBundle(run: WorkflowRun | null): SpecBundle {
+  const userSpecPath = (run?.metadata as Record<string, unknown>)?.userSpecPath as string | undefined
+  if (userSpecPath) {
+    try {
+      const userSpec = loadUserSpec(userSpecPath, undefined)
+      if (userSpec) {
+        return {
+          general: userSpec.rawMarkdown,
+          agentSpecs: userSpec.agentSpecs,
+          architectureModel: userSpec.architectureModel,
+        }
+      }
+    } catch (e: any) {
+      getLogger().warn("[workflow-engine]", `加载用户规约失败，回退到内置规约: ${e.message}`)
+    }
+  }
+  return loadDefaultSpecBundle()
+}
+
 function parseMarkdownSections(text: string): Map<string, string> {
   const sections = new Map<string, string>()
   const lines = text.split("\n")
@@ -507,6 +617,10 @@ interface UserSpecResult {
   sections: Map<string, string>
   projectStructure: string[] | null
   sourcePath: string
+  /** 路由型 @include ... -> agent 登记的 agent→子 spec 内容（取代 PROJECT_SPEC_MAP） */
+  agentSpecs: Map<string, string>
+  /** 解析自 `## 架构模型` 段；缺失为 null（调用方回退默认） */
+  architectureModel: ArchitectureModel | null
 }
 
 /** 缓存的用户规约 + mtime */
@@ -556,7 +670,10 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
       return _cachedUserSpec
     }
 
-    const rawMarkdown = readFileSync(filePath, "utf-8").trim()
+    const fileContent = readFileSync(filePath, "utf-8")
+    // @include 解析：内联型展开进 rawMarkdown，路由型登记进 agentSpecs
+    const agentSpecs = new Map<string, string>()
+    const rawMarkdown = resolveIncludes(fileContent, dirname(filePath), agentSpecs).trim()
 
     // 无 ## 标题的文件处理
     const hasHeadings = /^## /m.test(rawMarkdown)
@@ -569,6 +686,8 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
           sections: new Map(),
           projectStructure: paths,
           sourcePath: filePath,
+          agentSpecs,
+          architectureModel: null,
         }
         _cachedUserSpec = result
         _cachedUserSpecMtime = mtime
@@ -584,6 +703,8 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
         sections: wrappedSections,
         projectStructure: null,
         sourcePath: filePath,
+        agentSpecs,
+        architectureModel: null,
       }
       _cachedUserSpec = result
       _cachedUserSpecMtime = mtime
@@ -595,6 +716,7 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
     // 新格式：按 ## 章节解析
     const sections = parseMarkdownSections(rawMarkdown)
     const projectStructure = extractStructureFromSpec(sections)
+    const architectureModel = extractArchitectureModel(sections)
 
     // --spec 为整体替换语义：用户文件即唯一规约，不再与内置规约做章节合并/标题匹配。
 
@@ -603,6 +725,8 @@ function loadUserSpec(specConf?: string, sourcePath?: string): UserSpecResult | 
       sections,
       projectStructure,
       sourcePath: filePath,
+      agentSpecs,
+      architectureModel,
     }
     _cachedUserSpec = result
     _cachedUserSpecMtime = mtime
@@ -891,6 +1015,13 @@ function buildRuntimeContext(run: WorkflowRun): string {
   if (ps && Array.isArray(ps)) {
     lines.push(`projectStructure:`)
     for (const dir of ps) lines.push(`  - ${dir}`)
+  }
+
+  // architectureModel: 架构决策唯一事实源摘要（角色/实体/异常/FQN），所有 agent 可见的 canonical 值
+  const am = (run.metadata as Record<string, unknown>).architectureModel as ArchitectureModel | undefined
+  if (am && typeof am === "object" && Array.isArray(am.roles)) {
+    lines.push(`architectureModel:`)
+    for (const ln of formatArchitectureModel(am).split("\n")) lines.push(`  ${ln}`)
   }
 
   return lines.join("\n")
@@ -1530,34 +1661,21 @@ function buildFullSystemPrompt(
   }
   // 4. sharedInstructions
   const sharedInstructions = run ? buildSharedInstructions(run, effectiveSubStage) : ""
-  // 5. javaCodeSpec（--spec 整体替换语义保留：用户规约文件含 ## 章节即唯一规约，不与内置合并）
+  // 5. javaCodeSpec（活跃 spec bundle 的 general 段：用户 --spec 整体替换 / 默认 java-code-spec.md，
+  //    均 @include 解析后的内联通用规约；架构模型段随 general 内联可见）
   const needsJavaSpec = JAVA_SPEC_AGENTS.some(a => effectiveAgentFile.includes(a))
-  const rawSpec = needsJavaSpec ? readJavaCodeSpec() : ""
+  const bundle = getActiveSpecBundle(run)
   let javaCodeSpec: string
-  if (needsJavaSpec && rawSpec) {
-    const userSpecPath = (run?.metadata as Record<string, unknown>)?.userSpecPath as string | undefined
-    if (userSpecPath) {
-      try {
-        const userSpec = loadUserSpec(userSpecPath, undefined)
-        if (userSpec && userSpec.sections.size > 0) {
-          javaCodeSpec = userSpec.rawMarkdown
-        } else {
-          javaCodeSpec = rawSpec
-        }
-      } catch (e: any) {
-        getLogger().warn("[workflow-engine]", `加载用户规约失败，回退到内置规约: ${e.message}`)
-        javaCodeSpec = rawSpec
-      }
-    } else {
-      javaCodeSpec = rawSpec
-    }
-  } else if (needsJavaSpec) {
-    javaCodeSpec = "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/docs/java-code-spec.md**\n"
+  if (needsJavaSpec) {
+    javaCodeSpec = bundle.general
+      || "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/docs/java-code-spec.md**\n"
   } else {
     javaCodeSpec = ""
   }
-  // 6. project-spec（agent 专属项目硬规则，按 effectiveAgentFile basename 注入；未命中返回空串）
-  const projectSpec = readProjectSpec(effectiveAgentFile)
+  // 6. project-spec（agent 专属项目硬规则：Phase 2 起由 @include ... -> agent 路由的 agentSpecs 提供，
+  //    当前过渡期仍回退 PROJECT_SPEC_MAP，避免默认 spec 未补 @include 前丢段）
+  const agentBase = basename(effectiveAgentFile)
+  const projectSpec = bundle.agentSpecs.get(agentBase.replace(/\.md$/, "")) ?? readProjectSpec(effectiveAgentFile)
   // 7. shardBanner（workOrder 缺失时作 parts[0] 兜底）
   const shardBanner = run ? buildShardScopeBanner(run) : ""
   const hasWorkOrder = !!workOrder
@@ -3481,6 +3599,20 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             if (args.dedupRules) metadata.dedupRulesPath = args.dedupRules
             if (userSpecResult?.projectStructure) metadata.projectStructure = userSpecResult.projectStructure
             if (userSpecResult?.sourcePath) metadata.userSpecPath = userSpecResult.sourcePath
+            // 架构模型（架构决策唯一事实源）：用户 --spec 的 ## 架构模型 段 → 默认 spec 解析 → 回退 DEFAULT
+            const archModel = userSpecResult?.architectureModel
+              ?? loadDefaultSpecBundle().architectureModel
+              ?? DEFAULT_ARCHITECTURE_MODEL
+            metadata.architectureModel = archModel
+            // 持久化到 artifactsDir，供确定性 builder（do-schema/test-scaffold/verify/test-case-enumerator/
+            // review-focus/buildCoreSegmentBlock）经 loadArchitectureModel(artifactsDir) 读取
+            try {
+              const archDir = join(ARTIFACT_DIR, runId)
+              mkdirSync(archDir, { recursive: true })
+              safeWriteFile(join(archDir, "architecture-model.json"), JSON.stringify(archModel, null, 2))
+            } catch (e: any) {
+              getLogger().warn("[workflow-engine]", `写入 architecture-model.json 失败（非阻断）: ${e.message}`)
+            }
             // artifactId（Java 项目目录名）：--project 优先，否则从 sourcePath 推导（kebab-lowercase）。
             // 写入 metadata + run-context，引擎据此算 projectRoot，不再依赖 plan.json。
             const artifactId = (args.project as string | undefined)
