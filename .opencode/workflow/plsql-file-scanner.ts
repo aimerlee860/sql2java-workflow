@@ -1124,6 +1124,72 @@ export function extractCallsByRegex(
   return out
 }
 
+/**
+ * 抽取 PL/SQL 允许省略括号的零参函数调用。
+ *
+ * 普通 `ident(` 正则和 ANTLR general_element 都无法识别 `RETURN curr_biz_date`、
+ * `NVL(id_date, curr_biz_date)` 这类表达式。这里必须传入已知 FUNCTION 索引，只有命中
+ * inventory 声明且处在表达式位置的标识符才构边，避免把普通变量/列名误判成调用。
+ */
+export function extractNoParenFunctionCallsByRegex(
+  code: string,
+  callerPkg: string,
+  lineRange: [number, number],
+  functionIndex: Map<string, Set<string>>,
+): DirectCall[] {
+  const src = code
+    .replace(/--[^\n]*/g, match => " ".repeat(match.length))
+    .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, " "))
+    .replace(/'(?:''|[^'])*'/g, match => match.replace(/[^\n]/g, " "))
+  const lineStarts: number[] = [0]
+  for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts.push(i + 1)
+  const lineOf = (offset: number): number => {
+    let lo = 0, hi = lineStarts.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >>> 1
+      if (lineStarts[mid] <= offset) lo = mid
+      else hi = mid - 1
+    }
+    return lo + 1
+  }
+
+  const tokenRe = /(?<![:\w$#])((?:"[^"]+"|[A-Za-z_][\w$#]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$#]*))*)(?![\w$#])/g
+  const out: DirectCall[] = []
+  const seen = new Set<string>()
+  let match: RegExpExecArray | null
+  while ((match = tokenRe.exec(src)) !== null) {
+    const index = match.index
+    const line = lineOf(index)
+    if (line < lineRange[0] || line > lineRange[1]) continue
+
+    const { pkg, member } = resolveQualifiedName(match[1].replace(/\s+/g, ""), callerPkg)
+    if (!functionIndex.get(pkg)?.has(member)) continue
+
+    const after = src.slice(index + match[0].length)
+    if (/^\s*\(/.test(after) || /^\s*:=/.test(after)) continue
+    const lineStart = lineStarts[line - 1]
+    const lineEndOffset = src.indexOf("\n", index)
+    const lineEnd = lineEndOffset >= 0 ? lineEndOffset : src.length
+    const beforeOnLine = src.slice(lineStart, index)
+    const afterOnLine = src.slice(index + match[0].length, lineEnd)
+    if (/^\s*(?:PROCEDURE|FUNCTION)\b/i.test(beforeOnLine)) continue
+    if (/\bEND\s*$/i.test(beforeOnLine)) continue
+
+    const previousChar = beforeOnLine.trimEnd().slice(-1)
+    const previousWord = beforeOnLine.match(/([A-Za-z_][\w$#]*)\s*$/)?.[1]?.toUpperCase() ?? ""
+    const expressionPrefix = /[(:,=+\-*\/|<>]/.test(previousChar)
+      || new Set(["RETURN", "IF", "ELSIF", "WHEN", "THEN", "ELSE", "AND", "OR", "NOT", "IS", "LIKE", "BETWEEN"]).has(previousWord)
+    const expressionSuffix = /^\s*(?:[,);+\-*\/|=<>]|\b(?:THEN|AND|OR|IS|LIKE|BETWEEN)\b)/i.test(afterOnLine)
+    if (!expressionPrefix || !expressionSuffix) continue
+
+    const key = `${pkg}.${member}.${line}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ package: pkg, name: member, line, kind: "function" })
+  }
+  return out
+}
+
 // ── regex 主路径：子程序结构识别（无 AST）──────────────────────────────────────
 
 export interface SubprogramRange {
@@ -1636,12 +1702,119 @@ export function scanFileSet(filePaths: string[], primaryBase: string): FileSetRe
 }
 
 /**
- * regex 主路径扫描一个 file-set（替代 scanFileSet 的 AST 路径，AST 保留不启用）。
+ * regex 负责稳定识别文件边界与源码区间，AST 负责参数、返回类型、包级声明及语义调用节点。
+ * 两者合并后既保留 regex 对方言/错误恢复的韧性，也不再把关键结构字段留给 LLM 猜测。
+ */
+function enrichRegexResultWithAst(regexResult: FileSetResult, astResult: FileSetResult): FileSetResult {
+  const astPackages = new Map(astResult.packages.map(pkg => [pkg.packageName, pkg]))
+  for (const target of regexResult.packages) {
+    const source = astPackages.get(target.packageName)
+    if (!source) continue
+    target.constants = source.constants
+    target.variables = source.variables
+    target.exceptions = source.exceptions
+    target.types = source.types
+  }
+
+  const locationKey = (sub: SubprogramInfo): string => {
+    const body = sub.bodyLocation
+    if (body) return `B:${body.absolutePath}:${body.lineRange[0]}`
+    const header = sub.headerLocation
+    if (header) return `H:${header.absolutePath}:${header.lineRange[0]}`
+    return ""
+  }
+  const groupByName = (subs: SubprogramInfo[]): Map<string, SubprogramInfo[]> => {
+    const groups = new Map<string, SubprogramInfo[]>()
+    for (const sub of subs) {
+      const key = `${sub.belongToPackage}.${sub.name}`
+      const values = groups.get(key) ?? []
+      values.push(sub)
+      groups.set(key, values)
+    }
+    return groups
+  }
+  const astGroups = groupByName(astResult.subprograms)
+  const used = new Set<SubprogramInfo>()
+  const functionIndex = new Map<string, Set<string>>()
+  for (const sub of regexResult.subprograms) {
+    if (sub.type !== "FUNCTION") continue
+    const names = functionIndex.get(sub.belongToPackage) ?? new Set<string>()
+    names.add(sub.name)
+    functionIndex.set(sub.belongToPackage, names)
+  }
+  const sourceCache = new Map<string, string>()
+  const mergeCalls = (left: DirectCall[], right: DirectCall[]): DirectCall[] => {
+    const out: DirectCall[] = []
+    const seen = new Set<string>()
+    for (const call of [...left, ...right]) {
+      const key = `${call.package}.${call.name}.${call.line}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(call)
+    }
+    return out
+  }
+  const mergeRefs = (left: PackageRef[], right: PackageRef[]): PackageRef[] => {
+    const out: PackageRef[] = []
+    const seen = new Set<string>()
+    for (const ref of [...left, ...right]) {
+      const key = `${ref.package}.${ref.name}.${ref.line}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(ref)
+    }
+    return out
+  }
+
+  for (const target of regexResult.subprograms) {
+    const candidates = astGroups.get(`${target.belongToPackage}.${target.name}`) ?? []
+    const targetLocation = locationKey(target)
+    const source = candidates.find(candidate => !used.has(candidate) && locationKey(candidate) === targetLocation)
+      ?? candidates.find(candidate => !used.has(candidate))
+    if (source) {
+      used.add(source)
+      target.parameters = source.parameters
+      target.returnType = source.returnType
+      target.type = source.type
+      target.directCalls = mergeCalls(target.directCalls, source.directCalls)
+      target.packageRefs = mergeRefs(target.packageRefs, source.packageRefs)
+    }
+
+    // ANTLR 与普通调用正则都会漏掉无括号零参函数，使用已知函数索引做表达式二次扫描。
+    if (target.bodyLocation) {
+      const sourcePath = target.bodyLocation.absolutePath
+      try {
+        let code = sourceCache.get(sourcePath)
+        if (code === undefined) {
+          code = stripSqlPlusCommands(normalizeFullwidthSyntax(readFileSync(sourcePath, "utf-8").replace(/\r\n?/g, "\n")))
+          sourceCache.set(sourcePath, code)
+        }
+        target.directCalls = mergeCalls(
+          target.directCalls,
+          extractNoParenFunctionCallsByRegex(code, target.belongToPackage, target.bodyLocation.lineRange, functionIndex),
+        )
+      } catch (e) {
+        regexResult.warnings.push(`零参函数调用二次扫描失败 ${sourcePath}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
+  regexResult.warnings.push(...astResult.warnings.map(w => `AST 结构增强: ${w}`))
+  const missingPackages = regexResult.packages
+    .filter(pkg => !astPackages.has(pkg.packageName))
+    .map(pkg => pkg.packageName)
+  if (missingPackages.length > 0) {
+    regexResult.warnings.push(`AST 结构增强未覆盖包: ${missingPackages.join(", ")}；参数、返回类型或包级声明可能不完整`)
+  }
+  return regexResult
+}
+
+/**
+ * 混合主路径扫描一个 file-set：regex 定位 + AST 结构增强。
  *
  * 每文件：extractPackageNames 建包 + findAllSubprograms 识别包级子程序（状态机，过滤嵌套局部过程）
  * + spec/body 槽位合并（同 registerSubprogram：spec 填 headerLocation，body 填 bodyLocation
- *   + directCalls/packageRefs）。parameters/returnType/包级声明留空，交 LLM 兜底（引擎按
- *   bodyLocation.lineRange 预切 source.sql 喂 translate LLM，见 workflow-engine.ts）。
+ *   + directCalls/packageRefs），再用 AST 补齐 parameters/returnType/包级声明及 regex 漏掉的调用节点。
  *
  * directCalls 走 extractCallsByRegex 不收窄（scan 阶段闭包扩展要跟到未扫包），噪声由
  * finalizeInventoryIndex 后过滤在闭包扫完后收窄。standalone（无包）文件 MVP 记 warning 跳过。
@@ -1742,12 +1915,19 @@ export function scanFileSetRegex(filePaths: string[], primaryBase: string): File
   const subprogramList: SubprogramInfo[] = []
   for (const slots of subprograms.values()) subprogramList.push(...slots)
 
-  return {
+  const regexResult: FileSetResult = {
     packages: Array.from(packages.values()),
     subprograms: subprogramList,
     standaloneProcedures,
     standaloneSlots,
     tables, triggers, views, sequences,
     warnings,
+  }
+  try {
+    return enrichRegexResultWithAst(regexResult, scanFileSet(filePaths, primaryBase))
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
+    regexResult.warnings.push(`AST 结构增强失败: ${message}；参数、返回类型或包级声明可能不完整`)
+    return regexResult
   }
 }

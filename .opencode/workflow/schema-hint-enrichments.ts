@@ -69,7 +69,7 @@ export const NON_ZOD_VALIDATION_RULES: { phases: string[]; message: string }[] =
   },
   {
     phases: ["scaffold"],
-    message: "scaffold.json 的 projectRoot 必须是 Runtime Context / workOrder 注入的 projectRoot 值（绝对路径 generated/{artifactId}，原样使用，勿自行编造）",
+    message: "项目文件写入 Runtime Context 的事务工作区 projectRoot；scaffold.json.projectRoot 必须填写 finalProjectRoot，禁止直接写最终目录",
   },
   {
     phases: ["translate", "review", "verify"],
@@ -86,6 +86,10 @@ export const NON_ZOD_VALIDATION_RULES: { phases: string[]; message: string }[] =
   {
     phases: ["scaffold"],
     message: "scaffold.json 的 generated.entities / h2SchemaFile 由引擎确定性生成并 patch（DO + schema-h2.sql 落盘 projectRoot）——LLM 不填这两个字段",
+  },
+  {
+    phases: ["scaffold"],
+    message: "scaffold 声明的目录/文件必须存在；Java package 必须与路径一致；额外生成文件须登记到 generated.extraFiles",
   },
 ]
 
@@ -128,6 +132,8 @@ export const CROSS_SCHEMA_HINTS: Record<string, string[]> = {
   ],
   scaffold: [
     "scaffold.packageMappings 必须覆盖所有 inventory 包的 plsqlPackage（scope 模式下覆盖 scopePackages）",
+    "纯常量包的 packageMappings.components 固定为 [{role: \"constant\"}]，不得为空数组",
+    "packageMappings.plsqlPackage 不得重复；每个 constants/stateDtos 条目必须存在对应 packageMapping",
   ],
   translate: [
     "subprogramMethods.plsqlName 必须唯一且符合 refName 规范（重载用 {name}__序号）",
@@ -161,10 +167,14 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
   ],
   scaffold: [
     'commonModules.classes.category 推荐全小写，如 "type-mapper" / "mybatis-fragment" / "mapper-interface" / "test-base"（不限死）',
-    'projectRoot 为绝对路径（generated/{artifactId}），必须原样使用 Runtime Context / workOrder 注入的 projectRoot 值，勿自行编造路径',
+    'Runtime Context 的 projectRoot 是本次事务工作区，只用于写项目文件；scaffold.json.projectRoot 填 finalProjectRoot',
+    'scaffold.json 必须通过 saveArtifact 保存，禁止 Set-Content/Out-File/重定向绕过 JSON 规范化与 Schema 校验',
+    'targetProject.groupId 禁止保留 com.example 或 org.example 示例占位命名空间',
     'constants 为 per-package {Pkg}Constant 常量类清单、stateDtos 为 per-package {Pkg}StateDTO 变量 DTO 清单（{file, plsqlSchema, plsqlPackage}），scaffold 从 inventory constants / variables 分别生成',
     'procClassNames 为 per-proc 去重类名映射（{plsqlSchema, plsqlPackage, refName, className}），跨包同名碰撞加数字后缀；translate 据此 + 角色后缀派生类名，跨包调用按 service.{className}Service 派生',
     'packageMappings.components 为 per-proc 角色集模板（{role}，无 className），类名由 procClassNames 去重基名 + {RoleSuffix} 派生',
+    '纯常量包 components 固定为 [{role: "constant"}]；保存入口也会对可确定的空数组执行该规范化',
+    '额外生成的项目文件必须登记到 generated.extraFiles，未登记文件会在 advance 时被拒绝',
     'DO 实体（generated.entities）+ schema-h2.sql（generated.h2SchemaFile）由引擎在 scaffold 完成后确定性生成并 patch——LLM 不生成 DO/schema-h2、不填这两个字段、不读 tables 数据',
     'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',
   ],
@@ -176,7 +186,7 @@ export const COMMON_PITFALLS: Record<string, string[]> = {
     'totalSubprograms 等数字字段支持字符串自动转换（写 "5" 等同 5）',
     'files.role 使用 "mapper-integration-test" 标识 Mapper 集成测试文件',
     '生产 Mapper XML 保持 PL/SQL 原生语法不变',
-    'H2 确实不兼容的 SQL 标 @Disabled（不修改 Mapper XML）',
+    '禁止用 @Disabled 掩盖 H2/Mapper/SQL 失败；须修复测试 schema/数据/兼容映射，无法修复则 failed 并归因',
     '测试数据 INSERT 使用硬编码 ID 值（不使用 SEQ.NEXTVAL）',
     'JdbcTemplate INSERT 测试数据的列必须与 schema-h2.sql 一致',
     'Schema 允许额外字段（.passthrough()）——可添加不在 schema 中的 optional 字段帮助下游阶段，额外字段会透传不被剥离',

@@ -6,8 +6,8 @@
  *   worker→主: { id, ok: true, result: FileSetResult } | { id, ok: false, error: string }
  *   worker→主（启动）: { kind: "ready" }
  *
- * 常驻 worker：处理完一个任务后保持存活等下一条消息（persistent 池，amortize PlSqlParser
- * ATN 冷启动 ~4.3s——首次 new PlSqlParser() 懒构建，每 worker 只付一次）。
+ * 常驻 worker：处理完一个任务后保持存活等下一条消息（regex 定位后执行 AST 结构增强；
+ * persistent 池摊薄 PlSqlParser ATN 冷启动成本）。
  *
  * 失败不崩：scanFileAst 内部已 try/catch 收 warning；此处再兜一层，单文件集异常只回 error，
  * 主线程据此决定跳过/fallback，worker 继续存活。

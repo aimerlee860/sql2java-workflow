@@ -169,10 +169,10 @@ describe("renderSchemaHint", () => {
     expect(hint).toContain("文件名一致")
   })
 
-  it("scaffold 阶段包含 projectRoot 格式要求", () => {
+  it("scaffold 阶段区分事务 projectRoot 与 finalProjectRoot", () => {
     const hint = renderSchemaHint("scaffold")
-    expect(hint).toContain("projectRoot")
-    expect(hint).toContain("generated/{artifactId}")
+    expect(hint).toContain("事务工作区 projectRoot")
+    expect(hint).toContain("finalProjectRoot")
   })
 
   // ── Token 预算 ──

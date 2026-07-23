@@ -18,6 +18,7 @@
 
 import { readFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync } from "node:fs"
 import { safeWriteFile } from "./cross-platform"
+import { readArtifactJson } from "./artifact-json"
 import { join } from "node:path"
 import { nowLocal } from "./timestamp"
 import { z } from "zod"
@@ -25,6 +26,7 @@ import { parseQualified, pkgOf, refOf } from "./refname"
 import { buildDependencyGraph } from "./dependency-graph"
 import { parseInventoryPackage } from "./package-parser"
 import { readScope } from "./scope-computer"
+import { TranslateLintSchema } from "./artifact-schemas"
 
 /**
  * 从 artifactsDir/run.json 读 scoped run 的「期望覆盖包」集（metadata.scopePackages）。
@@ -37,7 +39,7 @@ export function readScopePackagesFromArtifacts(artifactsDir: string): string[] |
   try {
     const runPath = join(artifactsDir, "run.json")
     if (!existsSync(runPath)) return null
-    const run = JSON.parse(readFileSync(runPath, "utf-8")) as { metadata?: Record<string, unknown> | undefined }
+    const run = readArtifactJson<{ metadata?: Record<string, unknown> | undefined }>(runPath).data
     const scope = readScope(run.metadata)
     return scope && scope.scopePackages.length > 0 ? scope.scopePackages : null
   } catch {
@@ -180,10 +182,11 @@ export interface ShardPlan {
   unitMode?: boolean
 }
 
-/** 跨 Schema 校验发现项（D9 扩展：支持 blocking / warning 两级严重度） */
+/** 跨 Schema / 质量门禁发现项。hard=true 的正确性门禁永不按拒绝次数降级。 */
 export interface CrossSchemaFinding {
   message: string
   severity: "blocking" | "warning"
+  hard?: boolean
 }
 
 /** advance 返回结构 */
@@ -263,6 +266,15 @@ export class WorkflowEngine {
     this.artifactCache.clear()
   }
 
+  /**
+   * 持久化调用方已在当前 run 上完成的元数据更新。
+   * 仅暴露窄入口，避免插件层绕过引擎直接写 run.json。
+   */
+  persistRun(run: WorkflowRun): void {
+    run.updatedAt = new Date().toISOString()
+    this.persist(run)
+  }
+
   // ── 注册 ──
 
   registerDefinition(def: WorkflowDefinition): void {
@@ -299,7 +311,12 @@ export class WorkflowEngine {
     return run
   }
 
-  advance(runId: string, input: { result?: "passed" | "failed"; acceptWarnings?: boolean } = {}): AdvanceResult {
+  advance(runId: string, input: {
+    result?: "passed" | "failed"
+    acceptWarnings?: boolean
+    /** 所有门控通过、阶段状态变更前执行；抛错会拒绝推进并保持当前阶段。 */
+    beforeTransition?: (run: WorkflowRun) => void
+  } = {}): AdvanceResult {
     this.artifactCache.clear()  // 每次 advance 开始时清除缓存
     const run = this.getRun(runId)
     const def = this.getDefinition(run.definitionId)
@@ -371,7 +388,8 @@ export class WorkflowEngine {
     if (blockingFindings.length > 0) {
       // fix 阶段走自有 maxRetries→completed_with_issues 机制，不参与降级
       const isFixPhase = currentPhaseConfig?.isFixPhase === true
-      if (!isFixPhase && this.rejectionBoundExceeded(run)) {
+      const hasHardBlocking = blockingFindings.some(f => f.hard === true)
+      if (!isFixPhase && run.currentPhase !== "scaffold" && !hasHardBlocking && this.rejectionBoundExceeded(run)) {
         // 降级：连续达到上限，blocking 问题转 warning 放行，不阻断流程
         this.appendEvent(runId, "ADVANCE", run.currentPhase ?? "",
           `[rejection-bound-exceeded] 阶段 ${run.currentPhase} 已连续 ${this.getRejectionCount(run)} 次拒绝，达到上限(${WorkflowEngine.REJECTION_BOUND})，blocking 问题降级为 warning 放行：\n${blockingFindings.map(f => `  - ${f.message}`).join("\n")}`)
@@ -507,6 +525,22 @@ export class WorkflowEngine {
         rejected: true,
         rejectionReason: `No transition rule found for phase "${run.currentPhase}" with result "${resultForMatching}"`,
         crossSchemaWarnings,
+      }
+    }
+
+    if (input.beforeTransition) {
+      try {
+        input.beforeTransition(run)
+      } catch (e: any) {
+        return {
+          run,
+          nextPhase: null,
+          finished: false,
+          waitingForConfirmation: false,
+          rejected: true,
+          rejectionReason: `阶段提交前置操作失败: ${e?.message ?? e}`,
+          crossSchemaWarnings,
+        }
       }
     }
 
@@ -740,10 +774,9 @@ export class WorkflowEngine {
     if (!existsSync(filePath)) {
       throw new WorkflowEngineError(`Run file not found: ${filePath}`, "NOT_FOUND")
     }
-    const raw = readFileSync(filePath, "utf-8")
     let parsed: unknown
     try {
-      parsed = JSON.parse(raw)
+      parsed = readArtifactJson(filePath).data
     } catch (e: any) {
       throw new WorkflowEngineError(`Run file corrupted (invalid JSON): ${filePath}: ${e.message}`, "CORRUPTED")
     }
@@ -1005,14 +1038,80 @@ export class WorkflowEngine {
                 severity: "warning",
               })
             }
-            // sub-stage 产物完整性（warning，不阻断）：master 主从架构下 6 sub-stage 靠 master 自觉派 slave，
-            // 此处仅观测是否漏跑——lint.json（static-check）/ fsd 设计稿（skeleton）/ summary 总结稿（summary）缺失记 warning 放行。
-            // 不设 blocking：避免 advance 验收时因 master 偷懒跳过而反复重派卡死（lint 下游有 review 静态扫描兜底，文档非正确性关键）。
-            if (!existsSync(join(artifactsDir, "translations", pkg, `${ref}.lint.json`))) {
+            // lint 是本 unit 提交前的最终正确性门禁。缺失、损坏或命中任一硬条件都不得提交，
+            // 且 hard=true，不能在三次拒绝后降级放行。FSD 设计稿与 summary 总结稿仍只记 warning。
+            const lintPath = join(artifactsDir, "translations", pkg, `${ref}.lint.json`)
+            if (!existsSync(lintPath)) {
               findings.push({
-                message: `${pkg}.${ref}: translations/${pkg}/${ref}.lint.json 缺失——static-check sub-stage 可能未跑（master 漏派 slave）。lint 下游由 review 静态扫描兜底，已放行`,
-                severity: "warning",
+                message: `${pkg}.${ref}: lint.json 缺失，static-check 未形成可审计结论，禁止提交当前分片`,
+                severity: "blocking",
+                hard: true,
               })
+            } else {
+              try {
+                const rawLint = readArtifactJson(lintPath).data
+                const parsedLint = TranslateLintSchema.safeParse(rawLint)
+                if (!parsedLint.success) {
+                  findings.push({
+                    message: `${pkg}.${ref}: lint.json 结构无效，无法执行 fail-closed 门禁：\n${formatZodIssues(parsedLint.error)}`,
+                    severity: "blocking",
+                    hard: true,
+                  })
+                } else {
+                  const lint = parsedLint.data
+                  if (!lint.selfReviewPassed) {
+                    findings.push({
+                      message: `${pkg}.${ref}: selfReviewPassed=false；须按 semanticFindings 根因回到责任子阶段修复`,
+                      severity: "blocking",
+                      hard: true,
+                    })
+                  }
+                  if (lint.todoRemaining > 0) {
+                    findings.push({
+                      message: `${pkg}.${ref}: todoRemaining=${lint.todoRemaining}；仍有未完成翻译，不得封口`,
+                      severity: "blocking",
+                      hard: true,
+                    })
+                  }
+                  if (lint.javaFileMissing.length > 0) {
+                    findings.push({
+                      message: `${pkg}.${ref}: javaFileMissing 非空：${lint.javaFileMissing.join(", ")}`,
+                      severity: "blocking",
+                      hard: true,
+                    })
+                  }
+                  for (const semantic of lint.semanticFindings.filter(f => f.severity === "major" || f.severity === "blocking")) {
+                    const owner = semantic.ownerStage ? `；责任阶段=${semantic.ownerStage}` : ""
+                    const cause = semantic.rootCause ? `；根因=${semantic.rootCause}` : ""
+                    findings.push({
+                      message: `${pkg}.${ref}: ${semantic.severity} 语义问题 [${semantic.signal}] ${semantic.file}${semantic.line ? `:${semantic.line}` : ""}：${semantic.issue}${owner}${cause}`,
+                      severity: "blocking",
+                      hard: true,
+                    })
+                  }
+                  const allViolations = [...lint.violations, ...(lint.deletionCheck?.violations ?? [])]
+                  for (const violation of allViolations) {
+                    // 旧 lint 没有严重度字段；为避免旧格式绕过门禁，按阻断处理。
+                    const blocks = violation.blocking === true
+                      || violation.severity === "blocking"
+                      || violation.severity === undefined
+                    if (!blocks) continue
+                    const owner = violation.ownerStage ? `；责任阶段=${violation.ownerStage}` : ""
+                    const cause = violation.rootCause ? `；根因=${violation.rootCause}` : ""
+                    findings.push({
+                      message: `${pkg}.${ref}: 阻断型 violation [${violation.rule}] ${violation.file}${violation.line ? `:${violation.line}` : ""}：${violation.message}${owner}${cause}`,
+                      severity: "blocking",
+                      hard: true,
+                    })
+                  }
+                }
+              } catch (e) {
+                findings.push({
+                  message: `${pkg}.${ref}: lint.json 无法解析：${e instanceof Error ? e.message : String(e)}；禁止 fail-open 提交`,
+                  severity: "blocking",
+                  hard: true,
+                })
+              }
             }
             if (!existsSync(join(artifactsDir, "fsd", pkg, `${ref}.md`))) {
               findings.push({
@@ -1129,7 +1228,11 @@ export class WorkflowEngine {
     }
 
     } catch (e) {
-      findings.push({
+      findings.push(completedPhase === "translate" ? {
+        message: `translate 质量门禁内部异常（fail-closed，禁止提交）: ${e instanceof Error ? e.message : String(e)}`,
+        severity: "blocking" as const,
+        hard: true,
+      } : {
         message: `质量门禁内部异常（已降级为 warning，不阻塞流程）: ${e instanceof Error ? e.message : String(e)}`,
         severity: "warning" as const,
       })
@@ -1702,9 +1805,9 @@ export class WorkflowEngine {
       const collected: Array<{ packageName: string; file: string; line?: number | null; issue: string }> = []
       const fixedUpper = new Set(fixedPackages.map(p => p.toUpperCase()))
       try {
-        const raw = JSON.parse(readFileSync(join(artifactsDir, "review.json"), "utf-8")) as {
+        const raw = readArtifactJson<{
           packages?: Array<{ packageName?: unknown; mustFix?: Array<{ file?: unknown; line?: unknown; issue?: unknown }> }>
-        }
+        }>(join(artifactsDir, "review.json")).data
         for (const pkg of raw.packages ?? []) {
           if (!pkg || typeof pkg.packageName !== "string") continue
           if (!fixedUpper.has(pkg.packageName.toUpperCase())) continue
@@ -1769,7 +1872,7 @@ export class WorkflowEngine {
     for (const filePath of candidates) {
       if (existsSync(filePath)) {
         try {
-          const result = JSON.parse(readFileSync(filePath, "utf-8"))
+          const result = readArtifactJson(filePath).data
           this.artifactCache.set(cacheKey, result)
           return result
         } catch {

@@ -18,6 +18,7 @@ import {
   PackageArtifactSchema,
   SubprogramArtifactSchema,
   TableArtifactSchema,
+  TranslateLintSchema,
   getSchemaForPhase,
   getPerPackageSchema,
   getSummarySchema,
@@ -34,6 +35,46 @@ import {
 // ═══════════════════════════════════════════════════════════════
 
 describe("Schema 有效数据通过校验", () => {
+  it("TranslateLintSchema 接受带根因路由的干净 lint", () => {
+    const data = {
+      todoRemaining: 0,
+      violations: [],
+      javaFileMissing: [],
+      semanticFindings: [],
+      selfReviewPassed: true,
+      deletionCheck: { modifiedFiles: 0, deletedFiles: 0, violations: [] },
+    }
+    expect(TranslateLintSchema.safeParse(data).success).toBe(true)
+  })
+
+  it("TranslateLintSchema 接受 blocking violation 与 major 语义根因", () => {
+    const data = {
+      todoRemaining: 1,
+      violations: [{
+        file: "src/X.java",
+        line: 10,
+        rule: "todo-remaining",
+        message: "存在未完成翻译",
+        severity: "blocking",
+        blocking: true,
+        ownerStage: "translate-core",
+        rootCause: "方法体仍为占位实现",
+      }],
+      javaFileMissing: ["src/Y.java"],
+      semanticFindings: [{
+        signal: "exception-mapping",
+        file: "src/X.java",
+        line: 20,
+        severity: "major",
+        issue: "异常传播方向与源过程不一致",
+        ownerStage: "translate-core",
+        rootCause: "异常模板覆盖源控制流",
+      }],
+      selfReviewPassed: false,
+    }
+    expect(TranslateLintSchema.safeParse(data).success).toBe(true)
+  })
+
   it("InventoryIndexSchema 通过", () => {
     expect(InventoryIndexSchema.safeParse(makeInventoryIndex()).success).toBe(true)
   })
@@ -258,6 +299,26 @@ describe("工厂默认产出符合 Schema", () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe("Schema 无效数据被拒绝", () => {
+  it("TranslateLintSchema 拒绝未知严重度和未知责任阶段", () => {
+    const invalidSeverity = {
+      todoRemaining: 0,
+      violations: [],
+      javaFileMissing: [],
+      semanticFindings: [{ signal: "logic", file: "X.java", severity: "critical", issue: "错误" }],
+      selfReviewPassed: false,
+    }
+    expect(TranslateLintSchema.safeParse(invalidSeverity).success).toBe(false)
+
+    const invalidOwner = {
+      todoRemaining: 0,
+      violations: [{ file: "X.java", rule: "x", message: "错误", ownerStage: "static-check" }],
+      javaFileMissing: [],
+      semanticFindings: [],
+      selfReviewPassed: false,
+    }
+    expect(TranslateLintSchema.safeParse(invalidOwner).success).toBe(false)
+  })
+
   it("InventoryIndexSchema 缺少必填字段失败", () => {
     const result = InventoryIndexSchema.safeParse({ sourcePath: "/test" })
     expect(result.success).toBe(false)
@@ -367,10 +428,33 @@ describe("Schema 无效数据被拒绝", () => {
         // 纯常量包：无子程序，只映射常量持有角色
         { plsqlSchema: "", plsqlPackage: "PKG_CONST", components: [{ role: "constant" }] },
       ],
+      generated: {
+        ...makeScaffold().generated,
+        constants: [{ file: "src/main/java/constant/PkgConstConstant.java", plsqlSchema: "", plsqlPackage: "PKG_CONST" }],
+        stateDtos: [],
+        extraFiles: [{ file: "src/main/resources/application.yml", purpose: "应用配置" }],
+      },
     })
     const result = ScaffoldSchema.safeParse(data)
     expect(result.success).toBe(true)
     expect(result.success && result.data.packageMappings[0].components[0].role).toBe("constant")
+    expect(result.success && result.data.generated.extraFiles?.[0].purpose).toBe("应用配置")
+  })
+
+  it("ScaffoldSchema 拒绝重复 plsqlPackage 和无映射包级产物", () => {
+    const base = makeScaffold()
+    const duplicate = makeScaffold({
+      packageMappings: [base.packageMappings[0], { ...base.packageMappings[0], plsqlPackage: "core_pkg" }],
+    })
+    expect(ScaffoldSchema.safeParse(duplicate).success).toBe(false)
+
+    const orphan = makeScaffold({
+      generated: {
+        ...base.generated,
+        stateDtos: [{ ...base.generated.stateDtos[0], plsqlPackage: "ORPHAN_PKG" }],
+      },
+    })
+    expect(ScaffoldSchema.safeParse(orphan).success).toBe(false)
   })
 })
 

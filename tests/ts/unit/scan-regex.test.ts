@@ -2,13 +2,13 @@
  * scan-regex.test.ts — scanFileSetRegex 集成测试（regex 主路径）
  *
  * 验证 regex 主路径对一个 file-set 的抽取：包级子程序（过滤嵌套局部过程）、bodyLocation 行号、
- * directCalls（regex 不收窄）、packageRefs、spec/body 合并。parameters/returnType/包级声明留空
- * （LLM 兜底，引擎按 bodyLocation.lineRange 预切 source.sql）。
+ * directCalls（regex + AST 合并）、packageRefs、spec/body 合并，以及 AST 确定性增强后的
+ * parameters/returnType/包级声明。
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { scanFileSetRegex, extractPackageRefsByRegex } from "@workflow/plsql-file-scanner"
 
@@ -16,6 +16,7 @@ import { scanFileSetRegex, extractPackageRefsByRegex } from "@workflow/plsql-fil
 const SPEC_SQL = `CREATE OR REPLACE PACKAGE MFG_ERP.P_FOO IS
   PROCEDURE do_work(p IN NUMBER);
   FUNCTION get_val RETURN NUMBER;
+  FUNCTION current_val RETURN NUMBER;
   c_max CONSTANT NUMBER := 100;
 END P_FOO;
 `
@@ -35,12 +36,16 @@ const BODY_SQL = `CREATE OR REPLACE PACKAGE BODY MFG_ERP.P_FOO IS
   END do_work;
   FUNCTION get_val RETURN NUMBER IS
   BEGIN
-    RETURN helper(0);
+    RETURN current_val;
   END get_val;
   PROCEDURE helper(x NUMBER) IS
   BEGIN
     NULL;
   END helper;
+  FUNCTION current_val RETURN NUMBER IS
+  BEGIN
+    RETURN 1;
+  END current_val;
 END P_FOO;
 `
 
@@ -61,7 +66,7 @@ describe("scanFileSetRegex regex 主路径", () => {
     const r = scanFileSetRegex([specFile, bodyFile], dir)
     const subs = r.subprograms.filter(s => s.belongToPackage === "MFG_ERP.P_FOO")
     const names = subs.map(s => s.name).sort()
-    expect(names).toEqual(["DO_WORK", "GET_VAL", "HELPER"])  // 不含 INNER（嵌套局部过程）
+    expect(names).toEqual(["CURRENT_VAL", "DO_WORK", "GET_VAL", "HELPER"])  // 不含 INNER（嵌套局部过程）
   })
 
   it("spec/body 合并：do_work 有 headerLocation(spec) + bodyLocation(body)", () => {
@@ -125,17 +130,49 @@ END P_FOO;
     expect(names.some(k => k.includes("BASE_PKG") && k.includes("C_VAL"))).toBe(true)
   })
 
-  it("parameters / returnType 留空（LLM 兜底）", () => {
+  it("AST 结构增强补齐 parameters / returnType", () => {
     const r = scanFileSetRegex([specFile, bodyFile], dir)
     const dw = r.subprograms.find(s => s.name === "DO_WORK")!
-    expect(dw.parameters).toEqual([])
+    expect(dw.parameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "P", mode: "IN" }),
+    ]))
     const gv = r.subprograms.find(s => s.name === "GET_VAL")!
-    expect(gv.returnType).toBeNull()
+    expect(gv.returnType).toContain("NUMBER")
   })
 
-  it("包级声明不抽（constants 空，LLM 兜底）", () => {
+  it("AST 结构增强补齐包级声明", () => {
     const r = scanFileSetRegex([specFile, bodyFile], dir)
     const pkg = r.packages.find(p => p.packageName === "MFG_ERP.P_FOO")!
-    expect(pkg.constants).toEqual([])  // c_max 不抽（MVP 留空 LLM 兜底）
+    expect(pkg.constants).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "C_MAX" }),
+    ]))
+  })
+
+  it("AST 结构增强捕获表达式中的无括号零参函数调用", () => {
+    const r = scanFileSetRegex([specFile, bodyFile], dir)
+    const gv = r.subprograms.find(s => s.name === "GET_VAL")!
+    expect(gv.directCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ package: "MFG_ERP.P_FOO", name: "CURRENT_VAL" }),
+    ]))
+  })
+})
+
+describe("MFG_ERP.F_UTIL 根因回归", () => {
+  it("GEN_DOC_NO 签名、包状态和无括号 CURR_BIZ_DATE 依赖均为确定性产物", () => {
+    const root = resolve(import.meta.dirname, "../../..")
+    const spec = join(root, "resources", "MFG_ERP", "PACKAGE", "F_UTIL.sql")
+    const body = join(root, "resources", "MFG_ERP", "PACKAGE_BODY", "F_UTIL.sql")
+    const result = scanFileSetRegex([spec, body], join(root, "resources", "MFG_ERP"))
+    const genDocNo = result.subprograms.find(sub => sub.belongToPackage === "MFG_ERP.F_UTIL" && sub.name === "GEN_DOC_NO")!
+    expect(genDocNo.parameters).toHaveLength(3)
+    expect(genDocNo.returnType).toContain("VARCHAR2")
+    expect(genDocNo.directCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ package: "MFG_ERP.F_UTIL", name: "CURR_BIZ_DATE", kind: "function" }),
+    ]))
+
+    const pkg = result.packages.find(value => value.packageName === "MFG_ERP.F_UTIL")!
+    expect(pkg.variables.map(value => value.name)).toEqual(expect.arrayContaining([
+      "G_CURR_BIZ_DATE", "G_LAST_BIZ_DATE", "G_NEXT_BIZ_DATE", "G_CURR_OPERATOR", "G_SESSION_ID",
+    ]))
   })
 })

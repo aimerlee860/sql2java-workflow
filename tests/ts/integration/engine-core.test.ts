@@ -104,6 +104,32 @@ describe("WorkflowEngine.advance() — 主线前进", () => {
     expect(result.rejected).toBe(true)
     expect(result.rejectionReason).toContain("aborted")
   })
+
+  it("beforeTransition 在阶段状态变更前执行", () => {
+    ctx.engine.start("sql2java", "run-before-transition")
+    const seen: string[] = []
+    const result = ctx.engine.advance("run-before-transition", {
+      beforeTransition: run => {
+        seen.push(run.currentPhase ?? "")
+        run.metadata.committed = true
+      },
+    })
+    expect(seen).toEqual(["inventory"])
+    expect(result.rejected).toBe(false)
+    expect(result.run.currentPhase).toBe("scaffold")
+    expect(result.run.metadata.committed).toBe(true)
+  })
+
+  it("beforeTransition 失败时拒绝推进并保持当前阶段", () => {
+    ctx.engine.start("sql2java", "run-before-transition-failed")
+    const result = ctx.engine.advance("run-before-transition-failed", {
+      beforeTransition: () => { throw new Error("提交失败") },
+    })
+    expect(result.rejected).toBe(true)
+    expect(result.rejectionReason).toContain("提交失败")
+    expect(result.run.currentPhase).toBe("inventory")
+    expect(result.run.phaseHistory.at(-1)?.status).toBe("in_progress")
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest"
-import { mkdtempSync, mkdirSync, writeFileSync, cpSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, cpSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { WorkflowEngine } from "@workflow/engine-core"
@@ -52,6 +52,23 @@ function advanceToTranslate(rid: string) {
   return run
 }
 
+function writeLint(
+  artifactsDir: string,
+  pkg: string,
+  ref: string,
+  overrides: Record<string, unknown> = {},
+) {
+  writeFileSync(join(artifactsDir, "translations", pkg, `${ref}.lint.json`), JSON.stringify({
+    todoRemaining: 0,
+    violations: [],
+    javaFileMissing: [],
+    semanticFindings: [],
+    selfReviewPassed: true,
+    deletionCheck: { modifiedFiles: 0, deletedFiles: 0, violations: [] },
+    ...overrides,
+  }), "utf-8")
+}
+
 describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
   it("advance 直走 G1-unit：partial 拒绝，completed 通过并阶段推进", () => {
     const rid = "test-substage-advance"
@@ -89,6 +106,7 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
       completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
       subprogramMethods: [{ plsqlName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
     }), "utf-8")
+    writeLint(artifactsDir, "MFG_ERP.F_ITEM", "get_item")
     let adv2 = engine.advance(rid, { result: "passed" })
     if (adv2.rejected && (adv2 as any).warningPending) {
       adv2 = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
@@ -122,6 +140,7 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
       completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
       subprogramMethods: [{ plsqlName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
     }), "utf-8")
+    writeLint(artifactsDir, "MFG_ERP.F_ITEM", "get_item")
     let adv = engine.advance(rid, { result: "passed" })
     if (adv.rejected && (adv as any).warningPending) {
       adv = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
@@ -135,7 +154,7 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
     expect(nextEntry.incrementalContext?.currentSubStage).toBeUndefined()
   })
 
-  it("lint.json / fsd 设计稿 / summary 总结稿 缺失只记 warning 不阻断（master 漏派 slave 观测兜底）", () => {
+  it("lint.json 缺失硬阻断，fsd 设计稿与 summary 总结稿缺失仍只记 warning", () => {
     const rid = "test-substage-lintfsd-warning"
     const artifactsDir = join(dir, rid)
     mkdirSync(artifactsDir, { recursive: true })
@@ -156,17 +175,65 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
       completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
       subprogramMethods: [{ plsqlName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
     }), "utf-8")
+    rmSync(join(artifactsDir, "translations", "MFG_ERP.F_ITEM", "get_item.lint.json"), { force: true })
     let adv = engine.advance(rid, { result: "passed" })
     if (adv.rejected && (adv as any).warningPending) {
       adv = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
     }
-    // 缺 lint/fsd/summary 只 warning → 不阻断，advance 通过（1 shard → transition dedup）
-    expect(adv.rejected, `缺 lint/fsd/summary 应 warning 放行不阻断: ${adv.rejectionReason}`).toBe(false)
-    expect(adv.run.currentPhase).toBe("dedup")
-    // warning 可见
+    expect(adv.rejected).toBe(true)
+    expect(adv.rejectionReason).toContain("lint.json 缺失")
+    expect(adv.run.currentPhase).toBe("translate")
+    // FSD 设计稿与 summary 总结稿仍是非正确性文档，warning 可见。
     const warns = (adv as any).crossSchemaWarnings as string[] | undefined
-    expect(warns?.some(w => w.includes("lint.json 缺失"))).toBe(true)
     expect(warns?.some(w => w.includes("fsd") && w.includes("设计稿"))).toBe(true)
     expect(warns?.some(w => w.includes("summary") && w.includes("总结稿"))).toBe(true)
+  })
+
+  it("lint 五类硬条件任一出现都产生不可降级 blocking finding", () => {
+    const rid = "test-substage-lint-hard-gates"
+    const artifactsDir = join(dir, rid)
+    mkdirSync(artifactsDir, { recursive: true })
+    cpSync(join(dir, runId), artifactsDir, { recursive: true })
+    const run = advanceToTranslate(rid)
+    run.metadata.shardPlan = {
+      phase: "translate", unitMode: true,
+      shards: [["MFG_ERP.F_ITEM.get_item"]], completedShards: [],
+    }
+    const entry = engine.findCurrentEntry(run)!
+    entry.incrementalContext = { targetUnits: ["MFG_ERP.F_ITEM.get_item"], shardIndex: 0, totalShards: 1 }
+    engine.persist(run)
+
+    mkdirSync(join(artifactsDir, "translations", "MFG_ERP.F_ITEM"), { recursive: true })
+    writeFileSync(join(artifactsDir, "translations", "MFG_ERP.F_ITEM", "get_item.json"), JSON.stringify({
+      unitRefName: "get_item", packageName: "MFG_ERP.F_ITEM", status: "completed",
+      completedSubprograms: ["get_item"], files: [], decisions: [], todos: [],
+      subprogramMethods: [{ plsqlName: "get_item", javaClass: "com.x.ItemAccess", javaMethod: "getItem", javaFile: "ItemAccess.java" }],
+    }), "utf-8")
+
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["自审失败", { selfReviewPassed: false }, "selfReviewPassed=false"],
+      ["TODO 残留", { todoRemaining: 1 }, "todoRemaining=1"],
+      ["Java 文件缺失", { javaFileMissing: ["Missing.java"] }, "javaFileMissing 非空"],
+      ["重大语义问题", { semanticFindings: [{ signal: "逻辑等价", file: "A.java", line: 1, severity: "major", issue: "分支语义相反" }] }, "major 语义问题"],
+      ["阻断型 violation", { violations: [{ file: "A.java", line: 1, rule: "exception-spec", message: "异常传播语义相反", severity: "blocking" }] }, "阻断型 violation"],
+    ]
+
+    for (const [name, overrides, expected] of cases) {
+      writeLint(artifactsDir, "MFG_ERP.F_ITEM", "get_item", overrides)
+      const findings = engine.validateQualityGates(run, "translate")
+      const match = findings.find(f => f.message.includes(expected))
+      expect(match, `${name} 应阻断`).toBeTruthy()
+      expect(match?.severity).toBe("blocking")
+      expect(match?.hard).toBe(true)
+    }
+
+    // 即使同一分片已达到旧的三次拒绝上限，lint hard gate 仍不得降级放行。
+    run.metadata.rejectionCounts = { "translate:0": 3 }
+    engine.persist(run)
+    writeLint(artifactsDir, "MFG_ERP.F_ITEM", "get_item", { selfReviewPassed: false })
+    const advance = engine.advance(rid, { result: "passed" })
+    expect(advance.rejected).toBe(true)
+    expect(advance.run.currentPhase).toBe("translate")
+    expect(advance.rejectionReason).toContain("selfReviewPassed=false")
   })
 })

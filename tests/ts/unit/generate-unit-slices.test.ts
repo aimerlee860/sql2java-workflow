@@ -12,7 +12,7 @@ import { describe, it, expect, beforeAll } from "vitest"
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { generateUnitSlices, unitSliceRelPaths } from "@plugin-impl/workflow-engine"
+import { detectUnitSourceFacts, generateUnitSlices, unitSliceRelPaths } from "@plugin-impl/workflow-engine"
 
 let dir: string
 
@@ -143,6 +143,52 @@ describe.skip("generateUnitSlices — analyze", () => {
 })
 
 describe("generateUnitSlices — translate", () => {
+  it("meta.json 固化签名、直接调用和源码语义事实，供 skeleton/core/test 共用", () => {
+    const art = join(dir, "t-facts")
+    mkdirSync(art, { recursive: true })
+    const src = join(art, "BODY.sql")
+    writeFileSync(src, [
+      "FUNCTION gen_doc_no RETURN VARCHAR2 IS",
+      "BEGIN",
+      "  RETURN curr_biz_date;",
+      "END gen_doc_no;",
+    ].join("\n"), "utf-8")
+    writePkg(art, "PKG_A", src, [{
+      name: "gen_doc_no",
+      type: "FUNCTION",
+      lineRange: [1, 4],
+      directCalls: [{ package: "PKG_A", name: "curr_biz_date", line: 3, kind: "function" }],
+    }])
+
+    generateUnitSlices(art, ["PKG_A.gen_doc_no"], "translate", "")
+    const meta = JSON.parse(readFileSync(join(art, "shard-inputs", "PKG_A", "gen_doc_no", "meta.json"), "utf-8"))
+    expect(meta.signature).toEqual({ type: "FUNCTION", parameters: [], returnType: "VARCHAR2" })
+    expect(meta.directCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ package: "PKG_A", name: "curr_biz_date" }),
+    ]))
+    expect(meta.sourceFacts.hasSql).toBe(false)
+  })
+
+  it("detectUnitSourceFacts 识别 SQL、事务、异常和隐式错误上下文", () => {
+    const facts = detectUnitSourceFacts(`
+      PRAGMA AUTONOMOUS_TRANSACTION;
+      BEGIN
+        INSERT INTO t_error_log(id) VALUES (1);
+        COMMIT;
+      EXCEPTION WHEN OTHERS THEN
+        ROLLBACK;
+        DBMS_OUTPUT.PUT_LINE(SQLERRM);
+      END;
+    `)
+    expect(facts.hasSql).toBe(true)
+    expect(facts.sqlOperations).toContain("insert")
+    expect(facts.hasAutonomousTransaction).toBe(true)
+    expect(facts.hasCommit).toBe(true)
+    expect(facts.hasRollback).toBe(true)
+    expect(facts.hasExceptionHandler).toBe(true)
+    expect(facts.usesImplicitErrorContext).toBe(true)
+  })
+
   it.skip("analysis-slice.json 从 analysis-packages 聚合按 name 过滤（analyze 砍后不再产 analysis-slice）", () => {
     const art = join(dir, "t1")
     mkdirSync(art, { recursive: true })

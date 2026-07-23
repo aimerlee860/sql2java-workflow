@@ -11,7 +11,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { resolveGeneratedRoot, claimGeneratedRoot, generatedRootFor } from "@plugin-impl/workflow-engine"
+import {
+  activeGeneratedRootFor,
+  claimGeneratedRoot,
+  classifyArtifactValidationFailure,
+  generatedRootFor,
+  resolveGeneratedRoot,
+} from "@plugin-impl/workflow-engine"
 
 const MARKER = ".sql2java-run-id"
 let repo: string
@@ -69,5 +75,25 @@ describe("resolveGeneratedRoot / claimGeneratedRoot", () => {
     // metadata.generatedRoot 不再生效（去 fallback 后路径仅由 artifactId 决定）
     const runNoMeta = { runId: "run-Y", metadata: {} }
     expect(generatedRootFor(runNoMeta, "mfg-erp", repo)).toBe(join(repo, "generated", "mfg-erp"))
+  })
+
+  it("scaffold 使用事务工作区，后续阶段使用正式目录", () => {
+    const stageRoot = join(repo, "artifacts", "run-X", "workspace", "scaffold", "attempt-1", "project")
+    const run = {
+      runId: "run-X",
+      currentPhase: "scaffold",
+      metadata: { scaffoldWorkspace: { attempt: 1, root: stageRoot } } as Record<string, unknown>,
+    }
+    expect(activeGeneratedRootFor(run, "mfg-erp", repo, join(repo, "artifacts"))).toBe(stageRoot)
+    run.currentPhase = "inventory"
+    expect(activeGeneratedRootFor(run, "mfg-erp", repo, join(repo, "artifacts"))).toBe(join(repo, "generated", "mfg-erp"))
+  })
+})
+
+describe("artifact 校验失败分型", () => {
+  it("区分 JSON、Schema 与内容/布局错误", () => {
+    expect(classifyArtifactValidationFailure("Failed to read/parse scaffold.json: Unexpected token")).toBe("json-syntax")
+    expect(classifyArtifactValidationFailure("Zod validation failed for scaffold.json")).toBe("schema")
+    expect(classifyArtifactValidationFailure("scaffold project layout validation failed")).toBe("content")
   })
 })

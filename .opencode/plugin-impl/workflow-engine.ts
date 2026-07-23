@@ -11,8 +11,24 @@
  *   - 依赖自动安装（node_modules 缺失时自动 npm/bun install）
  */
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync, realpathSync, rmSync } from "node:fs"
-import { join, dirname, resolve, sep, isAbsolute, basename } from "node:path"
+import { join, dirname, resolve, relative, sep, isAbsolute, basename } from "node:path"
 import { safeWriteFile, extractLineRange } from "../workflow/cross-platform"
+import { parseArtifactJson, readArtifactJson, serializeArtifactJson } from "../workflow/artifact-json"
+import {
+  normalizeScaffoldArtifact,
+  loadPureConstantPackages,
+  validateScaffoldRelations,
+  validateScaffoldProjectLayout,
+} from "../workflow/scaffold-artifact"
+import {
+  activeProjectRootFor,
+  commitScaffoldWorkspace,
+  ensureScaffoldWorkspace,
+  getScaffoldWorkspace,
+  recordScaffoldFailure,
+  rotateScaffoldWorkspace,
+  type ScaffoldFailureKind,
+} from "../workflow/scaffold-workspace"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
 import { nowLocal } from "../workflow/timestamp"
 import { enhanceRejection } from "../workflow/rejection-guidance"
@@ -167,7 +183,7 @@ function loadRunContext(runId: string): RunContext | null {
   try {
     const filePath = runContextPath(runId)
     if (!existsSync(filePath)) return null
-    return JSON.parse(readFileSync(filePath, "utf-8")) as RunContext
+    return readArtifactJson<RunContext>(filePath).data
   } catch {
     return null
   }
@@ -775,14 +791,13 @@ const GENERATED_RUN_ID_MARKER = ".sql2java-run-id"
  * 不再有 fallback（`<artifactId>-<runId>`）设计：带 runId 后缀的路径 agent 无法可靠遵循（总是按
  * `generated/{artifactId}/` 自然写），且旧 resolveGeneratedRoot 依赖 existsSync(base)+marker，
  * agent 一写文件 base 就从"不存在"变"存在无 marker"，使期望值 base↔fallback 翻转，advance 反复拒绝。
- * 跨 run 撞目录的旧产物残留问题改由 {@link claimGeneratedRoot} 在 scaffold 时清空解决（比换目录更干净）。
+ * 跨 run 撞目录由 scaffold 事务工作区在提交时备份旧正式目录后再原子提升。
  * 路径确定性 = 仅 artifactId，跨 session 可复现，不依赖 session 内存或 metadata 持久化。 */
 export function resolveGeneratedRoot(runId: string, artifactId: string, repoRoot: string = resolveProjectRoot()): string {
   return join(repoRoot, "generated", artifactId)
 }
 
-/** scaffold 首次派发前锁定目标目录：确保 base 存在并写入 runId 标记，处理跨 run 撞目录。
- *  仅 scaffold 阶段调用；其余阶段用 resolveGeneratedRoot 只读解析（base 已由 scaffold claim 就绪）。
+/** 旧版直接写正式目录的兼容入口；新 scaffold 派发使用 ensureScaffoldWorkspace，不再调用本函数。
  *
  *  - base 不存在 → 新建 + 写 marker。
  *  - base 存在且 marker === runId → **同 run 续跑，保留半成品**（agent 上次失败留下的产物）。
@@ -816,6 +831,17 @@ export function generatedRootFor(run: { runId: string; metadata: Record<string, 
   return resolveGeneratedRoot(run.runId, artifactId, repoRoot)
 }
 
+/** scaffold 写临时工作区；scaffold 完成后及其他阶段读取正式 generated 目录。 */
+export function activeGeneratedRootFor(
+  run: { runId: string; currentPhase?: string | null; metadata: Record<string, unknown> },
+  artifactId: string,
+  repoRoot: string = resolveProjectRoot(),
+  artifactsRoot: string = ARTIFACT_DIR,
+): string {
+  const finalRoot = generatedRootFor(run, artifactId, repoRoot)
+  return activeProjectRootFor(run, finalRoot, join(artifactsRoot, run.runId))
+}
+
 /** 构建 Runtime Context 文本块 */
 function buildRuntimeContext(run: WorkflowRun): string {
   const lines: string[] = []
@@ -826,13 +852,14 @@ function buildRuntimeContext(run: WorkflowRun): string {
   if (mainEntry) lines.push(`mainEntry: ${mainEntry}`)
   lines.push(`artifactsDir: ${ARTIFACT_DIR}/${run.runId}`)
 
-  // projectRoot: 永远 = generated/<artifactId>/（去 fallback 设计，路径仅由 artifactId 决定）。
-  // generatedRootFor 即 resolveGeneratedRoot（base），与 dispatch projectRootLine、claimGeneratedRoot、
-  // saveArtifact P3b、validation 全部同源 base，无翻转。
+  // scaffold 的 projectRoot 指向事务工作区，finalProjectRoot 指向 generated/<artifactId>/；
+  // 其他阶段的 projectRoot 直接指向正式目录。
   // Stage A：artifactId 由 getArtifactIdFromRun 从 metadata/run-context 取（start 写入），不再读 plan。
   const artifactId = getArtifactIdFromRun(run)
   if (artifactId) {
-    lines.push(`projectRoot: ${generatedRootFor(run, artifactId)}`)
+    const finalRoot = generatedRootFor(run, artifactId)
+    lines.push(`projectRoot: ${activeGeneratedRootFor(run, artifactId)}`)
+    if (run.currentPhase === "scaffold") lines.push(`finalProjectRoot: ${finalRoot}`)
   }
 
   // 查找当前 entry（用于 incrementalContext 和 triggerPhase）
@@ -1346,7 +1373,7 @@ export function buildShardedWorkerOrder(
   //    必须在 depSignaturesBlock / unitFilesBlock 之前声明——下游动态块（依赖签名、unit 文件清单）需读 projectRoot。
   const artifactId = getArtifactIdFromRun(run)
   // scaffold 在 else 分支（非分片）派发时 claim；此处 analyze/translate 只读解析 base。
-  const projectRoot = artifactId ? resolveGeneratedRoot(run.runId, artifactId) : null
+  const projectRoot = artifactId ? activeGeneratedRootFor(run, artifactId) : null
   const projectRootLine = projectRoot ? `- projectRoot: \`${projectRoot}\`  ← Java/项目文件写入此目录` : ""
   const mainEntry = (run.metadata as Record<string, unknown>).mainEntry
   const mainEntryLine = mainEntry ? `- mainEntry: \`${mainEntry}\`` : ""
@@ -1633,7 +1660,8 @@ function buildSharedInstructions(run: WorkflowRun, subStage?: string): string {
 | \`incrementalContext\` | 增量模式上下文（可选） | 分片/增量处理范围：analyze/translate 级用 targetUnits（PROCEDURE 单元），包级用 targetPackages；分片模式含 shardIndex/totalShards |
 | \`mainEntry\` | 翻译入口（可选）。过程级 \`subdir/PKG.refName\` 时触发闭包 scope 模式（仅译入口及其调用闭包，见 \`scopeLine\`）；缺省/纯包名时全量翻译 | 标识对外入口，plan/scaffold 消费 |
 | \`projectStructure\` | 自定义目录结构路径列表（可选，由 --spec 提取） | scaffold 阶段使用自定义目录布局替代默认模板 |
-| \`projectRoot\` | Java 项目输出根目录（绝对路径，scaffold 及之后阶段，可选） | scaffold 写入 Java 文件到此目录，后续阶段从此目录读取 |
+| \`projectRoot\` | 当前项目根目录（绝对路径） | scaffold 阶段写入事务工作区；后续阶段读取正式目录 |
+| \`finalProjectRoot\` | 最终项目目录（仅 scaffold） | 仅填写 scaffold.json.projectRoot，禁止直接写入 |
 
 ### 路径使用规则（重要）
 
@@ -1642,7 +1670,7 @@ function buildSharedInstructions(run: WorkflowRun, subStage?: string): string {
 
 ### Artifact 写入规则
 
-- **JSON artifact**（scaffold.json、translation.json 等元数据文件）使用 \`write\` 工具写入 \`\${artifactsDir}/\` 下的指定路径
+- **JSON artifact**（scaffold.json、translation.json 等元数据文件）必须使用 \`saveArtifact\` 写入；禁止普通 \`write\`、shell 重定向、\`Set-Content\` 或 \`Out-File\`
 - **Java 源文件**（.java、.xml、.yml、pom.xml 等）必须写入 Runtime Context 中 \`projectRoot\` 指定的目录（绝对路径），**绝不能**写入 \`\${artifactsDir}/\` 下
 - **禁止写入以下目录**：.git/、.claude/、node_modules/（引擎会拦截并阻止）
 - **sourcePath 目录是只读的**，禁止向其中写入任何文件
@@ -1727,8 +1755,7 @@ function validateInventoryPackages(
     }
     const pkgFile = join(pkgDir, actualFileName)
     try {
-      const raw = readFileSync(pkgFile, "utf-8")
-      const parsed = JSON.parse(raw)
+      const parsed = readArtifactJson<any>(pkgFile).data
       const result = PackageArtifactSchema.safeParse(parsed)
       if (!result.success) {
         const errors = formatZodIssues(result.error)
@@ -1771,8 +1798,7 @@ function validateInventoryPackages(
       }
       const tableFile = join(tableDir, actualFileName)
       try {
-        const raw = readFileSync(tableFile, "utf-8")
-        const parsed = JSON.parse(raw)
+        const parsed = readArtifactJson<any>(tableFile).data
         const result = TableArtifactSchema.safeParse(parsed)
         if (!result.success) {
           const errors = formatZodIssues(result.error)
@@ -1854,7 +1880,7 @@ export function mergeUnitTranslations(artifactsDir: string, pkgName: string): st
   for (const f of unitFiles) {
     let parsed: any
     try {
-      parsed = JSON.parse(readFileSync(join(pkgDir, f), "utf-8"))
+      parsed = readArtifactJson<any>(join(pkgDir, f)).data
     } catch (e: any) {
       return `Failed to parse translations/${pkgName}/${f}: ${e.message}`
     }
@@ -1911,7 +1937,7 @@ function updateProcedureMap(artifactsDir: string, pkgName: string, methods: Arra
   const mapPath = join(artifactsDir, "translations", "procedure-map.json")
   let map: Record<string, { javaClass: string | null; javaMethod: string | null; javaFile: string | null; pkg: string }> = {}
   try {
-    if (existsSync(mapPath)) map = JSON.parse(readFileSync(mapPath, "utf-8"))
+    if (existsSync(mapPath)) map = readArtifactJson<any>(mapPath).data
   } catch {
     map = {}
   }
@@ -1955,7 +1981,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
       return `Worker 尚未完成：status/${phase}.json 缺失。Worker 须在最后一步写 status 文件（含 shardIndex=${currentShardIndex}）后才能 advance；等 Worker 输出 TASK_STATUS 后再 advance。⛔ 串行：translate 有层级依赖，分片必须按序完成。`
     }
     try {
-      const statusJson = JSON.parse(readFileSync(statusPath, "utf-8"))
+      const statusJson = readArtifactJson<any>(statusPath).data
       if (statusJson?.shardIndex !== currentShardIndex) {
         return `Worker 尚未完成：status/${phase}.json 的 shardIndex=${statusJson?.shardIndex} 不匹配当前分片 ${currentShardIndex}（可能是上一分片残留）。等当前分片 Worker 写完 status（shardIndex=${currentShardIndex}）后再 advance。`
       }
@@ -2037,12 +2063,31 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
       return `Artifact not found on disk: ${filePath}. Agent must write ${artifactFileName}.json before advancing.`
     }
     try {
-      const raw = readFileSync(filePath, "utf-8")
-      const parsed = JSON.parse(raw)
+      const readResult = readArtifactJson<any>(filePath)
+      let parsed = readResult.data
+      let normalized = readResult.hadBom
+      if (phase === "scaffold") {
+        const artifactId = getArtifactIdFromRun(run)
+        const expectedRoot = artifactId ? generatedRootFor(run, artifactId) : undefined
+        const normalizedScaffold = normalizeScaffoldArtifact(
+          parsed,
+          expectedRoot,
+          loadPureConstantPackages(artifactsDir),
+        )
+        parsed = normalizedScaffold.data
+        normalized = normalized || normalizedScaffold.changes.length > 0
+      }
+      if (normalized) safeWriteFile(filePath, serializeArtifactJson(parsed))
       const result = topLevelSchema.safeParse(parsed)
       if (!result.success) {
         const errors = formatZodIssues(result.error)
         return `Zod validation failed for ${artifactFileName}.json:\n${errors}`
+      }
+      if (phase === "scaffold") {
+        const relationErrors = validateScaffoldRelations(parsed)
+        if (relationErrors.length > 0) {
+          return `scaffold.json cross-field validation failed:\n${relationErrors.map(e => `  - ${e}`).join("\n")}`
+        }
       }
 
       // analyze 阶段已在函数开头提前返回（不校验 dependency-graph.json，归 inventory）
@@ -2057,17 +2102,18 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
           // 否则磁盘状态在 claim/save/validation 间变化时 expectedRoot 会 base↔fallback 翻转，
           // 与 dispatch 注入给 agent 的值不一致，导致 advance 反复拒绝（先要 runId 后缀、再不要、再要）。
           const expectedRoot = generatedRootFor(run, artifactId)
+          const scaffoldFilesRoot = activeGeneratedRootFor(run, artifactId)
           if (scaffoldData.projectRoot !== expectedRoot) {
-            return `scaffold.json projectRoot 必须是 "${expectedRoot}"，实际为 "${scaffoldData.projectRoot}"。请使用 Runtime Context 中注入的 projectRoot 值。`
+            return `scaffold.json projectRoot 必须是 "${expectedRoot}"，实际为 "${scaffoldData.projectRoot}"。请填写 Runtime Context 中注入的 finalProjectRoot。`
           }
           // D14: 校验 pom.xml 实际存在于 projectRoot 下（而非 artifactsDir/translations/ 下）
-          const pomInProjectRoot = existsSync(join(expectedRoot, "pom.xml"))
+          const pomInProjectRoot = existsSync(join(scaffoldFilesRoot, "pom.xml"))
           const pomInArtifactsDir = existsSync(join(artifactsDir, "translations", artifactId, "pom.xml"))
           if (!pomInProjectRoot && pomInArtifactsDir) {
-            return `scaffold 阶段 pom.xml 写入了错误位置 "${join(artifactsDir, "translations", artifactId)}"。Java 源文件必须写入 projectRoot="${expectedRoot}"，不能写入 artifactsDir/translations/。请将所有 Java 文件从 artifactsDir/translations/${artifactId}/ 移动到 ${expectedRoot}/。`
+            return `scaffold 阶段 pom.xml 写入了错误位置 "${join(artifactsDir, "translations", artifactId)}"。Java 源文件必须写入本次事务工作区 projectRoot="${scaffoldFilesRoot}"，不能写入 artifactsDir/translations/。`
           }
           if (!pomInProjectRoot) {
-            return `scaffold 阶段未在 projectRoot="${expectedRoot}" 下找到 pom.xml。请确保 Java 源文件写入 Runtime Context 中注入的 projectRoot 目录。`
+            return `scaffold 阶段未在事务工作区 projectRoot="${scaffoldFilesRoot}" 下找到 pom.xml。请确保项目文件写入 Runtime Context 中注入的 projectRoot 目录。`
           }
           // 兜底确保 scaffold.json.structure.directories 声明的全部目录实际存在（含空目录）。
           // LLM 只在写文件时隐式建目录，空目录（如无表时的 entity/、无 per-proc 类时的 mapper/service.impl、
@@ -2094,6 +2140,17 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
 
       // inventory 阶段：校验 packages/+subprograms/+tables/+inventory.json；兜底 complexity。
       // dependency-graph.json 已删——调用图按需从 subprograms.directCalls 推导（buildDependencyGraph）。
+      if (phase === "scaffold") {
+        const artifactId = getArtifactIdFromRun(run)
+        if (artifactId) {
+          const layoutRoot = activeGeneratedRootFor(run, artifactId)
+          const layoutErrors = validateScaffoldProjectLayout(parsed, layoutRoot)
+          if (layoutErrors.length > 0) {
+            return `scaffold project layout validation failed:\n${layoutErrors.map(e => `  - ${e}`).join("\n")}`
+          }
+        }
+      }
+
       if (phase === "inventory") {
         const pkgError = validateInventoryPackages(artifactsDir)
         if (pkgError) return pkgError
@@ -2159,7 +2216,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
         const dupFile = join(artifactsDir, "dedup-duplicates.json")
         if (existsSync(dupFile)) {
           try {
-            const dup = JSON.parse(readFileSync(dupFile, "utf-8"))
+            const dup = readArtifactJson<any>(dupFile).data
             const forceGroups = (dup.groups ?? []).filter((g: any) => g.forceExtract === true)
             if (forceGroups.length > 0) {
               const extractedClassNames = new Set(
@@ -2279,8 +2336,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
       const artifactFile = join(translationsDir, actualDirName, `${pkgFileName}.json`)
       if (!existsSync(artifactFile)) continue // 跳过无文件的包（增量模式下未修改的包）
       try {
-        const raw = readFileSync(artifactFile, "utf-8")
-        const parsed = JSON.parse(raw)
+        const parsed = readArtifactJson<any>(artifactFile).data
         const result = perPackageSchema.safeParse(parsed)
         if (!result.success) {
           const errors = formatZodIssues(result.error)
@@ -2300,8 +2356,7 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
         return `Summary artifact not found: ${summaryFile}. Agent must write ${summaryPhase}.json before advancing.`
       }
       try {
-        const raw = readFileSync(summaryFile, "utf-8")
-        const parsed = JSON.parse(raw)
+        const parsed = readArtifactJson<any>(summaryFile).data
         const result = summarySchema.safeParse(parsed)
         if (!result.success) {
           const errors = formatZodIssues(result.error)
@@ -2330,6 +2385,17 @@ export function validateArtifactOnDisk(run: WorkflowRun, checkStatus = true): st
   // 3. 没有对应 schema 的阶段（如 review/verify 但没有 per-package 概念的情况）
   // 不做校验
   return null
+}
+
+/** 将校验错误稳定分型，用于决定复用还是隔离 scaffold 工作区。 */
+export function classifyArtifactValidationFailure(message: string): ScaffoldFailureKind {
+  if (/Zod validation failed|cross-field validation failed|交叉字段校验失败/i.test(message)) {
+    return "schema"
+  }
+  if (/Failed to read\/parse|不是合法的 JSON|Unexpected token|Unrecognized token|JSON parse/i.test(message)) {
+    return "json-syntax"
+  }
+  return "content"
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2407,15 +2473,18 @@ function deletePaths(obj: any, paths: string[][]): any {
 /** 对单个 artifact 文件执行 auto-fix（strip 不合法的 null）并写回 */
 function stripNullsAndRewrite(filePath: string, schema?: import("zod").ZodType): boolean {
   try {
-    const raw = readFileSync(filePath, "utf-8")
-    const parsed = JSON.parse(raw)
+    const { data: parsed, hadBom } = readArtifactJson(filePath)
     if (!schema) {
       // 无 schema 时不做修改
+      if (hadBom) {
+        safeWriteFile(filePath, serializeArtifactJson(parsed))
+        return true
+      }
       return false
     }
     const stripped = stripInvalidNulls(parsed, schema)
-    if (stripped !== parsed) {
-      safeWriteFile(filePath, JSON.stringify(stripped, null, 2))
+    if (stripped !== parsed || hadBom) {
+      safeWriteFile(filePath, serializeArtifactJson(stripped))
       return true
     }
   } catch {
@@ -2550,7 +2619,7 @@ function checkPrerequisites(targetPhases: string[], artifactsDir: string): strin
 function validateJsonContent(fullPath: string, name: string): boolean {
   if (!name.endsWith(".json")) return true  // 目录类 prerequisite 不校验内容
   try {
-    JSON.parse(readFileSync(fullPath, "utf-8"))
+    readArtifactJson(fullPath)
     return true
   } catch {
     return false
@@ -3040,6 +3109,53 @@ export function unitSliceRelPaths(unitId: string, _phase: string): string[] {
   return [`${base}/source.sql`, `${base}/meta.json`]
 }
 
+export interface UnitSourceFacts {
+  hasSql: boolean
+  sqlOperations: string[]
+  hasAutonomousTransaction: boolean
+  hasCommit: boolean
+  hasRollback: boolean
+  hasExceptionHandler: boolean
+  usesImplicitErrorContext: boolean
+  packageStateRefs: string[]
+}
+
+/**
+ * 从本 unit 源码确定性提取影响 Java 组件与语义映射的事实。
+ * 先掩码注释和字符串，避免示例文字或动态 SQL 字面量造成假阳性。
+ */
+export function detectUnitSourceFacts(source: string): UnitSourceFacts {
+  const code = source
+    .replace(/--[^\n]*/g, match => " ".repeat(match.length))
+    .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, " "))
+    .replace(/'(?:''|[^'])*'/g, match => " ".repeat(match.length))
+
+  const operationMatchers: Array<[string, RegExp]> = [
+    ["select", /\bSELECT\b[\s\S]*?\b(?:INTO|FROM)\b/i],
+    ["insert", /\bINSERT\s+INTO\b/i],
+    ["update", /\bUPDATE\s+(?!OF\b)[A-Za-z_"$#]/i],
+    ["delete", /\bDELETE\s+FROM\b/i],
+    ["merge", /\bMERGE\s+INTO\b/i],
+    ["dynamic-sql", /\bEXECUTE\s+IMMEDIATE\b/i],
+    ["cursor", /\bCURSOR\b[\s\S]*?\bIS\s+SELECT\b|\bFOR\b[\s\S]*?\bIN\s*\(\s*SELECT\b/i],
+  ]
+  const sqlOperations = operationMatchers.filter(([, re]) => re.test(code)).map(([name]) => name)
+  const packageStateRefs = Array.from(new Set(code.match(/\bG_[A-Za-z0-9_$#]+\b/gi) ?? []))
+    .map(value => value.toUpperCase())
+    .sort()
+
+  return {
+    hasSql: sqlOperations.length > 0,
+    sqlOperations,
+    hasAutonomousTransaction: /\bPRAGMA\s+AUTONOMOUS_TRANSACTION\b/i.test(code),
+    hasCommit: /\bCOMMIT\s*;/i.test(code),
+    hasRollback: /\bROLLBACK\s*;/i.test(code),
+    hasExceptionHandler: /\bEXCEPTION\b[\s\S]*?\bWHEN\b/i.test(code),
+    usesImplicitErrorContext: /\bSQLCODE\b|\bSQLERRM\b|\bDBMS_UTILITY\s*\.\s*FORMAT_(?:ERROR|CALL)/i.test(code),
+    packageStateRefs,
+  }
+}
+
 /**
  * 引擎预切 per-unit 切片文件（硬输入边界）。dispatch 前调用，对本分片每个 targetUnit 落盘：
  *   shard-inputs/{pkg}/{ref}/
@@ -3130,7 +3246,8 @@ export function generateUnitSlices(
       }
     }
     appendSlice("根", rootRef, rootSub)
-    safeWriteFile(join(sliceDir, "source.sql"), sourceParts.join("\n\n"))
+    const unitSource = sourceParts.join("\n\n")
+    safeWriteFile(join(sliceDir, "source.sql"), unitSource)
 
     // analyze 砍后不再产 inventory-slice/analysis-slice（translate 读 source.sql 翻译，不读结构切片）。
 
@@ -3141,6 +3258,13 @@ export function generateUnitSlices(
       ref: rootRef,
       phase,
       cargoFuncs: [],
+      signature: rootProc ? {
+        type: rootProc.type,
+        parameters: rootProc.parameters,
+        returnType: rootProc.returnType,
+      } : null,
+      directCalls: rootSub?.directCalls ?? [],
+      sourceFacts: detectUnitSourceFacts(unitSource),
       sourceFiles,
     }
     safeWriteFile(join(sliceDir, "meta.json"), JSON.stringify(meta, null, 2))
@@ -3186,7 +3310,7 @@ export function buildDependencySignaturesBlock(
     const p = join(artifactsDir, "translations", pkg, "translation.json")
     if (!existsSync(p)) { methodsCache.set(pkg, null); return null }
     try {
-      const t = JSON.parse(readFileSync(p, "utf-8"))
+      const t = readArtifactJson<any>(p).data
       const methods = Array.isArray(t?.subprogramMethods) ? t.subprogramMethods : []
       methodsCache.set(pkg, methods)
       return methods
@@ -3630,31 +3754,48 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               }
             }
             if (statusBefore && statusBefore.status === "running" && !isFixFailed) {
+              if (statusBefore.currentPhase === "scaffold") {
+                const artifactId = getArtifactIdFromRun(statusBefore)
+                if (artifactId) {
+                  ensureScaffoldWorkspace(
+                    statusBefore,
+                    join(ARTIFACT_DIR, runId),
+                    generatedRootFor(statusBefore, artifactId),
+                  )
+                  engine.persistRun(statusBefore)
+                }
+              }
               const validationError = validateArtifactOnDisk(statusBefore)
               if (validationError) {
                 // P2b: 尝试 auto-fix 表面结构问题（strip null 值）
                 const fixResult = autoFixStructuralIssues(statusBefore)
                 // 汇总最终需上报的错误（auto-fix 后仍失败 → 结构问题；无法 auto-fix → 内容问题）
                 let errorToReport: string | null = null
-                let isStructural = false
                 if (fixResult.fixed) {
                   const recheck = validateArtifactOnDisk(statusBefore)
                   if (!recheck) {
                     getLogger().info("[advance]", `Auto-fixed structural issues: ${fixResult.summary}`)
                   } else {
                     errorToReport = recheck
-                    isStructural = true
                   }
                 } else {
                   errorToReport = validationError
-                  isStructural = false
                 }
 
                 if (errorToReport) {
+                  const failureKind = classifyArtifactValidationFailure(errorToReport)
+                  const isStructural = failureKind === "json-syntax" || failureKind === "schema"
+                  if (statusBefore.currentPhase === "scaffold") {
+                    const scaffoldArtifactsDir = join(ARTIFACT_DIR, runId)
+                    recordScaffoldFailure(statusBefore, failureKind, errorToReport)
+                    if (failureKind === "content") {
+                      rotateScaffoldWorkspace(statusBefore, scaffoldArtifactsDir)
+                    }
+                  }
                   // fix 阶段走自有 maxRetries 机制，不参与降级
                   const phaseCfg = SQL2JAVA_WORKFLOW.phases.find(p => p.name === statusBefore.currentPhase)
                   const isFixPhase = phaseCfg?.isFixPhase === true
-                  if (!isFixPhase && engine.rejectionBoundExceeded(statusBefore)) {
+                  if (!isFixPhase && statusBefore.currentPhase !== "scaffold" && engine.rejectionBoundExceeded(statusBefore)) {
                     // D16：达上限，Zod 问题降级为 warning 放行，不阻断（engine.advance 内部对 blocking 同样降级）
                     engine.logEvent(runId, "ADVANCE", statusBefore.currentPhase ?? "",
                       `[rejection-bound-exceeded] 阶段 ${statusBefore.currentPhase} 已连续 ${engine.getRejectionCount(statusBefore)} 次拒绝，达到上限(${engine.REJECTION_BOUND})，Zod 问题降级为 warning 放行：\n${errorToReport}`)
@@ -3707,7 +3848,40 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               }
             }
 
-            const adv = engine.advance(runId, { result: args.result, acceptWarnings: args.acceptWarnings })
+            const adv = engine.advance(runId, {
+              result: args.result,
+              acceptWarnings: args.acceptWarnings,
+              beforeTransition: completedPhase === "scaffold"
+                ? (transitionRun) => {
+                    const artifactId = getArtifactIdFromRun(transitionRun)
+                    const workspace = getScaffoldWorkspace(transitionRun)
+                    const finalRoot = artifactId ? generatedRootFor(transitionRun, artifactId) : null
+                    const commitResult = artifactId && workspace && finalRoot
+                      ? commitScaffoldWorkspace(transitionRun, join(ARTIFACT_DIR, runId), finalRoot)
+                      : { ok: false, error: "scaffold 工作区元数据或 artifactId 缺失" }
+                    if (!commitResult.ok) {
+                      const message = commitResult.error ?? "scaffold 工作区提交失败"
+                      recordScaffoldFailure(transitionRun, "workspace", message)
+                      engine.persistRun(transitionRun)
+                      engine.logEvent(runId, "SCAFFOLD_COMMIT_ROLLBACK", "scaffold", message)
+                      throw new Error(message)
+                    }
+                    engine.persistRun(transitionRun)
+                    getLogger().info("[advance]", `scaffold 工作区已提交到 ${finalRoot}`)
+                  }
+                : undefined,
+            })
+
+            // scaffold 只有在插件校验与引擎质量门控均通过后才提升到正式目录。
+            if (completedPhase === "scaffold" && adv.rejected) {
+              const reason = adv.rejectionReason ?? "scaffold 引擎质量门控拒绝"
+              const workspace = getScaffoldWorkspace(adv.run)
+              if (workspace?.lastFailureKind !== "workspace") {
+                recordScaffoldFailure(adv.run, "content", reason)
+                rotateScaffoldWorkspace(adv.run, join(ARTIFACT_DIR, runId))
+                engine.persistRun(adv.run)
+              }
+            }
 
             // ── Metrics: finalize 当前 collector（仅当阶段成功完成时） ──
             // try-catch 保护：engine.advance() 已提交状态，metrics I/O 失败不应阻断流程
@@ -4733,16 +4907,20 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             {
               const md = run.metadata as Record<string, unknown>
               if (md.mainEntry) workOrderParts.push(`- mainEntry: ${md.mainEntry}`)
-              // projectRoot（scaffold 及之后阶段）：scaffold 调 claimGeneratedRoot 锁定目录（建 base + 写 marker，
-              // 同 run 续跑保留 / 换 run 清空）；其余阶段只读解析 base。必须注入 workOrder——scaffold 不走
-              // buildShardedWorkerOrder，否则 agent 只能从系统提示拿 projectRoot，且无 claim 则 base 无 marker。
+              // projectRoot（scaffold 及之后阶段）：scaffold 写事务工作区并额外注入 finalProjectRoot；
+              // 其余阶段只读正式目录。必须注入 workOrder——scaffold 不走 buildShardedWorkerOrder。
               // Stage A：artifactId 由 getArtifactIdFromRun 从 metadata/run-context 取（start 写入），不再读 plan。
               const artifactIdForRoot = getArtifactIdFromRun(run)
               if (artifactIdForRoot) {
+                const finalRoot = generatedRootFor(run, artifactIdForRoot)
                 const pr = run.currentPhase === "scaffold"
-                  ? claimGeneratedRoot(run.runId, artifactIdForRoot)
-                  : resolveGeneratedRoot(run.runId, artifactIdForRoot)
+                  ? ensureScaffoldWorkspace(run, artifactsDir, finalRoot).root
+                  : finalRoot
+                if (run.currentPhase === "scaffold") engine.persistRun(run)
                 workOrderParts.push(`- projectRoot: ${pr}  ← Java/项目文件写入此目录（绝对路径，原样使用）`)
+                if (run.currentPhase === "scaffold") {
+                  workOrderParts.push(`- finalProjectRoot: ${finalRoot}  ← 仅写入 scaffold.json.projectRoot；禁止直接写入此目录`)
+                }
               }
               // 过程级入口闭包 scope 指令（所有阶段注入；非分片阶段 plan/scaffold/review/dedup/verify 靠此知范围）
               const scopeBannerText = buildScopeBanner(run)
@@ -4766,7 +4944,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 const staticPath = join(artifactsDir, "review-static.json")
                 if (existsSync(staticPath)) {
                   try {
-                    const sf = JSON.parse(readFileSync(staticPath, "utf-8")) as { findings?: Array<{ packageName?: string; file?: string; line?: number | null; rule?: string; severity?: string; category?: string; message?: string }> }
+                    const sf = readArtifactJson<{ findings?: Array<{ packageName?: string; file?: string; line?: number | null; rule?: string; severity?: string; category?: string; message?: string }> }>(staticPath).data
                     const fixedSet = new Set((currentEntry?.incrementalContext?.targetPackages ?? []).map((p: string) => p.toUpperCase()))
                     const relevant = (sf.findings ?? []).filter(f => {
                       const pkg = (f.packageName ?? "").toUpperCase()
@@ -4795,7 +4973,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 const vsPath = join(artifactsDir, "verify-summary.json")
                 if (existsSync(vsPath)) {
                   try {
-                    const vs = JSON.parse(readFileSync(vsPath, "utf-8")) as {
+                    const vs = readArtifactJson<{
                       coverage?: {
                         passed?: boolean
                         packageCoverage?: Array<{
@@ -4804,7 +4982,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                           gaps?: Array<{ className?: string; line?: number | null; type?: string }>
                         }>
                       }
-                    }
+                    }>(vsPath).data
                     const cov = vs.coverage
                     if (cov && cov.passed === false && Array.isArray(cov.packageCoverage)) {
                       const fixedSet = new Set((currentEntry?.incrementalContext?.targetPackages ?? []).map((p: string) => p.toUpperCase()))
@@ -4817,7 +4995,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                           `- 这些是 verify 阶段 jacoco.xml 解析出的未覆盖点（确定性信号），按 class:line 定位补测试`,
                           `- 行未覆盖（type=line）：补对应业务实现类方法的正向用例（arrange→act→assert）`,
                           `- 分支未覆盖（type=branch）：补缺失的 if/else 一支（边界/异常路径用例）`,
-                          `- @Disabled 的 Mapper 集成测试路径不计入；详见 ${artifactsDir}/coverage-gaps.md`,
+                          `- 禁止用 @Disabled 掩盖 Mapper/H2/SQL 失败；须修复后纳入有效覆盖，详见 ${artifactsDir}/coverage-gaps.md`,
                         )
                         for (const g of allGaps) {
                           workOrderParts.push(`  - { package: ${g.packageName}, class: ${g.className.replace(/\//g, ".")}, line: ${g.line ?? "null"}, type: ${g.type} }`)
@@ -5016,7 +5194,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
 
             // P3c: 路径规则（有 projectRoot 即注入；Stage A 起 artifactId 来自 run-context/metadata）
             if (artifactIdForDispatch) {
-              const projectRoot = generatedRootFor(run, artifactIdForDispatch)
+              const projectRoot = activeGeneratedRootFor(run, artifactIdForDispatch)
+              const finalProjectRoot = generatedRootFor(run, artifactIdForDispatch)
               workOrderParts.push(
                 ``,
                 `## 📂 文件写入路径（强制）`,
@@ -5025,7 +5204,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 `- ❌ 禁止将项目文件写入 artifactsDir/（任何子目录，包括 translations/ 等）`,
                 `- ❌ 禁止写入 .git/、.claude/、node_modules/ 等敏感目录`,
                 `- ❌ 禁止写入 sourcePath 目录（只读）`,
-                `- scaffold.json 的 projectRoot 必须使用注入值，不可自行编造`,
+                `- scaffold.json 的 projectRoot 必须填写 finalProjectRoot（${finalProjectRoot}），不可填写事务工作区路径`,
                 `- 引擎会自动拦截错误路径写入并重定向到正确位置`,
               )
             }
@@ -5168,6 +5347,8 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             return `❌ 路径包含指向目录外的符号链接: ${args.path}`
           }
         }
+        // 统一成规范相对路径，防止 ./、.. 或反斜杠变体绕过文件名级校验。
+        args.path = relative(resolvedDir, resolved).split(sep).join("/")
 
         // per-unit 写入边界（unit 模式）：saveArtifact 走 args.path 不经 classifyWritePath，此处复用
         // 同一判定。越界 → 拒绝写入并提示（不静默 redirect，让 worker 知道越界）。
@@ -5178,34 +5359,55 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
         }
 
         // 校验：.json 文件须为合法 JSON，其他格式直接写入
+        let parsedJsonContent: any = undefined
         if (args.path.endsWith('.json')) {
           try {
-            JSON.parse(args.content)
+            parsedJsonContent = parseArtifactJson(args.content).data
           } catch {
             return '❌ .json 文件的 content 不是合法的 JSON 字符串。请确保 content 可以被 JSON.parse 正确解析。'
           }
         }
 
-        // P3b: scaffold.json 的 projectRoot 强制覆写为引擎计算值（与 dispatch/validation 同源：
-        // generatedRootFor 读 metadata.generatedRoot，不用 resolveGeneratedRoot 重新派生，
-        // 否则与磁盘状态绑定会在 claim/save/validation 间 base↔fallback 翻转）
+        // scaffold.json.projectRoot 始终记录正式目录；项目文件实际写入事务工作区。
         if (args.path === "scaffold.json") {
           const run = engine.status(runId)
           const artifactId = run ? getArtifactIdFromRun(run) : null
           if (artifactId) {
             const expectedRoot = run ? generatedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
-            try {
-              const parsed = JSON.parse(args.content)
-              if (parsed.projectRoot !== expectedRoot) {
-                parsed.projectRoot = expectedRoot
-                args.content = JSON.stringify(parsed, null, 2)
-                getLogger().info("[saveArtifact]", `Overrode scaffold.json projectRoot → ${expectedRoot}`)
-              }
-            } catch { /* already validated above */ }
+            const normalized = normalizeScaffoldArtifact(
+              parsedJsonContent,
+              expectedRoot,
+              loadPureConstantPackages(join(ARTIFACT_DIR, runId)),
+            )
+            parsedJsonContent = normalized.data
+            if (normalized.changes.length > 0) {
+              getLogger().info("[saveArtifact]", `Normalized scaffold.json: ${normalized.changes.join("; ")}`)
+            }
           }
         }
 
         // 原子写入（safeWriteFile 内含 mkdir + tmp → rename + 清理）
+        if (args.path.endsWith('.json')) {
+          const phase = currentWorkflowContext.phase
+          const normalizedPath = args.path.replace(/\\/g, "/")
+          const topLevelPath = `${getArtifactFilename(phase)}.json`
+          const schema = normalizedPath === topLevelPath ? getSchemaForPhase(phase) : null
+          if (schema) {
+            const validation = schema.safeParse(parsedJsonContent)
+            if (!validation.success) {
+              return `❌ ${args.path} Zod 校验失败：\n${formatZodIssues(validation.error)}`
+            }
+            parsedJsonContent = validation.data
+          }
+          if (args.path === "scaffold.json") {
+            const relationErrors = validateScaffoldRelations(parsedJsonContent)
+            if (relationErrors.length > 0) {
+              return `❌ scaffold.json 交叉字段校验失败：\n${relationErrors.map(e => `  - ${e}`).join("\n")}`
+            }
+          }
+          args.content = serializeArtifactJson(parsedJsonContent)
+        }
+
         let writeErr: Error | undefined
         safeWriteFile(fullPath, args.content, (e) => { writeErr = e })
         if (writeErr) {
@@ -5244,13 +5446,22 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
       const artifactId = run ? getArtifactIdFromRun(run) : null
       let projectRoot = ''
       if (artifactId) {
-        projectRoot = run ? generatedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
+        projectRoot = run ? activeGeneratedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
       }
 
       const sourcePath = resolveSourcePath(runId)
       const cls = classifyWritePath(filePath, artifactsDir, projectRoot, sourcePath, {
         unitAllowedRefs: resolveUnitAllowedRefs(),
       })
+
+      if (
+        run?.currentPhase === "scaffold"
+        && cls.zone === "artifacts"
+        && resolve(filePath) === resolve(join(artifactsDir, "scaffold.json"))
+      ) {
+        cls.shouldBlock = true
+        cls.blockReason = "scaffold.json 必须通过 saveArtifact 写入，以执行 JSON 规范化和 Schema 校验"
+      }
 
       if (cls.shouldBlock) {
         // 阻止写入：记录到 artifactsDir/_blocked-writes/ 并替换目标
@@ -5287,7 +5498,20 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
       const run = engine.status(runId)
       const artifactId = run ? getArtifactIdFromRun(run) : null
       if (!artifactId) return
-      const projectRoot = run ? generatedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
+      const projectRoot = run ? activeGeneratedRootFor(run, artifactId) : resolveGeneratedRoot(runId, artifactId)
+
+      if (
+        run?.currentPhase === "scaffold"
+        && /scaffold\.json/i.test(command)
+        && (/(?:Set-Content|Out-File)/i.test(command) || /(?:>|\btee\b)\s+[^\r\n;]*scaffold\.json/i.test(command))
+      ) {
+        getLogger().error("[bash-write-inspect]", "BLOCKED: scaffold.json 必须通过 saveArtifact 写入")
+        output.args = {
+          ...output.args,
+          command: `node -e "console.error('scaffold.json 必须通过 saveArtifact 写入');process.exit(1)"`,
+        }
+        return
+      }
 
       // 扫描常见写入模式，检测是否往项目文件路径写入
       const writeRe = /(?:>|\btee\b|\bcp\b|\bmv\b)\s.*\.(java|xml|yml|yaml|properties|sql)\b/i

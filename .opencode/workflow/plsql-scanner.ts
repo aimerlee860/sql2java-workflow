@@ -413,10 +413,9 @@ export function partitionFilesByPackage(files: string[]): { fileSets: string[][]
 export async function scanWithAST(roots: string[], primaryBase: string): Promise<InventoryIndex> {
   const files = collectSourceFiles(roots)
   const { fileSets, totalLines } = partitionFilesByPackage(files)
-  getLogger().info("[scan]", `regex 主路径: ${files.length} 文件 / ${totalLines} 行 / ${fileSets.length} file-set → worker 池（scanFileSetRegex，AST 保留不启用）`)
-  // 主路径已切到 scanFileSetRegex（纯 regex，无 antlr）：worker 池内 scanFileSetRegex 抽包/子程序/
-  // directCalls。原 scanFileSet（AST）保留不启用（对照/回退，scanner-merged-parity / plsql-scanner-fields
-  // 直接调 scanFileSet 作 AST 全字段回归）。scannerUsed 标 "regex" 反映实际扫描路径（下游仅展示用）。
+  getLogger().info("[scan]", `混合主路径: ${files.length} 文件 / ${totalLines} 行 / ${fileSets.length} file-set → worker 池（regex 定位 + AST 结构增强 + 零参函数二次扫描）`)
+  // regex 负责方言容错、源码区间与普通调用；AST 补参数/返回类型/包级声明；已知函数索引补
+  // AST 同样漏掉的无括号零参函数。scannerUsed 继续标 "regex" 以兼容既有 artifact 枚举。
   const results = await scanFilesParallel(fileSets, primaryBase)
   return finalizeFileSetResults(results, primaryBase, "regex")
 }

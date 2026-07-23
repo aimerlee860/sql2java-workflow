@@ -270,7 +270,7 @@ export const ScaffoldSchema = z.object({
   targetProject: TargetProjectSchema,
   /** PL/SQL Package → Java 包 + 组件类名映射（架构无关，原 plan.packageMappings） */
   packageMappings: z.array(PackageMappingSchema),
-  /** Java 项目输出根目录（绝对路径，由引擎注入，指向 cwd/generated/{artifactId}） */
+  /** Java 项目最终输出根目录（绝对路径，由引擎以 finalProjectRoot 注入） */
   projectRoot: z.string(),
   /** 覆盖率排除路径子串列表（scaffold 按规约工程结构章节的非业务目录填，如 "exception/"/"entity/"；
    *  verify 阶段 excludeReason 读此列表过滤 jacoco class，避免非业务类拉低 allPassed。与 pom jacoco excludes 同源。 */
@@ -323,6 +323,11 @@ export const ScaffoldSchema = z.object({
     h2SchemaFile: z.string().optional(),
     /** 测试用 application 配置路径（相对于 projectRoot） */
     testApplicationConfig: z.string().optional(),
+    /** 自定义项目规约额外生成、但不属于实体/状态持有类/公共类的文件。 */
+    extraFiles: z.array(z.object({
+      file: z.string(),
+      purpose: z.string(),
+    })).optional(),
     // TODO (F8): commonClasses {file, purpose} 和 commonModules.classes {file, purpose, category}
     // 结构重叠。考虑统一为单一数组（category 可选），避免消费者需检查两个数组。
     commonClasses: z.array(z.object({
@@ -342,7 +347,38 @@ export const ScaffoldSchema = z.object({
   // conventions 已移除（Stage B）——编码约定由注入的 Java 代码规约提供，scaffold 不再复制。
   // 保留 optional 容忍旧 scaffold.json 残留。
   conventions: z.string().optional(),
-}).passthrough()
+}).passthrough().superRefine((data, ctx) => {
+  const seen = new Set<string>()
+  const mapped = new Set<string>()
+  data.packageMappings.forEach((mapping, index) => {
+    const key = mapping.plsqlPackage.trim().toUpperCase()
+    if (seen.has(key)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["packageMappings", index, "plsqlPackage"],
+        message: `plsqlPackage 重复映射: ${mapping.plsqlPackage}`,
+      })
+    }
+    seen.add(key)
+    mapped.add(key)
+  })
+  const packageArtifacts = [
+    ["constants", data.generated.constants],
+    ["stateDtos", data.generated.stateDtos],
+  ] as const
+  packageArtifacts.forEach(([field, entries]) => {
+    entries.forEach((entry, index) => {
+      const key = entry.plsqlPackage.trim().toUpperCase()
+      if (!mapped.has(key)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["generated", field, index, "plsqlPackage"],
+          message: `${field} 缺少对应 packageMapping: ${entry.plsqlPackage}`,
+        })
+      }
+    })
+  })
+})
 
 // ============================================================================
 // Translation Schema（每包一个）
@@ -809,6 +845,54 @@ export const FixArtifactSchema = z.object({
   data => data.fixedPackages.length > 0,
   { message: "fixedPackages 不能为空，fix 必须至少修复一个包" }
 )
+
+// ============================================================================
+// Translate Lint Schema（per-unit，最终提交门禁输入）
+// ============================================================================
+
+const TranslateLintOwnerStageSchema = z.enum([
+  "inventory",
+  "scaffold",
+  "skeleton",
+  "translate-core",
+  "test-gen",
+  "compile",
+])
+
+export const TranslateLintViolationSchema = z.object({
+  file: z.string(),
+  line: z.coerce.number().int().positive().nullable().optional(),
+  rule: z.string().min(1),
+  message: z.string().min(1),
+  /** 旧产物无严重度时由门禁按阻断处理，避免 fail-open。 */
+  severity: z.enum(["info", "minor", "major", "blocking"]).optional(),
+  blocking: z.boolean().optional(),
+  ownerStage: TranslateLintOwnerStageSchema.optional(),
+  rootCause: z.string().min(1).optional(),
+}).passthrough()
+
+export const TranslateLintSemanticFindingSchema = z.object({
+  signal: z.string().min(1),
+  file: z.string(),
+  line: z.coerce.number().int().positive().nullable().optional(),
+  severity: z.enum(["info", "minor", "major", "blocking"]),
+  issue: z.string().min(1),
+  ownerStage: TranslateLintOwnerStageSchema.optional(),
+  rootCause: z.string().min(1).optional(),
+}).passthrough()
+
+export const TranslateLintSchema = z.object({
+  todoRemaining: z.coerce.number().int().nonnegative(),
+  violations: z.array(TranslateLintViolationSchema),
+  javaFileMissing: z.array(z.string()),
+  semanticFindings: z.array(TranslateLintSemanticFindingSchema),
+  selfReviewPassed: z.boolean(),
+  deletionCheck: z.object({
+    modifiedFiles: z.coerce.number().int().nonnegative(),
+    deletedFiles: z.coerce.number().int().nonnegative(),
+    violations: z.array(TranslateLintViolationSchema),
+  }).passthrough().optional(),
+}).passthrough()
 
 // ============================================================================
 // Schema 查找辅助

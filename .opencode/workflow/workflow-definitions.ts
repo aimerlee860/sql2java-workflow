@@ -36,7 +36,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "translate",
-      description: "PL/SQL → Java/MyBatis 逐 unit 翻译（主从架构：translator master 每 shard 派 6 slave 子 agent 串行跑 skeleton → translate-core → test-gen → static-check → compile → summary）",
+      description: "PL/SQL → Java/MyBatis 逐 unit 翻译（skeleton/core/test 后执行 lint + Maven 编译的根因定向修复闭环，质量全绿后生成 summary）",
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
@@ -44,7 +44,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       maxPackagesPerShard: 1,
       tools: ["read", "bash", "write", "edit", "workflow"],
       // translate 主从架构：subStages 仅供 getSubagentNames（slave 识别为 worker）+ subdispatch 渲染 slave workOrder。
-      // master（translator.md）每 shard 派 6 slave 串行跑；引擎 advance 直走 G1-unit + crossSchema + shard advance（不再逐 sub-stage 推进）。
+      // master（translator.md）每 shard 串行派责任 slave；lint/compile 失败按 ownerStage/rootCause 回派，引擎 advance 只负责最终硬门禁。
       // 1 unit = 1 shard（dispatch 强制 maxUnitsPerShard=1），sub-stage 天然 per-unit。
       // skeleton（首位）产 FSD 设计稿 fsd/{pkg}/{ref}.md，约束下游 translate-core/test-gen 遵循；
       // summary（末尾，compile 后）产翻译总结稿 summary/{pkg}/{ref}.md，含「设计 vs 实施偏差对照」。
