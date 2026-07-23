@@ -24,6 +24,7 @@ import { PackageMappingSchema, VerifySummarySchema } from "./artifact-schemas"
 import { formatZodIssues, readScopePackagesFromArtifacts } from "./engine-core"
 import { getLogger } from "./workflow-logger"
 import { COVERAGE_LINE_THRESHOLD, COVERAGE_BRANCH_THRESHOLD } from "./constants"
+import { loadArchitectureModel } from "./architecture-model"
 
 const COMPILE_LOG = "verify-compile.log"
 const TEST_LOG = "verify-test.log"
@@ -81,6 +82,10 @@ export function buildVerifySummary(artifactsDir: string): {
   const packageMappings = readPackageMappings(artifactsDir)
   const procClassNames = readProcClassNames(artifactsDir)
   const coverageExcludes = readCoverageExcludes(artifactsDir)
+  // 角色后缀（模型驱动）：testBelongsToPkg 剥离测试类后缀得去重基名，按长度降序避免 Service 先于 ServiceImpl
+  const model = loadArchitectureModel(artifactsDir)
+  const roleSuffixes = model.roles.map(r => r.suffix).filter(Boolean)
+    .sort((a, b) => b.length - a.length)
 
   // ── 1. 解析 mvn 日志 ──
   const compileLogPath = join(artifactsDir, COMPILE_LOG)
@@ -112,7 +117,7 @@ export function buildVerifySummary(artifactsDir: string): {
     }
     if (testExecution.testErrors) {
       for (const te of testExecution.testErrors) {
-        if (testBelongsToPkg(te.testClass, procClassNames, pkg)) passed = false
+        if (testBelongsToPkg(te.testClass, procClassNames, pkg, roleSuffixes)) passed = false
       }
     }
     // 覆盖率不达标的包也判为未通过（统一归因，供 fix 增量补测）
@@ -348,16 +353,17 @@ function testBelongsToPkg(
   testClass: string,
   procClassNames: ProcClassNameLite[],
   pkg: string,
+  roleSuffixes: string[],
 ): boolean {
   const tc = String(testClass ?? "")
   const simple = tc.split(".").pop() ?? ""
   if (!simple) return false
-  // 剥测试后缀（先长后短）+ 角色后缀（先长后短），得去重基名 ResolvedBase
+  // 剥测试后缀（先长后短）+ 角色后缀（先长后短，模型驱动），得去重基名 ResolvedBase
   let base = simple
   for (const suf of ["IntegrationTest", "Test"]) {
     if (base.endsWith(suf) && base.length > suf.length) { base = base.slice(0, -suf.length); break }
   }
-  for (const suf of ["ServiceImpl", "Mapper", "Service"]) {
+  for (const suf of roleSuffixes) {
     if (base.endsWith(suf) && base.length > suf.length) { base = base.slice(0, -suf.length); break }
   }
   if (!base) return false

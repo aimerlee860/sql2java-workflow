@@ -41,6 +41,7 @@ import { generateScaffoldInput } from "../workflow/scaffold-input-builder"
 import { generateDoAndH2Schema } from "../workflow/do-schema-builder"
 import {
   parseArchitectureModel, DEFAULT_ARCHITECTURE_MODEL, formatArchitectureModel,
+  loadArchitectureModel, findImplRole,
   type ArchitectureModel,
 } from "../workflow/architecture-model"
 import { enumerateTestCases } from "../workflow/test-case-enumerator"
@@ -1270,7 +1271,11 @@ export function buildCoreSegmentBlock(artifactsDir: string, projectRoot: string 
   const segments: any[] = Array.isArray(sidecar?.segments) ? sidecar.segments : []
   if (segments.length === 0) return ""  // 无段 → 回退填全部
   const className = resolveUnitClassName(artifactsDir, pkg, ref)
-  const implPath = projectRoot ? join(projectRoot, "src/main/java/service/impl", `${className}ServiceImpl.java`) : null
+  // 实现类路径由架构模型驱动（默认 service/impl/{className}ServiceImpl.java，DDD 则 processor/...）
+  const impl = findImplRole(loadArchitectureModel(artifactsDir))
+  const implPath = projectRoot && impl
+    ? join(projectRoot, impl.dir, `${className}${impl.suffix}.java`)
+    : null
   let implSrc: string | null = null
   if (implPath && existsSync(implPath)) {
     try { implSrc = readFileSync(implPath, "utf-8") } catch { /* 读失败则跳过自动判定 */ }
@@ -1328,11 +1333,16 @@ function buildTestGenBlock(artifactsDir: string, projectRoot: string, pkg: strin
   } catch (e: any) {
     getLogger().warn("[dispatch]", `test-gen sidecar 回写失败（不阻断）: ${e.message}`)
   }
+  // 架构模型：异常基类 + 实现层测试后缀（默认 BusinessException / ServiceImplTest）
+  const tModel = loadArchitectureModel(artifactsDir)
+  const tImpl = findImplRole(tModel)
+  const exceptionClass = tModel.exception.baseClass
+  const testSuffix = tImpl?.testSuffix ?? "Test"
   // 2) 测试壳生成
   const scaffoldRel = buildTestScaffold(projectRoot, artifactsDir, pkg, ref)
   const scaffoldLine = scaffoldRel
     ? `- 测试壳已确定性生成（**勿重写整文件**）：\`${projectRoot}/${scaffoldRel}\`——只把 \`// @TEST_METHODS_HERE\` 标记替换为 @Test 方法体。`
-    : `- 测试壳未生成（ServiceImpl 未落盘），自行创建 \`${ref}\`ServiceImplTest.java。`
+    : `- 测试壳未生成（实现类未落盘），自行创建 \`${ref}\`${testSuffix}.java。`
 
   if (!cases || cases.length === 0) {
     return [
@@ -1350,7 +1360,7 @@ function buildTestGenBlock(artifactsDir: string, projectRoot: string, pkg: strin
     "## test 用例清单（确定性枚举，按此逐条填 @Test，勿自发明用例）",
     `- 共 ${cases.length} 条（negative > boundary > positive 优先，超长过程可能截断，剩余覆盖率交 verify JaCoCo 兜底）。`,
     caseLines,
-    "- 每条 = 一个 @Test：按 setupHint 配 mock、按 expectKind 断言（return-value 或 assertThrows(BusinessException.class)+错误码）。",
+    `- 每条 = 一个 @Test：按 setupHint 配 mock、按 expectKind 断言（return-value 或 assertThrows(${exceptionClass}.class)+错误码）。`,
     scaffoldLine,
   ].join("\n")
 }

@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { getLogger } from "./workflow-logger"
 import { safeWriteFile } from "./cross-platform"
+import { loadArchitectureModel, type ArchitectureModel } from "./architecture-model"
 
 /** 读 JSON 文件（不存在/解析失败返回 null）。镜像 workflow-engine.readJsonOrNull，保持自包含。 */
 function readJsonOrNull(path: string): any {
@@ -33,14 +34,14 @@ interface TableJson { name: string; columns: Column[]; primaryKey?: string[] | {
 
 // ── 命名 ─────────────────────────────────────────────────────────────────────
 
-/** 表名 → DO 类名：去 schema 前缀 → 去 T_ 前缀 → snake→PascalCase → + DO。
+/** 表名 → 实体类名：去 schema 前缀 → 去 T_ 前缀 → snake→PascalCase → + 实体后缀（模型驱动，默认 DO）。
  *  §3.1 line 119 印证：gmo_clr_settle → GmoClrSettleDO；MFG_ERP.T_BOM_LINE → BomLineDO。 */
-export function tableNameToClassName(tableName: string): string {
+export function tableNameToClassName(tableName: string, suffix = "DO"): string {
   let n = tableName.includes(".") ? tableName.split(".").slice(1).join(".") : tableName
   n = n.replace(/^T_/i, "")
   const pascal = n.toLowerCase().split(/[_\s]+/).filter(Boolean)
     .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join("")
-  return pascal + "DO"
+  return pascal + suffix
 }
 
 /** 列名 → camelCase 字段名（snake_case 转 lowerCamelCase）。 */
@@ -86,8 +87,8 @@ const IMPORT_BY_TYPE: Record<string, string> = {
 
 // ── DO .java 生成 ─────────────────────────────────────────────────────────────
 
-function buildDoJava(table: TableJson, className: string, dateStr: string): string {
-  const imports = new Set<string>(["lombok.Data", "com.baomidou.mybatisplus.annotation.TableName"])
+function buildDoJava(table: TableJson, className: string, dateStr: string, model: ArchitectureModel): string {
+  const imports = new Set<string>(model.entity.imports)
   const fieldLines: string[] = []
   for (const col of table.columns ?? []) {
     const javaType = plsqlTypeToJava(col.plsqlType)
@@ -100,8 +101,10 @@ function buildDoJava(table: TableJson, className: string, dateStr: string): stri
     fieldLines.push(`    private ${javaType} ${columnNameToField(col.name)};`)
   }
   const importBlock = [...imports].sort().map(i => `import ${i};`).join("\n")
+  // 注解里 {table} 占位替换为真实表名（如 @TableName("{table}") → @TableName("T_BOM_LINE")）
+  const annotations = model.entity.annotations.map(a => a.replace(/\{table\}/g, table.name))
   return [
-    "package entity;",
+    `package ${model.entity.package};`,
     "",
     importBlock,
     "",
@@ -113,8 +116,7 @@ function buildDoJava(table: TableJson, className: string, dateStr: string): stri
     " * @version 1.0",
     ` * @since ${dateStr}`,
     " */",
-    "@Data",
-    `@TableName("${table.name}")`,
+    ...annotations,
     `public class ${className} {`,
     fieldLines.join("\n"),
     "}",
@@ -210,6 +212,7 @@ export function generateDoAndH2Schema(artifactsDir: string, projectRoot: string)
   const sequences: any[] = Array.isArray(inv.sequences) ? inv.sequences : []
   const views: any[] = Array.isArray(inv.views) ? inv.views : []
 
+  const model = loadArchitectureModel(artifactsDir)
   const dateStr = new Date().toISOString().slice(0, 10)
   const entities: DoEntityEntry[] = []
   const tables: TableJson[] = []
@@ -224,9 +227,9 @@ export function generateDoAndH2Schema(artifactsDir: string, projectRoot: string)
       log.warn("[do-schema]", `tables/${tn}.json 无 columns，跳过 DO 生成`)
       continue
     }
-    const className = tableNameToClassName(tn)
-    const relFile = `src/main/java/entity/${className}.java`
-    safeWriteFile(join(projectRoot, relFile), buildDoJava(tbl, className, dateStr))
+    const className = tableNameToClassName(tn, model.entity.suffix)
+    const relFile = `${model.entity.dir}/${className}.java`
+    safeWriteFile(join(projectRoot, relFile), buildDoJava(tbl, className, dateStr, model))
     entities.push({ file: relFile, tableName: tn })
     tables.push({ name: tbl.name ?? tn, columns: tbl.columns, primaryKey: tbl.primaryKey, foreignKeys: tbl.foreignKeys })
   }

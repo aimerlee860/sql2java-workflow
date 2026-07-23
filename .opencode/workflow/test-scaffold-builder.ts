@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { getLogger } from "./workflow-logger"
 import { safeWriteFile } from "./cross-platform"
+import { loadArchitectureModel, findImplRole } from "./architecture-model"
 
 /** 读 JSON 文件（不存在/解析失败返回 null）。镜像 workflow-engine.readJsonOrNull，保持自包含。 */
 function readJsonOrNull(path: string): any {
@@ -72,32 +73,42 @@ function parseDeps(implSrc: string): DepField[] {
 }
 
 /**
- * 生成并落盘 {ClassName}ServiceImplTest.java 壳。返回写入的 projectRoot 相对路径；
- * ServiceImpl 未落盘返回 null（调用方回退：test-gen 自行创建测试文件）。
+ * 生成并落盘测试壳（默认 {ClassName}ServiceImplTest.java，角色名/目录由架构模型驱动）。
+ * 返回写入的 projectRoot 相对路径；实现类未落盘或模型无实现层 testDir/testSuffix 返回 null
+ * （调用方回退：test-gen 自行创建测试文件）。
  */
 export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg: string, ref: string): string | null {
   const log = getLogger()
+  const model = loadArchitectureModel(artifactsDir)
+  const impl = findImplRole(model)
+  if (!impl || !impl.testDir || !impl.testSuffix) {
+    log?.warn(`test-scaffold-builder: 模型无实现层 testDir/testSuffix（layout=${model.layout}），跳过壳生成（test-gen 自行创建）`)
+    return null
+  }
   const className = resolveUnitClassName(artifactsDir, pkg, ref)
-  const implRel = `src/main/java/service/impl/${className}ServiceImpl.java`
+  const implCls = `${className}${impl.suffix}`
+  const implRel = `${impl.dir}/${implCls}.java`
   const implPath = join(projectRoot, implRel)
   if (!existsSync(implPath)) {
-    log?.warn(`test-scaffold-builder: ServiceImpl 未落盘 ${implRel}，跳过壳生成（test-gen 自行创建）`)
+    log?.warn(`test-scaffold-builder: 实现类未落盘 ${implRel}，跳过壳生成（test-gen 自行创建）`)
     return null
   }
   const implSrc = readFileSync(implPath, "utf-8")
   const deps = parseDeps(implSrc)
+  const testCls = `${className}${impl.testSuffix}`
+  const testRel = `${impl.testDir}/${testCls}.java`
 
   // 幂等守卫：测试文件已存在且 @TEST_METHODS_HERE 标记已消失 = slave 已填充，不得覆盖。
   // 仅当文件不存在或仍含标记（未填充）时才（重新）生成壳。避免 resume/重渲 clobber 已填测试。
-  const testAbs = join(projectRoot, `src/test/java/service/impl/${className}ServiceImplTest.java`)
+  const testAbs = join(projectRoot, testRel)
   if (existsSync(testAbs)) {
     const existing = readFileSync(testAbs, "utf-8")
     if (!existing.includes("// @TEST_METHODS_HERE")) {
-      return `src/test/java/service/impl/${className}ServiceImplTest.java`
+      return testRel
     }
   }
 
-  // 收集需要的 import（依赖类型 + ServiceImpl 自身）
+  // 收集需要的 import（依赖类型 + 实现类自身）
   const imports = new Set<string>([
     "import org.junit.jupiter.api.Test;",
     "import org.junit.jupiter.api.extension.ExtendWith;",
@@ -108,7 +119,7 @@ export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg
     "import org.mockito.quality.Strictness;",
     "import static org.mockito.Mockito.*;",
     "import static org.junit.jupiter.api.Assertions.*;",
-    `import service.impl.${className}ServiceImpl;`,
+    `import ${impl.package}.${implCls};`,
   ])
   const missingTypes: string[] = []
   for (const d of deps) {
@@ -117,27 +128,26 @@ export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg
   }
 
   const lines: string[] = []
-  lines.push("package service.impl;")
+  lines.push(`package ${impl.package};`)
   lines.push("")
   for (const i of imports) lines.push(i)
   if (missingTypes.length) {
-    lines.push(`// TODO: 补 import（ServiceImpl 未显式 import 的依赖类型）: ${missingTypes.join(", ")}`)
+    lines.push(`// TODO: 补 import（实现类未显式 import 的依赖类型）: ${missingTypes.join(", ")}`)
   }
   lines.push("")
   lines.push("@ExtendWith(MockitoExtension.class)")
   lines.push("@MockitoSettings(strictness = Strictness.LENIENT)")
-  lines.push(`class ${className}ServiceImplTest {`)
+  lines.push(`class ${testCls} {`)
   for (const d of deps) {
     lines.push(`    @Mock private ${d.typeSimple} ${d.name};`)
   }
   lines.push("")
-  lines.push(`    @InjectMocks private ${className}ServiceImpl service;`)
+  lines.push(`    @InjectMocks private ${implCls} service;`)
   lines.push("")
   lines.push("    // @TEST_METHODS_HERE  ← test-gen slave 把本标记替换为 @Test 方法体，勿重写整文件")
   lines.push("}")
   lines.push("")
 
-  const testRel = `src/test/java/service/impl/${className}ServiceImplTest.java`
   safeWriteFile(join(projectRoot, testRel), lines.join("\n"))
   return testRel
 }

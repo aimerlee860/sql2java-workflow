@@ -22,6 +22,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { getLogger } from "./workflow-logger"
+import { loadArchitectureModel } from "./architecture-model"
 
 /** 对齐 UnitTranslationSchema.testCases 元素形状 */
 export interface TestCase {
@@ -89,6 +90,8 @@ export function enumerateTestCases(artifactsDir: string, pkg: string, ref: strin
   }
   const src = stripComments(raw)
   const lineOf = makeLineOf(src)
+  // 异常基类名由架构模型驱动（默认 BusinessException，DDD 则 TranFailException）
+  const exceptionClass = loadArchitectureModel(artifactsDir).exception.baseClass
 
   const negatives: TestCase[] = []
   const boundaries: TestCase[] = []
@@ -107,7 +110,7 @@ export function enumerateTestCases(artifactsDir: string, pkg: string, ref: strin
       type: "negative",
       construct: `RAISE_APPLICATION_ERROR(${code}): ${msg}`,
       setupHint: `mock mapper 使校验失败、触达该 RAISE（错误码 ${code}）`,
-      expectKind: `throws-BusinessException:${code}`,
+      expectKind: `throws-${exceptionClass}:${code}`,
       status: "pending",
     })
   }
