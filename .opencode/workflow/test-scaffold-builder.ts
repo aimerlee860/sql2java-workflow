@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { getLogger } from "./workflow-logger"
 import { safeWriteFile } from "./cross-platform"
-import { loadArchitectureModel, findImplRole } from "./architecture-model"
+import { loadArchitectureModel, findImplRole, resolveModelPath } from "./architecture-model"
 
 /** 读 JSON 文件（不存在/解析失败返回 null）。镜像 workflow-engine.readJsonOrNull，保持自包含。 */
 function readJsonOrNull(path: string): any {
@@ -47,7 +47,8 @@ function resolveUnitClassName(artifactsDir: string, pkg: string, ref: string): s
 
 interface DepField { typeSimple: string; name: string; importLine: string | null }
 
-/** 解析 ServiceImpl 的 final 字段（构造器注入依赖）+ 对应 import。 */
+/** 解析实现类的注入依赖字段（构造器 final 字段 / @Autowired 字段）+ 对应 import。
+ *  4 文件架构用 @RequiredArgsConstructor + final 字段；DDD 用 @Autowired 字段注入——两者都收。 */
 function parseDeps(implSrc: string): DepField[] {
   // import 映射：simpleName → 完整 import 语句（含 static）
   const importMap = new Map<string, string>()
@@ -58,16 +59,24 @@ function parseDeps(implSrc: string): DepField[] {
     const simple = full.split(".").pop()!
     if (!importMap.has(simple)) importMap.set(simple, `import ${im[1] ? "static " : ""}${full};`)
   }
-  // final 字段（@RequiredArgsConstructor 注入点）：[private] final Type name;
   const deps: DepField[] = []
-  const fieldRe = /(?:private\s+|protected\s+|public\s+)?final\s+([\w.]+)\s+(\w+)\s*;/g
+  const seen = new Set<string>()
+  // 字段声明：[private|protected|public] [final] Type name;  —— final 构造器注入点
+  // 或 @Autowired [private|protected|public] Type name;      —— DDD 字段注入点
+  const fieldRe = /(?:@Autowired\s+)?(?:private\s+|protected\s+|public\s+)?(?:final\s+)?([\w.]+)\s+(\w+)\s*;/g
   let fm: RegExpExecArray | null
   while ((fm = fieldRe.exec(implSrc)) !== null) {
     const typeFull = fm[1]
     const typeSimple = typeFull.split(".").pop()!
-    // 排除常见非依赖 final（如 Logger slf4j）——这些不需要 @Mock
-    if (/logger/i.test(typeSimple)) continue
-    deps.push({ typeSimple, name: fm[2], importLine: importMap.get(typeSimple) ?? null })
+    const name = fm[2]
+    // 仅收注入依赖字段：必须带 final（构造器注入）或 @Autowired（字段注入）；裸字段不算
+    const annotated = /@Autowired/.test(fm[0])
+    const isFinal = /\bfinal\b/.test(fm[0])
+    if (!annotated && !isFinal) continue
+    if (/logger/i.test(typeSimple)) continue        // 排除 slf4j Logger 等非业务依赖
+    if (seen.has(name)) continue
+    seen.add(name)
+    deps.push({ typeSimple, name, importLine: importMap.get(typeSimple) ?? null })
   }
   return deps
 }
@@ -87,7 +96,7 @@ export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg
   }
   const className = resolveUnitClassName(artifactsDir, pkg, ref)
   const implCls = `${className}${impl.suffix}`
-  const implRel = `${impl.dir}/${implCls}.java`
+  const implRel = `${resolveModelPath(impl.dir, pkg)}/${implCls}.java`
   const implPath = join(projectRoot, implRel)
   if (!existsSync(implPath)) {
     log?.warn(`test-scaffold-builder: 实现类未落盘 ${implRel}，跳过壳生成（test-gen 自行创建）`)
@@ -96,7 +105,7 @@ export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg
   const implSrc = readFileSync(implPath, "utf-8")
   const deps = parseDeps(implSrc)
   const testCls = `${className}${impl.testSuffix}`
-  const testRel = `${impl.testDir}/${testCls}.java`
+  const testRel = `${resolveModelPath(impl.testDir!, pkg)}/${testCls}.java`
 
   // 幂等守卫：测试文件已存在且 @TEST_METHODS_HERE 标记已消失 = slave 已填充，不得覆盖。
   // 仅当文件不存在或仍含标记（未填充）时才（重新）生成壳。避免 resume/重渲 clobber 已填测试。
@@ -119,7 +128,7 @@ export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg
     "import org.mockito.quality.Strictness;",
     "import static org.mockito.Mockito.*;",
     "import static org.junit.jupiter.api.Assertions.*;",
-    `import ${impl.package}.${implCls};`,
+    `import ${resolveModelPath(impl.package, pkg)}.${implCls};`,
   ])
   const missingTypes: string[] = []
   for (const d of deps) {
@@ -128,7 +137,7 @@ export function buildTestScaffold(projectRoot: string, artifactsDir: string, pkg
   }
 
   const lines: string[] = []
-  lines.push(`package ${impl.package};`)
+  lines.push(`package ${resolveModelPath(impl.package, pkg)};`)
   lines.push("")
   for (const i of imports) lines.push(i)
   if (missingTypes.length) {

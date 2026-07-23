@@ -20,7 +20,7 @@
 
 适用于 PL/SQL 存储过程 → 基于 **4 文件分层架构**（Entity/Mapper/Service/ServiceImpl）的 Spring Boot + MyBatis 工程翻译场景。规约主体为分层架构与存储过程→Java 组件映射规约；版本与框架配置见末尾【强制】段落。
 
-> **架构决策以 `## 架构模型` 段为唯一事实源**：角色集合、角色→目录/后缀映射、实体后缀/注解、异常基类、跨包调用 FQN 模式、覆盖率排除、主类扫描包一律以本规约 `## 架构模型` 段（由 `@include ./arch-model.md` 内联）为准。下方 §一/§3.2/§4.1/§十四 等章节的 4 文件示例仅作说明，与架构模型段冲突时以架构模型段为准。引擎确定性 builder（DO/test-shell/verify/test-case）直接读架构模型，不读本节示例文字。用户 `--spec` 整体替换本规约即可切换架构模型（如换 DDD 规约则 `@include ./arch-model-ddd.md` 按 DDD 跑）。
+> **架构决策以 `## 架构模型` 段为唯一事实源**：角色集合、角色→目录/后缀映射、实体后缀/注解、异常基类、跨包调用 FQN 模式、覆盖率排除、主类扫描包一律以本规约 `## 架构模型` 段（由 `@include ./arch-model.md` 内联）为准。下方 §一/§3.2/§4.1/§十四 等章节的 4 文件示例仅作说明，与架构模型段冲突时以架构模型段为准。引擎确定性 builder（DO/test-shell/verify/test-case）直接读架构模型，不读本节示例文字。用户 `--spec` 整体替换本规约即可切换架构模型（如换 DDD 规约则 `--spec .opencode/docs/ddd/java-code-spec.md` 按 DDD 跑）。
 
 > **结构模型由本规约驱动（架构无关 workflow）**：分层架构、组件角色、层路径、入口角色、测试目标、非业务目录一律以本规约 `## 架构模型` 段为准——workflow 引擎与 agent 提示词不写死任何具体模型，scaffold 据架构模型填 `packageMappings.components[]` 与 `coverageExcludes`，translate/review/verify 据此建壳/翻译/审查/归因。用户 `--spec` 整体替换本规约即可切换架构模型（如换 DDD 规约则按 DDD 跑）。
 

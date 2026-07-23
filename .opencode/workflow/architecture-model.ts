@@ -272,6 +272,12 @@ export function findImplRole(model: ArchitectureModel): RoleSpec | undefined {
     ?? model.roles[0]
 }
 
+/** 解析架构模型路径里的占位符：`{module}` → PL/SQL 包名小写（rooted-module 布局每包一模块）。
+ *  flat-no-root 路径无占位，原样返回。`{packageBase}` 已在模型里展开为具体值，不留占位。 */
+export function resolveModelPath(p: string, pkg: string): string {
+  return p.replace(/\{module\}/g, pkg.toLowerCase())
+}
+
 /** 读 <artifactsDir>/architecture-model.json；缺失/解析失败回退默认并 warn */
 export function loadArchitectureModel(artifactsDir: string): ArchitectureModel {
   const p = join(artifactsDir, "architecture-model.json")

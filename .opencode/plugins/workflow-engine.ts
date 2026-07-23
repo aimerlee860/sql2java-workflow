@@ -41,7 +41,7 @@ import { generateScaffoldInput } from "../workflow/scaffold-input-builder"
 import { generateDoAndH2Schema } from "../workflow/do-schema-builder"
 import {
   parseArchitectureModel, DEFAULT_ARCHITECTURE_MODEL, formatArchitectureModel,
-  loadArchitectureModel, findImplRole,
+  loadArchitectureModel, findImplRole, resolveModelPath,
   type ArchitectureModel,
 } from "../workflow/architecture-model"
 import { enumerateTestCases } from "../workflow/test-case-enumerator"
@@ -1274,7 +1274,7 @@ export function buildCoreSegmentBlock(artifactsDir: string, projectRoot: string 
   // 实现类路径由架构模型驱动（默认 service/impl/{className}ServiceImpl.java，DDD 则 processor/...）
   const impl = findImplRole(loadArchitectureModel(artifactsDir))
   const implPath = projectRoot && impl
-    ? join(projectRoot, impl.dir, `${className}${impl.suffix}.java`)
+    ? join(projectRoot, resolveModelPath(impl.dir, pkg), `${className}${impl.suffix}.java`)
     : null
   let implSrc: string | null = null
   if (implPath && existsSync(implPath)) {
