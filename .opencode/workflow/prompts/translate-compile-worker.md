@@ -15,7 +15,7 @@
 ### 2. 封口（语法通过后）
 写 per-unit JSON `translations/{pkg}/{ref}.json`：
 - `status: "completed"`
-- `subprogramMethods`：本 unit 所有子程序（根 + cargo）→ Java 类/方法/文件映射，**javaFile 填全**。`javaClass` = 对外入口角色类全限定名，无根包模型下 = `service.{className}Service`（`className` 见上方「本 unit 文件清单」已注入，跨包去重后基名，勿查 scaffold.json）；`javaMethod` = 入口方法名；`javaFile` = 相对 projectRoot 的入口类文件路径（`src/main/java/service/{className}Service.java`）。
+- `subprogramMethods`：本 unit 所有子程序（根 + cargo）→ Java 类/方法/文件映射，**javaFile 填全**。`javaClass` = 对外入口角色类全限定名，按架构模型段 `crossPackageCall.fqnPattern` 派生（默认 `service.{className}Service`，DDD 则 `com.example.mfgerp.{module}.access.{className}AccessIntf`；`className` 见上方「本 unit 文件清单」已注入，跨包去重后基名，勿查 scaffold.json）；`javaMethod` = 入口方法名；`javaFile` = 相对 projectRoot 的入口类文件路径（按架构模型段入口角色 `dir`，默认 `src/main/java/service/{className}Service.java`）。
 - `completedSubprograms` / `files` / `decisions` / `todos` 按 UnitTranslationSchema 填。
 - 聚合 `translations/{pkg}/translation.json` 由 engine 自动 merge，**不直接写**。
 

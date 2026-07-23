@@ -131,7 +131,7 @@ sub-stage 序列：skeleton → translate-core → test-gen → static-check →
 |-----------|-------------|------|
 | skeleton | translate-skeleton | 未实现 Java 文件 + 方法签名桩 + `// TODO:` 占位（可编译桩）+ **FSD 设计稿 `fsd/{pkg}/{ref}.md`**（约束下游）；>500 行过程切多段写 `segments[]` |
 | translate-core | translate-core | 每次填一个 `// TODO:[seg-N]` 段、保留其它段、回写 `segments[].status=done`；单段过程一次填完；**遵循设计稿第 6 板块转化规约** |
-| test-gen | translate-test | 仅 `{Proc}ServiceImplTest`（engine 已确定性生成 Mockito 壳 + 注入 `testCases[]` 清单，slave 按清单填 @Test 体）；**参考设计稿第 4 板块业务规则设计断言** |
+| test-gen | translate-test | 仅实现层测试类 `{Proc}{impl.testSuffix}`（engine 已确定性生成 Mockito 壳 + 注入 `testCases[]` 清单，slave 按清单填 @Test 体）；**参考设计稿第 4 板块业务规则设计断言** |
 | static-check | translate-lint | `translations/{pkg}/{ref}.lint.json`（TODO 残留 / checkstyle / pmd / javaFile 完整性，不修复） |
 | compile | translate-compile | javac 语法校验 + 修复循环 + 封口 `translations/{pkg}/{ref}.json`（status=completed） |
 | summary | translate-summary | `summary/{pkg}/{ref}.md`（6 板块实际值 + 第 7 设计 vs 实施偏差对照，对照 skeleton 设计稿 `fsd/{pkg}/{ref}.md`） |

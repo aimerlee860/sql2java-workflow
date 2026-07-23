@@ -29,11 +29,11 @@
 
 | 类型 | 识别特征 | 处理 |
 |---|---|---|
-| 自定义 DO | 联表 JOIN 查询 或 计算字段（如 `amount * rate`） | 个性化设计：业务前缀（`{业务前缀}{功能}DO`，如 `FxTradeQueryDO`）+ `resultMap` 映射驼峰↔下划线；计算字段用 SQL `AS 别名` + resultMap 映射 |
-| 标准 DO | 单表查询（`SELECT *` 或部分字段），无联表无计算 | 复用 scaffold 全局 DO（DDL 字段固定，Java 中只用需要的字段即可，无需新建） |
+| 自定义实体 | 联表 JOIN 查询 或 计算字段（如 `amount * rate`） | 个性化设计：业务前缀（`{业务前缀}{功能}{实体后缀}`，后缀取架构模型段 `entity.suffix`，默认 `DO`，如 `FxTradeQueryDO`）+ `resultMap` 映射驼峰↔下划线；计算字段用 SQL `AS 别名` + resultMap 映射 |
+| 标准实体 | 单表查询（`SELECT *` 或部分字段），无联表无计算 | 复用 scaffold 全局实体（DDL 字段固定，Java 中只用需要的字段即可，无需新建） |
 
-- DO 字段必须与 inventory/schema 一致，**禁止编造**；发现不一致立即修复或标 TODO。
-- **禁止为图新程序方便而修改已有 DO**——新程序通过新 DTO 或 Map 适配。
+- 实体字段必须与 inventory/schema 一致，**禁止编造**；发现不一致立即修复或标 TODO。
+- **禁止为图新程序方便而修改已有实体**——新程序通过新 DTO 或 Map 适配。
 
 ## 四、Mapper XML 规范
 
@@ -120,7 +120,7 @@ public Response myMethod(Request request) {
 
 - [ ] 被填段无 `// TODO:` 残留；**未填段保留其 `// TODO:[seg-*]` 不动**（多段切分时）
 - [ ] 多段切分时已回写 sidecar `translations/{pkg}/{ref}.segments.json` 的 `segments[].status="done"`；只用方法头已声明的过程级局部变量、未新增过程级变量
-- [ ] DO 分类正确，字段与 inventory 一致，未编造
+- [ ] 实体分类正确，字段与 inventory 一致，未编造
 - [ ] Mapper XML 无 `SELECT *`、表名带 schema、比较符号已转义或 CDATA、未调存储过程
 - [ ] Mapper XML SQL 与 source.sql 函数定义逐行一致，未优化
 - [ ] 所有 BigDecimal 除法带 `(, 10, RoundingMode.DOWN)`

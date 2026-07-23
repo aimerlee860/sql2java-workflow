@@ -23,12 +23,12 @@
 
 ### 索引字段要求
 
-| 字段 | 内容 | 示例 |
+| 字段 | 内容 | 示例（默认 4 文件架构；DDD 按架构模型段角色/目录派生） |
 |---|---|---|
 | 子程序 refName | inventory 算好的 refName（重载带 `__序号`） | `r_fxsp_imp` |
 | SQL 完整路径 | `schema.pkg.funcName` 格式 | `gmo.p_gmo_fx_trade_import.r_fxsp_imp` |
-| Java 方法 | `className.methodName()` 格式 | `FxspImpServiceImpl.fxspImp()` |
-| Java 文件相对路径 | 从 projectRoot 起的相对路径（无根包，按角色顶层包） | `src/main/java/service/impl/FxspImpServiceImpl.java` |
+| Java 方法 | `className.methodName()` 格式（className 含角色后缀） | `FxspImpServiceImpl.fxspImp()` |
+| Java 文件相对路径 | 从 projectRoot 起的相对路径（按架构模型段角色 `dir`） | `src/main/java/service/impl/FxspImpServiceImpl.java` |
 
 - 序号递增、路径可定位到文件、命名可追溯（过程名↔方法名）。
 - **维护要求**：完成后立即登记（不延后）、路径准确可定位、翻译逻辑与原始 PL/SQL 定义一致（详细设计基准）。

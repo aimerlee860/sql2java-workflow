@@ -17,34 +17,25 @@
 
 1. **去除 SQL 前缀**：禁止保留 `f_`/`r_`/`sp_` 等 SQL 函数/存储过程前缀。
 2. **PascalCase** 大驼峰命名，文件名清晰表达业务功能。
-3. **类型后缀**：必须含相应类型后缀（Service/ServiceImpl/Request/Response/Mapper/DO 等）。
-4. **类名派生**：`{className}{RoleSuffix}`（`className` 查 `{artifactsDir}/scaffold.json` 的 `generated.procClassNames`——本 unit 的 `plsqlPackage`+`refName` 对应项，已跨包去重，无碰撞 = `{ProcPascal}`，碰撞带数字后缀；`RoleSuffix` 按 Java 代码规约 §4.1 命名约定由 role 派生）。**禁止自行编造类名**——角色集查 `packageMappings` 的 `components[]`（无 javaPackage）。
+3. **类型后缀**：按架构模型段各角色 `suffix` 派生（默认架构：Service/ServiceImpl/Mapper；实体后缀见架构模型段，默认 DO）。
+4. **类名派生**：`{className}{RoleSuffix}`（`className` 查 `{artifactsDir}/scaffold.json` 的 `generated.procClassNames`——本 unit 的 `plsqlPackage`+`refName` 对应项，已跨包去重，无碰撞 = `{ProcPascal}`，碰撞带数字后缀；`RoleSuffix` 取架构模型段对应角色的 `suffix`）。**禁止自行编造类名**——角色集查 `packageMappings` 的 `components[]`（无 javaPackage）。
 5. **命名冲突检查**：跨包同名过程由 `procClassNames.className` 去重保证文件名不冲突，**必须用 `className` 派生文件名，不得自拼过程名**；文件名/路径层不得用 Java 关键字（`import`/`package`/`class` 等）。
 
 ## 四、包路径规范
 
-无根包扁平分层（Java 代码规约 §工程结构，角色→顶层包固定）：
+按架构模型段（`## 架构模型`）的角色→目录映射落位（默认无根包扁平分层：service/service.impl/mapper 等顶层包；DDD 则 `{packageBase}/{module}/...`）：
 
-| 分类 | 路径（相对 projectRoot） |
-|---|---|
-| Service 接口 | `src/main/java/service/` |
-| ServiceImpl | `src/main/java/service/impl/` |
-| Mapper 接口 | `src/main/java/mapper/` |
-| Mapper XML | `src/main/resources/mapper/`（扁平） |
-| 包级常量类 | `src/main/java/constant/`（scaffold 生成，只读） |
-| 包级变量 DTO | `src/main/java/dto/`（scaffold 生成，只读） |
-| DO 实体类 | `src/main/java/entity/`（scaffold 生成，只读） |
-| 工具类 | `src/main/java/util/` |
-
-- 文件位置 = `{projectRoot}/src/main/java/{角色顶层包}/{className}{RoleSuffix}.java`（service→`service`、service-impl→`service.impl`、mapper→`mapper`）。
+- 文件位置 = `{projectRoot}/{角色 dir}/{className}{RoleSuffix}.java`（`dir` 取架构模型段对应角色）。
+- 包级常量类/变量 DTO 落位取架构模型段 `packageArtifacts`（默认 `constant/` 与 `dto/`，scaffold 生成只读）。
+- 实体类落位取架构模型段 `entity.dir`（默认 `entity/`，scaffold 生成只读）。
 - ❌ 路径层禁含 `import`/`package`/`class` 关键字、空格、中文、特殊符号。
-- Mapper XML：`{projectRoot}/src/main/resources/mapper/{className}Mapper.xml`，namespace = `mapper.{className}Mapper`。
+- Mapper XML：`{projectRoot}/{mapper 角色 xmlDir}/{className}{mapper 角色 suffix}.xml`（默认 `src/main/resources/mapper/{className}Mapper.xml`），namespace = `{mapper 角色 package}.{className}{mapper 角色 suffix}`（默认 `mapper.{className}Mapper`）。
 
-## 五、DO 实体类
+## 五、实体类
 
-- scaffold 阶段已生成全局 DO 实体类，skeleton **只读引用**，不重建、不修改、不覆盖。
-- DO 字段必须与 inventory/schema 定义一致，**禁止编造字段**；发现不一致标 `// TODO: [translate]` 交下游，不在 skeleton 改 DO。
-- 单表查询 DO 复用 scaffold 全局 DO；联表/计算字段 DO（自定义 DO）由 translate-core 设计，skeleton 不提前建。
+- scaffold 阶段已生成全局实体类（后缀/目录/注解按架构模型段，默认 `XxxDO` @ `entity/`），skeleton **只读引用**，不重建、不修改、不覆盖。
+- 实体字段必须与 inventory/schema 定义一致，**禁止编造字段**；发现不一致标 `// TODO: [translate]` 交下游，不在 skeleton 改实体。
+- 单表查询复用 scaffold 全局实体；联表/计算字段实体（自定义）由 translate-core 设计，skeleton 不提前建。
 
 ## 六、方法签名桩
 
@@ -79,7 +70,7 @@
 
 ## 七、包级常量/变量
 
-- scaffold 已生成 per-package `{Pkg}Constant`（`constant/`，Java 代码规约 §3.4，常量 `static final` 直引）与 `{Pkg}StateDTO`（`dto/`，§3.5，变量注入 DTO bean getter/setter）。skeleton **只读引用**，不重建、不修改。
+- scaffold 已生成 per-package `{Pkg}Constant` 与 `{Pkg}StateDTO`（后缀/落位目录按架构模型段 `packageArtifacts`，默认 `constant/` 与 `dto/`；常量 `static final` 直引、变量注入 DTO bean getter/setter，详见 Java 代码规约 §3.4/§3.5）。skeleton **只读引用**，不重建、不修改。
 
 ## 八、注释规范
 

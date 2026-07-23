@@ -1,6 +1,6 @@
-# Project Spec — test-gen 子阶段（ServiceImpl 单元测试）
+# Project Spec — test-gen 子阶段（实现层单元测试）
 
-> 本规约由引擎注入 translate-test 子 agent 系统提示词。融合自《单元测试生成规约（行覆盖率导向）》，已适配本工作流 per-proc 架构。**仅对 `{Proc}ServiceImpl.java` 生成单元测试**（Mockito），不再生成 Mapper 集成测试。
+> 本规约由引擎注入 translate-test 子 agent 系统提示词。融合自《单元测试生成规约（行覆盖率导向）》，已适配本工作流 per-proc 架构。**仅对实现层角色类（架构模型段 `implRole` 标记的角色，默认 `{Proc}ServiceImpl.java`）生成单元测试**（Mockito），不再生成 Mapper 集成测试。
 
 ## 一、核心原则
 
@@ -10,21 +10,21 @@
 
 ## 二、测试文件位置与命名
 
-- 目录（无根包，按角色顶层包）：`{projectRoot}/src/test/java/service/impl/`。
-- 类名：`{className}ServiceImplTest`（`className` 查 `scaffold.json.generated.procClassNames`，如 `GetTrdDtl` → `GetTrdDtlServiceImplTest`）。
-- **只生成 ServiceImplTest，不生成 MapperIntegrationTest**。
+- 目录与类名按架构模型段实现层角色（`implRole`）的 `testDir`/`testSuffix`（默认 `src/test/java/service/impl/` + `{className}ServiceImplTest`；DDD 则 processor 的 `testDir` + `{className}ProcessorTest`）。
+- `className` 查 `scaffold.json.generated.procClassNames`（如 `GetTrdDtl` → 默认 `GetTrdDtlServiceImplTest`）。
+- **只生成实现层测试类，不生成 MapperIntegrationTest**。
 
 ## 三、测试壳（engine 确定性预生成，勿重写整文件）
 
-engine 派发前已由 `test-scaffold-builder` 解析 `{className}ServiceImpl.java` 的构造器 final 字段（= 注入依赖），确定性生成 Mockito 壳并落盘 `{className}ServiceImplTest.java`：
+engine 派发前已由 `test-scaffold-builder` 解析实现类（架构模型段 `implRole` 角色）的构造器 final 字段（= 注入依赖），确定性生成 Mockito 壳并落盘测试类（默认 `{className}ServiceImplTest.java`）：
 
 ```java
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class XxxServiceImplTest {
+class XxxServiceImplTest {        // 类名 = {className}{impl.testSuffix}，按架构模型段
     @Mock private XxxMapper xxxMapper;
     @Mock private OtherService otherService;   // 每个 final 字段一个 @Mock
-    @InjectMocks private XxxServiceImpl service;
+    @InjectMocks private XxxServiceImpl service;  // 类型 = {className}{impl.suffix}
 
     // @TEST_METHODS_HERE  ← 把本标记替换为 @Test 方法体，勿重写整文件、勿改 @Mock/@InjectMocks
 }
@@ -32,7 +32,7 @@ class XxxServiceImplTest {
 
 - 你的工作：用 `edit` 把 `// @TEST_METHODS_HERE` 标记替换为 @Test 方法体。**不得重写整文件、不得改 @Mock/@InjectMocks 声明**（依赖可能你没全认出，壳已按构造器全量 mock）。
 - 若 import 缺失（壳里有 `// TODO: 补 import` 注释），补上对应 import。
-- 若壳未生成（ServiceImpl 未落盘等降级情形），自行创建完整测试类。
+- 若壳未生成（实现类未落盘等降级情形），自行创建完整测试类。
 
 ## 四、Mock 策略
 
@@ -48,7 +48,7 @@ class XxxServiceImplTest {
 |---|---|
 | `caseId` | 方法名后缀，如 `test_case_1_raise_20001` |
 | `type=positive` | mock 使分支条件成立，`assertNotNull`/返回值断言 |
-| `type=negative` | mock 使校验失败触达 RAISE；`expectKind=throws-BusinessException:<code>` → `assertThrows(BusinessException.class, ...)` + 错误码断言 |
+| `type=negative` | mock 使校验失败触达 RAISE；`expectKind=throws-{异常基类}:<code>`（异常基类取架构模型段 `exception.baseClass`，默认 `BusinessException`，DDD 则 `TranFailException`）→ `assertThrows({异常基类}.class, ...)` + 错误码断言 |
 | `type=boundary` | 循环：mock 返回空集/单条/满集；DEFAULT NULL：传 null 触发 NVL 分支 |
 | `setupHint` | mock 配置指引（参考，可细化） |
 | `plsqlLine` | 注释标明覆盖的 PL/SQL 行 |
@@ -58,7 +58,7 @@ class XxxServiceImplTest {
 void test_case_2_negative_raise_20001() {
     // L47 RAISE_APPLICATION_ERROR(-20001,'参数为空')
     when(mapper.selectById(null)).thenReturn(null);
-    BusinessException ex = assertThrows(BusinessException.class, () -> service.execute(req));
+    BusinessException ex = assertThrows(BusinessException.class, () -> service.execute(req));  // 异常类按架构模型段
     assertEquals("20001", ex.getCode());
 }
 ```
@@ -90,9 +90,9 @@ Whitebox.setInternalState(service, "initialized", true);
 
 ## 十、检查清单
 
-- [ ] 只产 `{className}ServiceImplTest`，无 MapperIntegrationTest
+- [ ] 只产实现层测试类（`{className}{impl.testSuffix}`），无 MapperIntegrationTest
 - [ ] 按注入 `testCases[]` 清单逐条填 @Test，未自发明用例
 - [ ] 用 `edit` 替换 `// @TEST_METHODS_HERE` 标记，未重写整文件、未改 @Mock/@InjectMocks
-- [ ] negative 用例用 `assertThrows(BusinessException.class)` + 错误码
+- [ ] negative 用例用 `assertThrows({异常基类}.class)`（架构模型段 `exception.baseClass`）+ 错误码
 - [ ] 所有测试可编译、可运行
 - [ ] 未改翻译产物（只读 Java，写测试）；未改已有测试
