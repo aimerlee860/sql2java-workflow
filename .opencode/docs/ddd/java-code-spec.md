@@ -25,7 +25,7 @@
 
 > **包根项目特定**：规约中出现的 `com.icbc.fmhm` 仅为举例，实际包根由 plan 阶段按目标项目推导（架构模型段 `packageBase`，如 `com.example.mfgerp`、`com.icbc.fmhm` 等）。工程结构路径用 `{packageBase}`（项目根包）与 `{module}`（模块名）占位符表达。
 
-> **工程结构章节**：下方 `## 工程结构` 为单模块的 DDD 分层目录布局模板。`{packageBase}` = 架构模型段 packageBase；`{module}` = packageMapping 的模块名。scaffold 按每个 Oracle 包对应的模块复制此布局（基础设施层为项目级共享，按 packageBase 只建一次）。该章节正文仅含可解析路径（行内 `#` 注释由引擎剥离），供 scaffold 消费。
+> **工程结构章节**：下方 `## 工程结构` 为单模块的 DDD 分层目录布局模板。`{packageBase}` = 架构模型段 packageBase；`{module}` = **`plsqlPackage` 小写**（引擎与 scaffold/skeleton 一致派生，见架构模型段 `{module}` 占位契约）。scaffold 按每个 Oracle 包对应的模块复制此布局（基础设施层为项目级共享，按 packageBase 只建一次）。该章节正文仅含可解析路径（行内 `#` 注释由引擎剥离），供 scaffold 消费。
 
 ## 工程结构
 

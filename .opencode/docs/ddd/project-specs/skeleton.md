@@ -29,7 +29,7 @@
 
 按架构模型段（`## 架构模型`）的角色→目录映射落位（DDD 有根包 `com.example.mfgerp`，按 `{packageBase}/{module}/<层>` 组织）：
 
-- 文件位置 = `{projectRoot}/{角色 dir}/{className}{RoleSuffix}.java`（`dir` 取架构模型段对应角色，含 `{module}` 占位由 plan 阶段推导的模块名替换）。
+- 文件位置 = `{projectRoot}/{角色 dir}/{className}{RoleSuffix}.java`（`dir` 取架构模型段对应角色，含 `{module}` 占位 = **`plsqlPackage` 小写**，与引擎 resolveModelPath 一致派生）。
 - Mapper XML：`{projectRoot}/{mapper 角色 xmlDir}/{className}Mapper.xml`（namespace = `{mapper 角色 package}.{className}Mapper`）。
 - ❌ 路径层禁含 `import`/`package`/`class` 关键字、空格、中文、特殊符号。
 

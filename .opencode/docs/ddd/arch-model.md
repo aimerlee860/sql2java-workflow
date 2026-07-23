@@ -3,6 +3,12 @@
 > DDD 领域驱动分层架构模型。本段是架构决策唯一事实源，被 `@include` 内联进 DDD 主规约后
 > 对所有写 Java 的 agent 可见，同时由引擎解析成 `ArchitectureModel` 供确定性 builder 消费。
 > `###` 子节标题为固定契约，正文用表格 + `- key: value` 列表。
+>
+> **`{module}` 占位契约**：路径/包里的 `{module}` = **`plsqlPackage` 小写**（去 schema 前缀的包名末段小写）。
+> 引擎 resolveModelPath 与 scaffold/skeleton 一致用此派生，每包一模块。如 schema-qualified 包
+> `MFG_ERP.F_ORDER` → module `f_order` → 路径 `src/main/java/com/example/mfgerp/f_order/processor/`、
+> 包 `com.example.mfgerp.f_order.processor`。不得用其它模块名或保留 schema 前缀，否则引擎确定性
+> builder（test-scaffold/buildCoreSegmentBlock 按此派生查实现类）找不到文件。
 
 ### layout
 rooted-module

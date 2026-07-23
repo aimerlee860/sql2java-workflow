@@ -272,10 +272,14 @@ export function findImplRole(model: ArchitectureModel): RoleSpec | undefined {
     ?? model.roles[0]
 }
 
-/** 解析架构模型路径里的占位符：`{module}` → PL/SQL 包名小写（rooted-module 布局每包一模块）。
- *  flat-no-root 路径无占位，原样返回。`{packageBase}` 已在模型里展开为具体值，不留占位。 */
+/** 解析架构模型路径里的占位符：`{module}` → PL/SQL 包名（去 schema 前缀）小写。
+ *  rooted-module 布局每包一模块。pkg 可能是 schema-qualified（如 `MFG_ERP.F_ORDER`，pkgOf 后带点），
+ *  取末段（`F_ORDER`）小写得 module —— 与 scaffold/skeleton 用 `plsqlPackage`（不含 schema）小写一致，
+ *  避免把 schema 的 `.` 带进路径/包名（路径里 `.` 非法、与 LLM 建的目录不一致）。
+ *  flat-no-root 路径无 `{module}` 占位，原样返回。`{packageBase}` 已在模型里展开为具体值，不留占位。 */
 export function resolveModelPath(p: string, pkg: string): string {
-  return p.replace(/\{module\}/g, pkg.toLowerCase())
+  const moduleSeg = pkg.slice(pkg.lastIndexOf(".") + 1).toLowerCase()
+  return p.replace(/\{module\}/g, moduleSeg)
 }
 
 /** 读 <artifactsDir>/architecture-model.json；缺失/解析失败回退默认并 warn */

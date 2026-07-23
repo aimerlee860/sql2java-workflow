@@ -19,6 +19,7 @@ import {
   findImplRole,
   loadArchitectureModel,
   formatArchitectureModel,
+  resolveModelPath,
 } from "@workflow/architecture-model"
 
 const FOUR_FILE_BODY = `
@@ -241,6 +242,23 @@ describe("loadArchitectureModel", () => {
     writeFileSync(join(dir, "architecture-model.json"), "{not json")
     const m = loadArchitectureModel(dir)
     expect(m.layout).toBe("flat-no-root")
+  })
+})
+
+describe("resolveModelPath — {module} 占位", () => {
+  it("schema-qualified pkg 取末段小写（去 schema 前缀，不带点）", () => {
+    // pkg = pkgOf("MFG_ERP.F_ORDER.r_xxx") = "MFG_ERP.F_ORDER"（带 schema 点）
+    expect(resolveModelPath("src/main/java/com/example/mfgerp/{module}/processor", "MFG_ERP.F_ORDER"))
+      .toBe("src/main/java/com/example/mfgerp/f_order/processor")
+    expect(resolveModelPath("com.example.mfgerp.{module}.processor", "MFG_ERP.F_ORDER"))
+      .toBe("com.example.mfgerp.f_order.processor")
+  })
+  it("无 schema 的 pkg 原样小写", () => {
+    expect(resolveModelPath("src/main/java/com/example/mfgerp/{module}/processor", "FX_SP"))
+      .toBe("src/main/java/com/example/mfgerp/fx_sp/processor")
+  })
+  it("无 {module} 占位的路径原样返回（flat-no-root）", () => {
+    expect(resolveModelPath("src/main/java/service/impl", "ANY")).toBe("src/main/java/service/impl")
   })
 })
 

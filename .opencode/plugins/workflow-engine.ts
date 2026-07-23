@@ -3554,11 +3554,16 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               ?? DEFAULT_ARCHITECTURE_MODEL
             metadata.architectureModel = archModel
             // 持久化到 artifactsDir，供确定性 builder（do-schema/test-scaffold/verify/test-case-enumerator/
-            // review-focus/buildCoreSegmentBlock）经 loadArchitectureModel(artifactsDir) 读取
+            // review-focus/buildCoreSegmentBlock）经 loadArchitectureModel(artifactsDir) 读取。
+            // 仅在文件不存在时写——resume-via-start（重发 start 但未重传 --spec）不覆盖已有模型，
+            // 避免 DDD run 的 architecture-model.json 被默认 4 文件模型覆盖导致 builder 静默切回。
             try {
               const archDir = join(ARTIFACT_DIR, runId)
-              mkdirSync(archDir, { recursive: true })
-              safeWriteFile(join(archDir, "architecture-model.json"), JSON.stringify(archModel, null, 2))
+              const archFile = join(archDir, "architecture-model.json")
+              if (!existsSync(archFile)) {
+                mkdirSync(archDir, { recursive: true })
+                safeWriteFile(archFile, JSON.stringify(archModel, null, 2))
+              }
             } catch (e: any) {
               getLogger().warn("[workflow-engine]", `写入 architecture-model.json 失败（非阻断）: ${e.message}`)
             }
