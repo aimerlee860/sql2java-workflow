@@ -201,14 +201,20 @@ function finalizeInventoryIndex(
     const last = pkg.split(".").pop() ?? pkg
     return externalUtilPrefixes.some(p => last.startsWith(p))
   }
+  // PL/SQL 集合内置方法（nested table / VARRAY）：collection.METHOD(...) 不是子程序调用，
+  // 被限定名解析误抓成跨包调用（如 MFG_ERP.OT_ALLOC.EXTEND）时静默丢弃，不记未解析 warning。
+  // 真有同名子程序会在 subprogramIndex 命中、不进此分支，故仅降噪不改行为。
+  const collectionMethods = new Set(["EXTEND", "COUNT", "FIRST", "LAST", "TRIM", "DELETE", "EXISTS", "NEXT", "PRIOR", "LIMIT"])
+  const isCollectionMethod = (name: string): boolean => collectionMethods.has(name.toUpperCase())
   for (const s of subprogramList) {
     const seen = new Set<string>()
     const filtered: DirectCall[] = []
     for (const c of s.directCalls) {
       const methods = subprogramIndex.get(c.package)
       if (!methods || !methods.has(c.name)) {
-        // 仅限定调用（跨包 2/3 段写法）记 warning；裸名（同包，含类型构造器/集合访问噪声）静默
-        if (c.package !== s.belongToPackage && !isExternalUtilPkg(c.package)) {
+        // 仅限定调用（跨包 2/3 段写法）记 warning；裸名（同包，含类型构造器/集合访问噪声）静默；
+        // 集合方法（EXTEND/COUNT/...）亦静默——非子程序调用，误抓噪声。
+        if (c.package !== s.belongToPackage && !isExternalUtilPkg(c.package) && !isCollectionMethod(c.name)) {
           const wkey = `${s.belongToPackage}.${s.name}->${c.package}.${c.name}`
           if (!warnedUnresolved.has(wkey)) {
             warnedUnresolved.add(wkey)
