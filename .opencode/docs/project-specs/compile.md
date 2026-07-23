@@ -31,6 +31,7 @@
 | Java 文件相对路径 | 从 projectRoot 起的相对路径（无根包，按角色顶层包） | `src/main/java/service/impl/FxspImpServiceImpl.java` |
 
 - 序号递增、路径可定位到文件、命名可追溯（过程名↔方法名）。
+- **维护要求**：完成后立即登记（不延后）、路径准确可定位、翻译逻辑与原始 PL/SQL 定义一致（详细设计基准）。
 - `completedSubprograms`、`files`、`decisions`、`todos` 等按 UnitTranslationSchema 填。
 
 ## 四、编译检查清单

@@ -26,9 +26,10 @@
 
 1. **禁止 `SELECT *`**——必须明确列出所有字段。
 2. **表名用 `schema.tableName`** 格式（schema 从 inventory/scaffold 取，禁凭空猜测）。
-3. **比较符号 XML 转义**：`<`→`&lt;`、`>`→`&gt;`、`<=`→`&lt;=`、`>=`→`&gt;=`、`&`→`&amp;`。
-4. **占位符用 `#{}`**，namespace 对应 Mapper 接口全限定名。
+3. **比较符号 XML 转义或 CDATA**：`<`→`&lt;`（或 `<![CDATA[<]]>`）、`>`→`&gt;`（或 `<![CDATA[>]]>`）、`<=`→`&lt;=`（或 `<![CDATA[<=]]>`）、`>=`→`&gt;=`（或 `<![CDATA[>=]]>`）、`&`→`&amp;`。两者皆可，整段复杂条件推荐 CDATA。
+4. **占位符用 `#{}`**（禁 `${}`），namespace 对应 Mapper 接口全限定名。
 5. **禁止 Mapper XML 调用存储过程**（去存储过程化目标）：XML 只查原始字段；存储过程调用改为 Java Service 层调已转换的 Service 方法，结果 set 回 DTO。
+6. **SQL 与函数定义一致**：Mapper XML 中 SQL 必须与 `shard-inputs/{pkg}/{ref}/source.sql` 函数定义逐行一致，禁私自优化/简化/改写（WHERE 条件、子查询结构、固定值）。
 
 ```xml
 <!-- ❌ 错：XML 中调存储过程 -->
@@ -42,7 +43,7 @@ t1.{col} AS {col}
 | 场景 | 处理 |
 |---|---|
 | INSERT | VALUES 中直接用 `seq_xxx.NEXTVAL` |
-| SELECT 查序列 | 单独 `selectNextval()` 方法查询，禁在业务查询 SQL 中直接 NEXTVAL（浪费序列号） |
+| SELECT 查序列 | 单独 `selectNextval()` 方法查询，禁在业务查询 SQL 中直接 NEXTVAL（浪费序列号）；GaussDB 虚拟表写 `SELECT seq_xxx.NEXTVAL FROM sys_dummy` |
 
 ## 六、BigDecimal 除法（硬规则）
 
@@ -63,6 +64,7 @@ BigDecimal r = amount.multiply(price).divide(new BigDecimal("100"), 10, Rounding
 2. **每个可能异常的存过/函数在方法内 try-catch 自处理**：catch 中仅记日志 + 设置错误响应（`flag=1, msg=e.getMessage()`），返回响应对象。
 3. **SELECT INTO 空值 + `EXCEPTION WHEN no_data_found`**：查询结果为空会抛 `no_data_found`，Java 中判空后用 `Validate.notNull(xxx, "no_data_found")`——**唯一可外抛的例外**；其余异常一律不外抛。
 4. **try-catch 开头规则**：伪代码/翻译无需 try-catch 开头，除非存过 SQL 是 `BEGIN` 开头。
+5. **LogUtil 必须注入非静态**：日志统一用注入的 `log`（`log.error(...)`），禁止静态 `LogUtil` 调用、禁止私自 new 静态 LogUtil。
 
 ```java
 // ✅ 正确：仅记日志返回错误
@@ -94,7 +96,8 @@ public Response myMethod(Request request) {
 
 ## 十、翻译忠实度
 
-- 严格匹配 SQL 原始逻辑：`nvl`→`Optional/null` 判断、`decode`→`switch/if-else`、分支条件/循环边界/赋值顺序保持一致。
+- 严格匹配 SQL 原始逻辑：`nvl(a,b)`→`a != null ? a : b`、`nvl2(a,b,c)`→`a != null ? b : c`、`decode(a,v1,r1,v2,r2,default)`→`switch/if-else`；分支条件/循环边界/赋值顺序保持一致。
+- **复用节点调用标注**：调用跨包/已转方法处加注释 `// ★ 复用节点调用：{子函数名}（原始 SQL 行号：XX）`，含 Java 方法名 + 文件路径来源。
 - `if-else-if` 必须形成连续链式结构，不可拆分。
 - 不随意加 `LIMIT 1`（除非原 SQL 已有一行限制）。
 - 分立 SELECT 保持独立调用（不合并）；游标循环用 for-each（不优化为 stream）。
@@ -103,9 +106,12 @@ public Response myMethod(Request request) {
 
 - [ ] 文件无 `// TODO: [translate]` 残留
 - [ ] DO 分类正确，字段与 inventory 一致，未编造
-- [ ] Mapper XML 无 `SELECT *`、表名带 schema、比较符号已转义、未调存储过程
+- [ ] Mapper XML 无 `SELECT *`、表名带 schema、比较符号已转义或 CDATA、未调存储过程
+- [ ] Mapper XML SQL 与 source.sql 函数定义逐行一致，未优化
 - [ ] 所有 BigDecimal 除法带 `(, 10, RoundingMode.DOWN)`
 - [ ] 无 `throw`/`throws`，异常方法内自处理；no_data_found 用 Validate.notNull
+- [ ] 日志用注入 `log`，无静态 LogUtil
+- [ ] 序列号 SELECT 用单独方法（GaussDB `FROM sys_dummy`）
 - [ ] 未擅自加提前 return（对照 SQL）
 - [ ] 未识别变量已查来源，未硬编码
 - [ ] 翻译忠实 SQL（nvl/decode/分支/循环），if-else-if 链式

@@ -12,6 +12,10 @@
 2. **checkstyle / pmd**：环境可用则跑规约扫描；不可用降级为 grep 级检查。
 3. **语法快查**：括号/分号/关键字等明显语法问题。
 4. **subprogramMethods javaFile 完整性**：核对 per-unit 映射的 javaFile 非空（compile 封口前门禁）。
+5. **Mapper XML 特殊语法**：比较符号已转义（`&lt;` 等）或 CDATA 包裹；`<if>`/`<choose>` 语法正确；无 XML 解析错。
+6. **序列号检查**：序列号均经 Mapper XML 实现（GaussDB `SELECT seq_xxx.NEXTVAL FROM sys_dummy`）；业务查询 SQL 未直接 NEXTVAL。
+7. **变量声明位置**：非局部变量声明在主函数顶层（供全函数读取）；未识别变量已查依赖签名块/`shard-inputs/{pkg}/{ref}/source.sql` 确认常量声明，未硬编码。
+8. **try-catch 结构**：非 `BEGIN` 开头的存过不应强加 try-catch 开头；`else if` 必须连上一个 `if`，不可拆分。
 
 ## 三、命名 / 包路径 / Java 关键字检查
 
@@ -30,6 +34,12 @@
 - 每个 SELECT INTO / no_data_found 是否用 `Validate.notNull(...)` 判空。
 - 违规记 `{file, line, rule:"exception-spec", message}`。
 
+## 四bis、BigDecimal 除法规范检查
+
+- 所有 `BigDecimal.divide()` 必须指定舍入模式与精度：`divide(divisor, 10, RoundingMode.DOWN)`（截断 10 位）。
+- 禁无舍入模式除法（`ArithmeticException` 风险）；禁 `RoundingMode.HALF_UP`（不符截断业务要求）。
+- 违规记 `{file, line, rule:"bigdecimal-divide", message}`。
+
 ## 五、语义自审（LLM，对照源码）
 
 读本 unit per-proc Java 文件 + PL/SQL 切片 `shard-inputs/{pkg}/{ref}/source.sql` + 依赖签名块，按 9 类语义信号核对 Java 是否忠实反映 PL/SQL（信号同 reviewer 21 类清单的语义子集）：
@@ -37,7 +47,7 @@
 | # | 信号 | 核对点 |
 |---|---|---|
 | 1 | 逻辑等价 | 分支条件/循环边界/赋值顺序一致 |
-| 2 | SQL 完整性 | 每条 DML 有对应 Mapper 映射 |
+| 2 | SQL 完整性 | 每条 DML 有对应 Mapper 映射；未随意加 `LIMIT 1`（原存过有单行限制除外） |
 | 3 | 空值处理 | NVL/COALESCE/IS NULL 已处理 |
 | 4 | 类型映射 | PL/SQL→Java 类型按规约 §3.1 |
 | 5 | 异常映射 | EXCEPTION 块→try-catch |
@@ -63,8 +73,8 @@
 
 **修复指引**（记入 findings 交 fix，lint 自身不修复）：
 - 核心原则：**旧程序不动，新程序适配旧程序**。原地恢复被删/被改的旧码，新逻辑以追加方式实现。
-- Mapper 操作：**创建新 Mapper 函数而非改旧函数**（保留原方法，末尾追加新方法 + 新 SQL）。
-- 实体类：恢复原 DO，新程序通过新 DTO 或 Map 适配，**禁止为图方便改 DO**。
+- Mapper 操作：**创建新 Mapper 函数而非改旧函数**——保留原方法签名/返回值/参数与原 SQL 不动，末尾追加新方法（如 `selectByConditionWithExtra`）+ 新 SQL；新 Service 方法调新 Mapper 函数，原 Service 方法不变。
+- 实体类：恢复原 DO，**禁止为图方便改 DO**；新程序需额外字段则创建新 DTO 或用 Map 传递，自行负责 DO↔DTO/Map 转换。
 - 方法签名：保留旧方法，新建带额外参数的新方法。
 
 ## 七、输出

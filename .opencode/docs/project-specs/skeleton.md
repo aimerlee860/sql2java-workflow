@@ -51,6 +51,7 @@
 - 入参/出参类型从 SQL 切片（`shard-inputs/{pkg}/{ref}/source.sql`）+ 依赖签名块推导；不确定的参数类型标 `// TODO: [translate]`。
 - Mapper 接口方法签名对应本过程将用到的 SQL 语句（SQL 体由 translate-core 填）。
 - 桩体：`return null;` / `return 0;` / `return false;` 等默认值 + `// TODO: [translate] 标记人 标记时间 中文说明原因`，保证可编译。
+- **Request/Response DTO**（若属本 unit 角色集）：用 `@Data` 注解；字段数量/类型必须与 SQL 切片 `shard-inputs/{pkg}/{ref}/source.sql` 的 IN/OUT 参数一致，不一致标 `// TODO: [translate]`，禁编造字段。
 
 ## 七、包级常量/变量
 

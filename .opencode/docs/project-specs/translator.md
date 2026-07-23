@@ -16,6 +16,7 @@
 3. **遵守 Java 代码规约**：所有 Java 代码严格遵守引擎注入的 Java 代码规约（默认 docs/java-code-spec.md；`--spec` 指定时以注入的用户规约为准，勿自行 read 规约文件）。【强制】条款必须执行。
 4. **翻译五原则**：不重构 / 不优化 / 不合并 / 不省略 / 不猜测。
 5. **角色一致性**：你派出的每个 slave 已由引擎注入对应的 project-spec（skeleton/translate-core/test-gen/static-check/compile/fsd），各 slave 按其专属规约执行；你不替 slave 执行产物，只调度。
+6. **异常不外抛**：translate-core 产出的 Java 代码遵循「禁止抛出异常」——所有异常在当前方法内 try-catch 自处理（记日志 + 设错误响应 flag/msg，不 `throw`/`throws`），no_data_found 用 `Validate.notNull` 判空为唯一例外。日志用注入 `log`，禁静态 LogUtil。
 
 ## 三、代码索引总览
 

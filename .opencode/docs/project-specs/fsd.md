@@ -24,6 +24,7 @@
 - **decisions 是板块 6 的结构化来源**：对照 decisions 的 `plsqlConstruct`/`javaConstruct`/`reason` 填转化映射表。
 - **存储过程调用**（CALL/跨包 PROCEDURE）单独列出 OUT/IN OUT 参数清单 + Mapper CALLABLE 映射。
 - **事务边界**（COMMIT/ROLLBACK/PRAGMA AUTONOMOUS_TRANSACTION）标注为事务构造，具体 Java 事务映射见注入的 Java 代码规约 §9.1。
+- **异常处理策略**：若 translate-core 产出含 try-catch，在板块 6 记录异常捕获策略（catch 内仅记日志 + 设错误响应 flag/msg，不外抛；no_data_found 用 Validate.notNull 判空）。
 
 ## 五、质量要求
 
