@@ -4597,12 +4597,13 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 const projectRoot = generatedRootFor(run, artifactId)
                 const dedupRulesPath = (run.metadata as Record<string, unknown>).dedupRulesPath as string | undefined
                 const targetPkgs = currentEntry?.incrementalContext?.targetPackages as string[] | undefined
-                // 短路开关：SQL2JAVA_DEDUP_SHORT_CIRCUIT=1 时跳过 PMD CPD 扫描与抽取，
-                // 直接走 skipped 占位通路（引擎写占位 dedup.json，agent 跳过模式零工作，1676 校验放行）。
-                // 用于公共模块抽取能力暂未成熟时临时旁路 dedup，不阻断 pipeline。
-                const dedupShortCircuit = process.env.SQL2JAVA_DEDUP_SHORT_CIRCUIT === "1"
+                // 短路开关：默认开启——跳过 PMD CPD 扫描与抽取，直接走 skipped 占位通路
+                // （引擎写占位 dedup.json，agent 跳过模式零工作，1676 校验放行）。
+                // 公共模块抽取能力暂未成熟，dedup 作为优化项默认旁路不阻断 pipeline；
+                // 需恢复真实抽取时设 SQL2JAVA_DEDUP_SHORT_CIRCUIT=0。
+                const dedupShortCircuit = process.env.SQL2JAVA_DEDUP_SHORT_CIRCUIT !== "0"
                 const res: ScanResult = dedupShortCircuit
-                  ? { skipped: true, skipReason: "短路：公共模块抽取暂未启用（SQL2JAVA_DEDUP_SHORT_CIRCUIT=1）", scanStats: { totalPackages: 0, totalFilesScanned: 0, duplicateGroupsFound: 0 } }
+                  ? { skipped: true, skipReason: "短路：公共模块抽取默认未启用（设 SQL2JAVA_DEDUP_SHORT_CIRCUIT=0 恢复）", scanStats: { totalPackages: 0, totalFilesScanned: 0, duplicateGroupsFound: 0 } }
                   : scanDuplicates(artifactsDir, projectRoot, targetPkgs, dedupRulesPath)
                 if (res.skipped) {
                   dedupScanSkipped = { skipReason: res.skipReason ?? "PMD CPD 不可用" }
@@ -4644,11 +4645,11 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               if (artifactId) {
                 const projectRoot = generatedRootFor(run, artifactId)
                 const targetPkgs = currentEntry?.incrementalContext?.targetPackages as string[] | undefined
-                // 短路开关：SQL2JAVA_REVIEW_SHORT_CIRCUIT=1 时跳过 Step A 静态扫描 + reviewer 语义审，
+                // 短路开关：默认开启——跳过 Step A 静态扫描 + reviewer 语义审，
                 // 引擎写占位 review.json/review-summary.json（全包 passed、allPassed:true），reviewer no-op。
-                // 用于 review 重构（per-proc 适配/工具化）未完成前临时旁路 review，不阻断 pipeline；
-                // per-unit 审查由 translate-lint 语义自审兜底。仿 SQL2JAVA_DEDUP_SHORT_CIRCUIT。
-                const reviewShortCircuit = process.env.SQL2JAVA_REVIEW_SHORT_CIRCUIT === "1"
+                // review 重构（per-proc 适配/工具化）未完成前默认旁路 review，不阻断 pipeline；
+                // per-unit 审查由 translate-lint 语义自审兜底。需恢复真实审查时设 SQL2JAVA_REVIEW_SHORT_CIRCUIT=0。
+                const reviewShortCircuit = process.env.SQL2JAVA_REVIEW_SHORT_CIRCUIT !== "0"
                 if (reviewShortCircuit) {
                   const pkgs = targetPkgs
                     ?? buildDependencyGraph(`${ARTIFACT_DIR}/${run.runId}`).packageNames
@@ -4845,7 +4846,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
               if (dedupScanSkipped) {
                 workOrderParts.push(
                   ``,
-                  `## ⚠️ dedup 已跳过（PMD CPD 不可用）`,
+                  `## ⚠️ dedup 已跳过（短路模式，默认开启）`,
                   `- 引擎已写占位 \`dedup.json\`（skipped:true，${dedupScanSkipped.skipReason}）`,
                   `- 你无需做任何抽取/重构。仅确认 \`dedup.json\` 已写入后输出 WORKER_SUMMARY + TASK_STATUS 结束`,
                 )
@@ -4974,12 +4975,12 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
             // review 项目级单次审核：fix 回环用 targetPackages(fixedPackages)，主线用 analysis.packageNames 全包。
             // 让 reviewer 只对有信号的过程做 #1-#9 语义审，无信号的纯 CRUD 跳过（省 LLM，靠 Step A 兜底）。
             if (run.currentPhase === "review" && artifactIdForDispatch) {
-              if (process.env.SQL2JAVA_REVIEW_SHORT_CIRCUIT === "1") {
-                // 短路模式：占位 review.json/review-summary.json 已在 dispatch 前写好，
+              if (process.env.SQL2JAVA_REVIEW_SHORT_CIRCUIT !== "0") {
+                // 短路模式（默认开启）：占位 review.json/review-summary.json 已在 dispatch 前写好，
                 // 注入指令让 reviewer no-op（跳过 Step A/B、不调 generateReviewSummary、直接 TASK_STATUS completed）。
                 workOrderParts.push(
                   ``,
-                  `## ⚡ REVIEW 短路模式（SQL2JAVA_REVIEW_SHORT_CIRCUIT=1）`,
+                  `## ⚡ REVIEW 短路模式（默认开启，SQL2JAVA_REVIEW_SHORT_CIRCUIT=0 可关闭）`,
                   `引擎已写占位 review.json + review-summary.json（全包 passed、allPassed:true）。`,
                   `你**无需审查**：跳过 Step A/B，不调 generateReviewSummary（summary 已预写），直接输出 TASK_STATUS(status:completed)。`,
                   `（per-unit 审查已由 translate-lint 语义自审兜底；此为 review 重构完成前的临时旁路。）`,

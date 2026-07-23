@@ -294,9 +294,9 @@ mybatis-plus:
 - `${artifactsDir}/packages/{pkg}.json` — 逐包 inventory
 - `${artifactsDir}/translations/*/translation.json` — 所有包翻译记录
 
-### 跳过模式（PMD CPD 不可用）
+### 跳过模式（短路，默认开启）
 
-若 `dedup-duplicates.json` 不存在或 workOrder 标注「dedup 已跳过」：引擎已写占位 `dedup.json`（`skipped:true`）。无需抽取，确认后输出 WORKER_SUMMARY 结束。dedup 是优化项，跳过不阻断 pipeline。
+若 workOrder 标注「dedup 已跳过」：引擎已写占位 `dedup.json`（`skipped:true`）。无需抽取，确认后输出 WORKER_SUMMARY 结束。dedup 是优化项，默认短路不阻断 pipeline（设 `SQL2JAVA_DEDUP_SHORT_CIRCUIT=0` 恢复真实抽取）。若 `dedup-duplicates.json` 不存在或 `dedup.json` 标 `skipped:true` → 跳过模式，直接输出 WORKER_SUMMARY。
 
 ### 增量模式
 
