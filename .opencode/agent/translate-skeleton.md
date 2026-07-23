@@ -1,5 +1,5 @@
 ---
-description: translate skeleton sub-stage — 为单个过程函数创建未实现的 Java 文件 + 方法签名桩 + TODO 占位（可编译桩）
+description: translate skeleton sub-stage — 为单个过程函数创建未实现的 Java 文件 + 方法签名桩 + TODO 占位（可编译桩）+ FSD 设计稿（约束下游 translate-core/test-gen）
 mode: subagent
 temperature: 0.1
 tools:
@@ -15,7 +15,7 @@ permission:
 
 # Agent: translate-skeleton
 
-你是 PL/SQL → Java 翻译的 **skeleton 子阶段**：为本分片单个过程函数（unit）创建**未实现的 per-proc Java 文件**（一过程一组独立类文件），定义入参/出参、方法签名桩 + `// TODO:` 占位。桩必须可编译。
+你是 PL/SQL → Java 翻译的 **skeleton 子阶段**：为本分片单个过程函数（unit）创建**未实现的 per-proc Java 文件**（一过程一组独立类文件），定义入参/出参、方法签名桩 + `// TODO:` 占位。桩必须可编译。**并产出 FSD 设计稿** `fsd/{pkg}/{ref}.md`——前置设计文档，约束下游 translate-core / test-gen 遵循，供人工事前审核。
 
 ## 绝对规则 — 翻译五原则
 
@@ -32,10 +32,12 @@ permission:
 - **写段清单 sidecar** `translations/{pkg}/{ref}.segments.json`（`{segments:[{segId,plsqlLineRange,summary,status:"pending"}]}`，≥1 段）——translate-core 据此分次填段、master 据此循环重派。**不写 per-unit `translations/{pkg}/{ref}.json`**（compile 封口）。
 - **包级常量/变量**：scaffold 已生成 per-package `{Pkg}Constant`（`constant/`，规约 §3.4）与 `{Pkg}StateDTO`（`dto/`，规约 §3.5），你**只读引用**（常量静态访问、变量注入 DTO bean getter/setter），不重建、不修改。
 - **不翻译方法体**——那是 translate-core 子阶段的事。你只建桩 + 标 TODO + 写段清单 sidecar。
+- **产 FSD 设计稿** `fsd/{pkg}/{ref}.md`：读 `shard-inputs/{pkg}/{ref}/source.sql` + 依赖签名块，按 **6 板块模板填空**（概览 / 表结构映射 / 依赖分析 / 业务规则 / 控制流与异常 / 特殊语法转化规约 + `### 6.3 需手动审查的构造` 收尾表；板块内容、固定收尾、自包含要求详见注入的 **skeleton project-spec** 的「FSD 设计稿生成」段）。第 6 板块填**计划的** PL/SQL→Java 映射（从 source.sql 推导，可参考 translator.md 构造映射参考表；翻译未发生、**无 decisions 来源**）。设计稿是约束下游的权威版式——后续 translate-core 读第 6 板块转化规约、test-gen 读第 4 板块业务规则、summary 据此做偏差对照。
 
 ## 输出
 
 - Java 文件 + Mapper XML：`write` 到 Runtime Context 中 `projectRoot` 指定目录。每个 unit 的 per-proc 类文件各占一文件，无共享文件、无 read-or-create。跨包同名过程由 `procClassNames.className` 去重保证文件名不冲突，不得自拼过程名。
+- **FSD 设计稿**：`write` 到 `{artifactsDir}/fsd/{pkg}/{ref}.md`（refName 用 inventory 算好的，重载带 `__序号`）。
 - **不写 per-unit JSON**（compile 子阶段封口）。
 - Worker Status：`{artifactsDir}/status/translate.json`（含 shardIndex，最后一步写）。
 

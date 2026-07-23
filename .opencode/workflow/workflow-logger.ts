@@ -7,6 +7,7 @@
 
 import { appendFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
+import { nowLocal } from "./timestamp"
 
 const ARTIFACT_DIR = ".workflow-artifacts"
 
@@ -23,7 +24,7 @@ let logFilePath: string | null = null
 class FileLogger implements WorkflowLogger {
   private write(level: string, tag: string, msg: string): void {
     if (!logFilePath) return // runId 未初始化，静默忽略
-    const ts = new Date().toISOString()
+    const ts = nowLocal()
     const line = `[${ts}] [${level}] ${tag} ${msg}\n`
     try {
       appendFileSync(logFilePath, line, "utf-8")

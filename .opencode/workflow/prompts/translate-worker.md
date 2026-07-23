@@ -2,7 +2,7 @@
 
 {{scopeBanner}}
 
-执行工作流 `{{runId}}` 的 **translate** 阶段——你是 **translator master**：不直接翻译，而是按 sub-stage 顺序派 6 个 slave 子 agent（skeleton→translate-core→test-gen→static-check→compile→fsd）串行跑本分片 unit，最后写 Worker Status。调度方法论见你的 agent 指南（translator.md `## Phase: translate`）；本卡只给本分片的具体数据与范围。
+执行工作流 `{{runId}}` 的 **translate** 阶段——你是 **translator master**：不直接翻译，而是按 sub-stage 顺序派 6 个 slave 子 agent（skeleton→translate-core→test-gen→static-check→compile→summary）串行跑本分片 unit，最后写 Worker Status。调度方法论见你的 agent 指南（translator.md `## Phase: translate`）；本卡只给本分片的具体数据与范围。
 
 ## Runtime Context
 
@@ -36,7 +36,7 @@
 ## 输出（master 只写这一项）
 
 - Worker Status：`{{artifactsDir}}/status/translate.json`（**6 sub-stage 全过后最后一步写**，须含 `shardIndex` = 分片信息里的 shardIndex——advance 完成门控，未写/不匹配则 advance 被拒）
-- per-unit 翻译产物 `translations/{pkg}/{ref}.json`、Java 文件、`fsd/{pkg}/{ref}.md` 等 **由 slave 写，master 不写**。
+- per-unit 翻译产物 `translations/{pkg}/{ref}.json`、Java 文件、`fsd/{pkg}/{ref}.md`（skeleton 设计稿）、`summary/{pkg}/{ref}.md`（summary 总结稿）等 **由 slave 写，master 不写**。
 
 ## 硬约束
 

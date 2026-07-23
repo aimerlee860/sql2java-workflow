@@ -36,7 +36,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
     },
     {
       name: "translate",
-      description: "PL/SQL → Java/MyBatis 逐 unit 翻译（主从架构：translator master 每 shard 派 6 slave 子 agent 串行跑 skeleton → translate-core → test-gen → static-check → compile → fsd）",
+      description: "PL/SQL → Java/MyBatis 逐 unit 翻译（主从架构：translator master 每 shard 派 6 slave 子 agent 串行跑 skeleton → translate-core → test-gen → static-check → compile → summary）",
       agentFile: "agent/translator.md",
       temperature: 0.1,
       maxRetries: 3,
@@ -46,8 +46,9 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
       // translate 主从架构：subStages 仅供 getSubagentNames（slave 识别为 worker）+ subdispatch 渲染 slave workOrder。
       // master（translator.md）每 shard 派 6 slave 串行跑；引擎 advance 直走 G1-unit + crossSchema + shard advance（不再逐 sub-stage 推进）。
       // 1 unit = 1 shard（dispatch 强制 maxUnitsPerShard=1），sub-stage 天然 per-unit。
-      // fsd（compile 后）模板填空生成 FSD 说明书，孤立产出（FSD 是末尾 sub-stage 产出的人工审核总结文档，
-      // 纯末端产物——任何阶段都不读 FSD 作输入，故 translate UPSTREAM 不含 fsd，translate-core 不读 FSD）。
+      // skeleton（首位）产 FSD 设计稿 fsd/{pkg}/{ref}.md，约束下游 translate-core/test-gen 遵循；
+      // summary（末尾，compile 后）产翻译总结稿 summary/{pkg}/{ref}.md，含「设计 vs 实施偏差对照」。
+      // 两者均 per-unit 文档产物，intra-phase 产出消费——不进 translate UPSTREAM_ARTIFACTS（同 segments.json 模式）。
       // fix 阶段复用 translator.md（master 不派 slave，一次性 prompt 修复）。
       subStages: [
         { name: "skeleton",       agentFile: "agent/translate-skeleton.md" },
@@ -55,7 +56,7 @@ export const SQL2JAVA_WORKFLOW: WorkflowDefinition = {
         { name: "test-gen",       agentFile: "agent/translate-test.md" },
         { name: "static-check",   agentFile: "agent/translate-lint.md" },
         { name: "compile",        agentFile: "agent/translate-compile.md" },
-        { name: "fsd",            agentFile: "agent/translate-fsd.md" },
+        { name: "summary",        agentFile: "agent/translate-summary.md" },
       ],
     },
     {
@@ -134,8 +135,8 @@ export const UPSTREAM_ARTIFACTS: Record<string, string[]> = {
   // scaffold 不读原始 _INV_BASE：dispatch 前 engine 跑 generateScaffoldInput 聚合 inventory/packages/tables
   // 的窄字段成 scaffold-input.json，scaffold 只读这一份（subprograms 完全不消费，packages/tables 噪声字段丢弃）。
   scaffold: ["scaffold-input.json"],
-  // translate：FSD 是末尾 fsd sub-stage 产出的人工审核总结文档，纯末端产物——任何阶段都不读 FSD 作输入，
-  // 故 translate UPSTREAM 不含 fsd。translate 读 source.sql 翻译（不读 analysis-slice，analyze 已砍）。
+  // translate：skeleton 产 FSD 设计稿 + summary 产翻译总结稿，均 per-unit 文档、intra-phase 产出消费，
+  // 不进 translate UPSTREAM_ARTIFACTS（同 segments.json 模式）。translate 读 source.sql 翻译（不读 analysis-slice，analyze 已砍）。
   translate: [..._INV_BASE, ..._SCAFFOLD],
   dedup: [..._SCAFFOLD, ..._INV_BASE, ..._TRANSLATIONS, "dedup-duplicates.json"],
   // TODO (F9): translations/*/translation.json 在 dedup/review/verify 三阶段重复读取，

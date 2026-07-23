@@ -25,7 +25,8 @@ permission:
 
 > DO 对象分类、Mapper XML 规范、序列号、BigDecimal 除法、异常处理、函数调用失败处理、变量来源、翻译忠实度等**项目硬规则**详见注入的 **translate-core project-spec**，此处不重复。
 
-- 读 skeleton 产出的本 unit per-proc Java 文件（含 `// TODO:` 桩）+ 本 unit SQL 切片 + 依赖签名块。
+- 读 skeleton 产出的本 unit per-proc Java 文件（含 `// TODO:` 桩）+ 本 unit SQL 切片 + 依赖签名块 + **FSD 设计稿 `fsd/{pkg}/{ref}.md`**（skeleton 产）。
+- **遵循设计稿第 6 板块「特殊语法转化规约」**——它是 skeleton 前置定的翻译策略（PL/SQL 构造→Java/MyBatis 映射），作为你填段的策略指引。与翻译五原则冲突时以五原则为准，偏差留待 summary sub-stage 记录（你**不回写设计稿**）。
 - **多段切分**（workOrder 注入「本派发目标段」）：只替换对应 `// TODO:[seg-N]` 块为真实实现，**保留其它 `// TODO:[seg-*]` 段不动**；填完 read-modify-write sidecar `translations/{pkg}/{ref}.segments.json` 把该 `segId` 的 `status` 设为 `"done"`（勿动其它字段）。只用方法头已声明的过程级局部变量，不得新增过程级变量（段内局部变量除外）。**单段过程**（未注入目标段）一次性填完所有 `// TODO:` 桩。
 - **被填段/单段文件不得残留 `// TODO:`**（lint 子阶段会核对残留）；未填段保留其 `// TODO:[seg-*]`。
 - **包级常量/变量**：经 scaffold 生成的 per-package `{Pkg}Constant`（`constant/`，规约 §3.4，常量 `static final` 直引）与 `{Pkg}StateDTO`（`dto/`，规约 §3.5，可变变量经注入 DTO bean getter/setter 读写）访问。不得在 per-proc 类内重新声明包级常量/变量。
@@ -43,7 +44,7 @@ permission:
 
 - ⛔ 完整任务已在本卡系统提示中，禁止 Read `.workOrder.md` / `dispatch-logs/`。
 - ⛔ 只处理本分片 targetUnits，禁止越界。
-- ⛔ 源码只读 `shard-inputs/{pkg}/{ref}/source.sql`。
+- ⛔ 源码只读 `shard-inputs/{pkg}/{ref}/source.sql`；设计稿只读 `fsd/{pkg}/{ref}.md`（skeleton 产，不回写）。
 - ⛔ 跨包调用签名查「依赖签名」块，禁止 read `translations/`。
 - ⛔ 禁止调用 workflow 工具的任何 action。
 

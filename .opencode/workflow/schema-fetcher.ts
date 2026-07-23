@@ -21,6 +21,7 @@ import { join } from "node:path"
 import { atomicRename, safeRm } from "./cross-platform"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, GENERATED_MARKER_ID } from "./constants"
 import { getLogger } from "./workflow-logger"
+import { nowLocal } from "./timestamp"
 
 // ── 内部配置类型 ──────────────────────────────────────────────────────────
 
@@ -1096,7 +1097,7 @@ function generateDdlFiles(
   // 内容为 JSON，包含 generator 字段用于校验真实性
   const markerContent = JSON.stringify({
     generator: GENERATED_MARKER_ID,
-    createdAt: new Date().toISOString(),
+    createdAt: nowLocal(),
   })
   writeFileSync(join(stagingDir, GENERATED_MARKER), markerContent, "utf-8")
 

@@ -14,6 +14,7 @@ describe("unitWriteBoundaryViolation", () => {
 
   it("本 unit 根 per-unit 产物：放行", () => {
     expect(unitWriteBoundaryViolation("fsd/PKG_A/proc1.md", allowed)).toBeNull()
+    expect(unitWriteBoundaryViolation("summary/PKG_A/proc1.md", allowed)).toBeNull()
     expect(unitWriteBoundaryViolation("translations/PKG_A/proc1.json", allowed)).toBeNull()
   })
 
@@ -31,6 +32,7 @@ describe("unitWriteBoundaryViolation", () => {
 
   it("其他 unit 的 per-unit 产物：拦截", () => {
     expect(unitWriteBoundaryViolation("fsd/PKG_A/other.md", allowed)).not.toBeNull()
+    expect(unitWriteBoundaryViolation("summary/PKG_A/other.md", allowed)).not.toBeNull()
     expect(unitWriteBoundaryViolation("translations/PKG_A/proc2.json", allowed)).not.toBeNull()
   })
 
@@ -60,6 +62,7 @@ describe("unitWriteBoundaryViolation", () => {
 
   it("反斜杠路径兼容（Windows）", () => {
     expect(unitWriteBoundaryViolation("fsd\\PKG_A\\proc1.md", allowed)).toBeNull()
+    expect(unitWriteBoundaryViolation("summary\\PKG_A\\proc1.md", allowed)).toBeNull()
     expect(unitWriteBoundaryViolation("fsd\\PKG_A\\other.md", allowed)).not.toBeNull()
   })
 })

@@ -1,10 +1,10 @@
-# Project Spec — skeleton 子阶段（文件创建 + 骨架桩）
+# Project Spec — skeleton 子阶段（文件创建 + 骨架桩 + FSD 设计稿）
 
-> 本规约由引擎注入 translate-skeleton 子 agent 系统提示词。融合自《文件创建规约》《待办逻辑填充文件创建规约_检查后》《详细设计检查规约》（命名/包路径部分），已适配本工作流的 artifact 路径与 per-proc 架构。原 ai-agent/skills/* 调用与设计文档路径已删除/映射。
+> 本规约由引擎注入 translate-skeleton 子 agent 系统提示词。融合自《文件创建规约》《待办逻辑填充文件创建规约_检查后》《详细设计检查规约》（命名/包路径部分），已适配本工作流的 artifact 路径与 per-proc 架构。原 ai-agent/skills/* 调用与设计文档路径已删除/映射。**skeleton 另产 FSD 设计稿** `fsd/{pkg}/{ref}.md`——前置设计，约束下游 translate-core/test-gen 遵循，供人工事前审核；与 summary 总结稿同构对齐。
 
 ## 一、核心目标
 
-为本分片单个过程函数（unit）创建**未实现的 per-proc Java 文件**（一过程一组独立类文件）+ 方法签名桩 + `// TODO: [translate]` 占位。桩必须可被 javac parse 通过。**不翻译方法体**（translate-core 子阶段的事）。
+为本分片单个过程函数（unit）创建**未实现的 per-proc Java 文件**（一过程一组独立类文件）+ 方法签名桩 + `// TODO: [translate]` 占位。桩必须可被 javac parse 通过。**不翻译方法体**（translate-core 子阶段的事）。**并产 FSD 设计稿** `fsd/{pkg}/{ref}.md`——前置设计文档，约束下游 translate-core（第 6 板块转化规约）/ test-gen（第 4 板块业务规则），供人工事前审核。
 
 ## 二、只增不删不覆盖（硬不变量）
 
@@ -87,7 +87,31 @@
 - 字段注释说明对应表字段含义。
 - 全部中文注释，专有名词与关键字保持英文。
 
-## 九、自检清单
+## 九、FSD 设计稿生成（`fsd/{pkg}/{ref}.md`）
+
+skeleton 除建 Java 桩外，**必须产 FSD 设计稿** `fsd/{pkg}/{ref}.md`——前置设计，约束下游 translate-core / test-gen，供人工事前审核。模板与 summary 总结稿同构对齐（板块编号/标题完全一致，便于末尾逐板块 diff）。
+
+### 9.1 6 板块固定格式（模板填空，不自由发挥排版）
+
+1. **概览**：子程序表格（名/类型/功能摘要/计划翻译策略）+ 签名代码块 + 参数清单表（参数名|方向|PL/SQL 类型|Java 类型|说明）。签名/参数与 skeleton 将建的类壳一致。
+2. **表结构映射**：表格（表名|操作|关键条件|说明）+ 关键列。纯逻辑函数写"不涉及表操作"。
+3. **依赖分析**：表格（目标包|目标子程序 refName|功能）+ 序列/常量依赖。无依赖写"无"。只记客观调用关系（见依赖签名块），不预估 Java 映射。
+4. **业务规则**：编号列表/表格列校验规则、计算逻辑、边界条件（从 source.sql 推导的计划规则）。
+5. **控制流与异常**：简单子程序文字描述；复杂（>3 分支或含循环）用 Mermaid 流程图 + 异常路径表。
+6. **特殊语法转化规约**：转化映射表（PL/SQL 构造|位置|Java/MyBatis 计划等价|风险）+ 事务边界 + "需手动审查的构造"固定收尾表。**第 6 板块填计划**——从 source.sql 推导的 PL/SQL→Java 映射（翻译未发生、**无 decisions 来源**），可参考 translator.md 构造映射参考表。
+
+### 9.2 板块 6 固定收尾（严格遵守）
+
+`### 6.3 需手动审查的构造` 表格——无则填"（无）"，**禁止用 TODO/checkbox 替代**。
+
+### 9.3 质量要求
+
+- **设计稿自包含**：每个板块写实质内容，**禁止"详见 xxx"占位符**。
+- 全程中文输出，专有名词与关键字保持英文。
+- refName 用 inventory 算好的（重载带 `__序号`）。
+- 板块编号/标题与 summary 总结稿完全对齐。
+
+## 十、自检清单
 
 - [ ] 对照 scaffold procClassNames + packageMappings，本 unit 各角色 per-proc 文件均已创建，文件名用 className 派生、路径按角色顶层包
 - [ ] 无遗漏、无增加（除角色集模板外不擅自加文件）
@@ -97,3 +121,4 @@
 - [ ] 注释含生成来源
 - [ ] DO 只引用未重建；Mapper XML namespace 正确
 - [ ] `segments[]` 已写 sidecar `translations/{pkg}/{ref}.segments.json`（≥1 段）；>500 行时按算法切多段、单段 ≤500；段 TODO 标记 `seg-N` 与 `segments[].segId` 一一对应；过程级局部变量集中声明于方法头
+- [ ] FSD 设计稿 `fsd/{pkg}/{ref}.md` 已生成：6 板块齐全 + `### 6.3` 收尾表；第 6 板块填计划转化规约（从 source.sql 推导、无 decisions）；板块编号/标题与 summary 同构

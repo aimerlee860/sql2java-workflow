@@ -171,9 +171,10 @@ describe("UPSTREAM_ARTIFACTS", () => {
     expect(UPSTREAM_ARTIFACTS.plan).toBeUndefined()
   })
 
-  it("任意阶段都不注入 FSD（FSD 是 translate 末尾 sub-stage 产出的人工审核总结文档，纯末端产物，不作输入）", () => {
+  it("任意阶段都不注入 FSD 设计稿 / summary 总结稿（均 per-unit intra-phase 文档，skeleton/summary sub-stage 产，不作 phase 输入）", () => {
     for (const [phase, artifacts] of Object.entries(UPSTREAM_ARTIFACTS)) {
       expect(artifacts, `${phase} 不应在 UPSTREAM_ARTIFACTS 注入 fsd`).not.toContain("fsd/*/*.md")
+      expect(artifacts, `${phase} 不应在 UPSTREAM_ARTIFACTS 注入 summary`).not.toContain("summary/*/*.md")
     }
   })
 

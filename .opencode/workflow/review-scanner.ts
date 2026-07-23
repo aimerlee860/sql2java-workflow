@@ -23,6 +23,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join, basename, resolve, normalize, sep } from "node:path"
 import { execSync } from "node:child_process"
 import { getLogger } from "./workflow-logger"
+import { nowLocal } from "./timestamp"
 import { ReviewStaticSchema } from "./artifact-schemas"
 import { buildFileIndex, checkToolchain } from "./dedup-scanner"
 import { findOpencodeDir } from "./ensure-deps"
@@ -478,7 +479,7 @@ export function scanReviewStatic(
     findings: result.findings,
     toolSkipped: result.toolSkipped,
     scanMode: result.scanMode,
-    generatedAt: new Date().toISOString(),
+    generatedAt: nowLocal(),
     scanStats: result.scanStats,
   }
   const r = ReviewStaticSchema.safeParse(out)

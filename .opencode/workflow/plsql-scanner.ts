@@ -30,6 +30,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs"
 import { join, extname } from "node:path"
 import { GENERATED_OUTPUT_DIR, GENERATED_MARKER, VALID_SOURCE_EXTENSIONS } from "./constants"
 import { getLogger } from "./workflow-logger"
+import { nowLocal } from "./timestamp"
 import { parseMainEntry } from "./scope-computer"
 import { scanFilesParallel, createPoolSession, type PoolSession } from "./plsql-worker-pool"
 import {
@@ -263,7 +264,7 @@ function finalizeInventoryIndex(
 
   return {
     sourcePath: primaryBase,
-    scannedAt: new Date().toISOString(),
+    scannedAt: nowLocal(),
     scannerUsed,
     warnings,
     packages: pkgList,
@@ -460,7 +461,7 @@ export function scanWithRegex(roots: string[], primaryBase: string): InventoryIn
   }
   return {
     sourcePath: primaryBase,
-    scannedAt: new Date().toISOString(),
+    scannedAt: nowLocal(),
     scannerUsed: "regex",
     warnings,
     packages: Array.from(packages.values()),

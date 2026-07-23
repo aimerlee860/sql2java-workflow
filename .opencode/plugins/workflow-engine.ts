@@ -14,6 +14,7 @@ import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSy
 import { join, dirname, resolve, sep, isAbsolute, basename } from "node:path"
 import { safeWriteFile, extractLineRange } from "../workflow/cross-platform"
 import { WorkflowEngine, WorkflowEngineError, formatZodIssues, type WorkflowRun } from "../workflow/engine-core"
+import { nowLocal } from "../workflow/timestamp"
 import { enhanceRejection } from "../workflow/rejection-guidance"
 import { renderSchemaHint } from "../workflow/schema-hint-renderer"
 import { SQL2JAVA_WORKFLOW } from "../workflow/workflow-definitions"
@@ -201,7 +202,7 @@ function getSlaveAgentMap(): Map<string, { subStage: string; agentFile: string }
   return m
 }
 
-/** translate sub-stage 规范顺序（skeleton → translate-core → test-gen → static-check → compile → fsd）。
+/** translate sub-stage 规范顺序（skeleton → translate-core → test-gen → static-check → compile → summary）。
  *  顺序门禁 + 进度注入的单一来源——取自 phaseConfig.subStages 数组序。 */
 export function getSubStageOrder(phase: string): string[] {
   const p = SQL2JAVA_WORKFLOW.phases.find(x => x.name === phase)
@@ -419,7 +420,7 @@ const PROJECT_SPEC_MAP: Record<string, string> = {
   "translate-test.md": "docs/project-specs/test-gen.md",
   "translate-lint.md": "docs/project-specs/static-check.md",
   "translate-compile.md": "docs/project-specs/compile.md",
-  "translate-fsd.md": "docs/project-specs/fsd.md",
+  "translate-summary.md": "docs/project-specs/summary.md",
   "translator.md": "docs/project-specs/translator.md",
 }
 
@@ -1144,6 +1145,19 @@ function buildUnitFilesBlock(
   if (constFile) holderLines.push(`- 包常量类（只读，scaffold 生成）：\`${constFile}\``)
   if (dtoFile) holderLines.push(`- 包变量 DTO（只读，scaffold 生成）：\`${dtoFile}\``)
 
+  // FSD 设计稿路径（per-unit，intra-phase）：skeleton 产；translate-core/test-gen/summary 只读遵循。
+  // slave 禁 glob，必须把设计稿绝对路径注入清单才能 read。
+  const designDoc = `${artifactsDir}/fsd/${pkg}/${ref}.md`
+  if (subStage === "skeleton") {
+    holderLines.push(`- FSD 设计稿（**本 sub-stage 产**，写）：\`${designDoc}\`——读 source.sql 按 6 板块生成，约束下游 translate-core/test-gen`)
+  } else if (subStage === "translate-core" || subStage === "test-gen" || subStage === "summary") {
+    holderLines.push(`- FSD 设计稿（只读，skeleton 产）：\`${designDoc}\`——translate-core 遵循第 6 板块转化规约；test-gen 遵循第 4 板块业务规则；summary 据此做偏差对照`)
+  }
+  // summary 总结稿输出路径
+  if (subStage === "summary") {
+    holderLines.push(`- 翻译总结稿（**本 sub-stage 产**，写）：\`${artifactsDir}/summary/${pkg}/${ref}.md\`——6 板块实际值 + 第 7 板块设计 vs 实施偏差对照`)
+  }
+
   const lines: string[] = [
     `## 本 unit 派生值与路径规则（⛔ 禁止 glob/ls/find 扫描目录）`,
     `- plsqlPackage: \`${pkg}\` / refName: \`${ref}\``,
@@ -1328,7 +1342,16 @@ export function buildShardedWorkerOrder(
     })
   }
 
-  // 3) 动态块
+  // 3) projectRoot（Stage A：artifactId 由 getArtifactIdFromRun 从 metadata/run-context 取，不再读 plan）
+  //    必须在 depSignaturesBlock / unitFilesBlock 之前声明——下游动态块（依赖签名、unit 文件清单）需读 projectRoot。
+  const artifactId = getArtifactIdFromRun(run)
+  // scaffold 在 else 分支（非分片）派发时 claim；此处 analyze/translate 只读解析 base。
+  const projectRoot = artifactId ? resolveGeneratedRoot(run.runId, artifactId) : null
+  const projectRootLine = projectRoot ? `- projectRoot: \`${projectRoot}\`  ← Java/项目文件写入此目录` : ""
+  const mainEntry = (run.metadata as Record<string, unknown>).mainEntry
+  const mainEntryLine = mainEntry ? `- mainEntry: \`${mainEntry}\`` : ""
+
+  // 4) 动态块
   const scopeBanner = buildShardScopeBanner(run)
   const scopeBlock = isUnitMode
     ? buildUnitScopeBlock(artDir, shardTargetUnits, phase, completedUnitIds, sourcePath)
@@ -1336,14 +1359,6 @@ export function buildShardedWorkerOrder(
   const depSignaturesBlock = (phase === "translate" && isUnitMode)
     ? buildDependencySignaturesBlock(artDir, shardTargetUnits, completedUnitIds, projectRoot)
     : ""
-
-  // 4) projectRoot（Stage A：artifactId 由 getArtifactIdFromRun 从 metadata/run-context 取，不再读 plan）
-  const artifactId = getArtifactIdFromRun(run)
-  // scaffold 在 else 分支（非分片）派发时 claim；此处 analyze/translate 只读解析 base。
-  const projectRoot = artifactId ? resolveGeneratedRoot(run.runId, artifactId) : null
-  const projectRootLine = projectRoot ? `- projectRoot: \`${projectRoot}\`  ← Java/项目文件写入此目录` : ""
-  const mainEntry = (run.metadata as Record<string, unknown>).mainEntry
-  const mainEntryLine = mainEntry ? `- mainEntry: \`${mainEntry}\`` : ""
 
   // 5) upstream 列表
   const upstreamArtifactsList = upstream.length > 0
@@ -1400,7 +1415,7 @@ export function buildShardedWorkerOrder(
       : "——6 个 sub-stage 已全完，写 status/translate.json（含 shardIndex）收尾后输出 TASK_STATUS。"
     subStageProgressBlock = [
       "## sub-stage 进度（顺序门禁）",
-      "- 规范序：skeleton → translate-core → test-gen → static-check → compile → fsd",
+      "- 规范序：skeleton → translate-core → test-gen → static-check → compile → summary",
       `- 已完成：${completedSubs.length ? completedSubs.join(", ") : "无（本分片刚开始）"}`,
       `- 状态：${doneMarks}`,
       "- **下一个该跑的 sub-stage：`" + nextLabel + "`**" + nextHint,
@@ -1781,7 +1796,9 @@ function validateInventoryPackages(
 //（analyze 阶段已砍：validateAnalysisPackages / validateFsds / validateFsdStubs /
 //  normalizeFsdFilenames / mergeUnitAnalysis 五个旧 analyze 校验函数已删——
 //  analysis-packages 聚合 + per-unit FSD 完整性/stub/文件名规范化均随 analyze phase 一并废弃。
-//  FSD 现由 translate 第 6 sub-stage（fsd）产，孤立文档产出，advance 不校验。）
+//  FSD 设计稿现由 translate 第 1 sub-stage（skeleton）产 fsd/{pkg}/{ref}.md，约束下游；
+//  翻译总结稿由第 6 sub-stage（summary）产 summary/{pkg}/{ref}.md，含设计 vs 实施偏差对照。
+//  两者均 per-unit 文档产出，advance 仅 warning 不阻断。）
 
 
 
@@ -2690,7 +2707,7 @@ const UNIT_WRITE_BOUNDARY_PHASES = new Set(["translate"])
 
 /**
  * per-unit artifact 写入越界判定。匹配两级子目录的 per-unit 路径：
- *   translations/{pkg}/{ref}.json | fsd/{pkg}/{ref}.md
+ *   translations/{pkg}/{ref}.json | fsd/{pkg}/{ref}.md | summary/{pkg}/{ref}.md
  * 聚合文件（translations/{pkg}/translation.json 等只一级目录）不匹配 → 放行。
  *
  * @param relPath 相对 artifactsDir 的路径（或 normalized 后的 artifacts 子路径）
@@ -2707,7 +2724,8 @@ export function unitWriteBoundaryViolation(
   // 捕获主 ref（不含点），可选中间副后缀段（如 `.lint`）不参与匹配——
   // translations/{pkg}/FORMAT_ERROR_STACK.lint.json 的 ref 是 FORMAT_ERROR_STACK 而非 FORMAT_ERROR_STACK.lint。
   // 否则贪婪 [^/]+ 会把 `.lint` 吃进 ref，匹配不上 targetUnits，误拦 static-check 的 lint 产物。
-  const m = normalized.match(/(?:translations|fsd)\/[^/]+\/([^/.]+)(?:\.lint)?\.(?:json|md)$/)
+  // fsd/{pkg}/{ref}.md（skeleton 设计稿）/ summary/{pkg}/{ref}.md（summary 总结稿）同此规则。
+  const m = normalized.match(/(?:translations|fsd|summary)\/[^/]+\/([^/.]+)(?:\.lint)?\.(?:json|md)$/)
   if (!m) return null
   const ref = m[1]
   // 聚合文件名保险（理论上两级路径下不会出现，显式放行避免误伤）
@@ -2911,8 +2929,8 @@ export function narrowUpstreamForShard(
     // 整包 packages/subprograms → per-unit 切片（source.sql + meta.json）。
     // translations/*/translation.json 清空——跨包/同包跨单元调用签名由 buildDependencySignaturesBlock
     // 预注入到 workOrder，worker 不再读 translation.json（消除"读聚合 translation 顺手全做"）。
-    // FSD 是 translate 末尾 sub-stage 产出的人工审核总结文档，纯末端产物——任何阶段都不读 FSD 作输入，
-    // 故不在此收窄注入（即便 upstream 含 fsd glob 也原样 fallthrough，生产中无阶段注入）。
+    // FSD 设计稿（fsd/）+ 翻译总结稿（summary/）均 per-unit intra-phase 文档，不进 phase-level UPSTREAM，
+    // 故不在此收窄注入（即便 upstream 含 fsd/summary glob 也原样 fallthrough，生产中无 phase 注入）。
     const sliceFiles = targetUnits.flatMap(u => unitSliceRelPaths(u, "translate"))
     const translated = upstream.flatMap(a => {
       // 整包结构 glob 由 per-unit 切片取代（切片含 source.sql + meta.json）
@@ -2949,8 +2967,9 @@ export function narrowUpstreamForShard(
       }
       // subprograms/*.json：每包多文件（per-method），无法纯字符串按包收窄——保留 glob
       //（仅含元数据 directCalls/bodyLocation，无源码体，泄漏风险低；review/verify 不依赖它）。
-      // FSD 是 translate 末尾 sub-stage 产出的人工审核总结文档，纯末端产物，任何阶段都不读 FSD 作输入
-      // ——不收窄注入。fsd/*/*.md 即便出现在 upstream 也原样 fallthrough（生产中无阶段注入）。
+      // FSD 设计稿（fsd/{pkg}/{ref}.md，skeleton 产）+ 翻译总结稿（summary/{pkg}/{ref}.md，summary 产）
+      // 均 per-unit intra-phase 文档，不进 translate UPSTREAM_ARTIFACTS（同 segments.json 模式）；
+      // 此处 phase-level upstream 收窄不涉及它们——即便出现也原样 fallthrough（生产中无 phase 注入）。
       return [a]
     })
   }
@@ -3381,7 +3400,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
         mainEntry: zFn.string().optional(),     // 翻译起点/对外门面包，自然语言提取或 --mainEntry
         dedupRules: zFn.string().optional(),    // --dedupRules 用：dedup-rules.json 路径（exclude/force 覆盖）
         originalInput: zFn.string().optional(), // 用户原始 $ARGUMENTS 文字，写入 run-context.json 供回溯
-        subStage: zFn.string().optional(),      // subdispatch 用：请求渲染的 sub-stage 名（skeleton/translate-core/test-gen/static-check/compile/fsd）
+        subStage: zFn.string().optional(),      // subdispatch 用：请求渲染的 sub-stage 名（skeleton/translate-core/test-gen/static-check/compile/summary）
       },
       execute: async (args: any, context: any) => {
         // ── Worker 编排工具拦截（L1 防线）──
@@ -3566,7 +3585,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 artifacts: join(ARTIFACT_DIR, runId),
                 logs: join(ARTIFACT_DIR, runId, "logs"),
               },
-              createdAt: new Date().toISOString(),
+              createdAt: nowLocal(),
             })
 
             const run = engine.start("sql2java", runId, metadata)
@@ -4332,7 +4351,7 @@ export const WorkflowEnginePlugin = async ({ $, client }: { $: any; client?: any
                 output: [
                   "⛔ sub-stage 顺序错：请求「" + subStage + "」，但下一个该跑的是「" + expLabel + "」。",
                   "已完成 sub-stage：[" + (completedSubs.join(", ") || "无") + "]",
-                  "规范序：skeleton → translate-core → test-gen → static-check → compile → fsd",
+                  "规范序：skeleton → translate-core → test-gen → static-check → compile → summary",
                   "禁止跳过/乱序（" + subStage + " 前尚有未完成的 " + expLabel + "）。请先 subdispatch " + (expected ?? "—无—") + "，slave 跑完 TASK_STATUS(completed) 后调 substageDone 标记完成，再 subdispatch 下一 stage。",
                 ].join("\n"),
                 metadata: { runId, dispatch: false, subStage, expected, completedSubs },

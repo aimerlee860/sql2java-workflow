@@ -21,6 +21,7 @@
 
 import { appendFile, appendFileSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { nowLocal } from "./timestamp"
 
 // ── 配置 ─────────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ function wdLogPath(runId: string): string {
 let pendingLogs: string[] = []
 
 function wlog(level: "INFO" | "WARN" | "ERROR", msg: string): void {
-  const line = `[${new Date().toISOString()}] [${level}] [watchdog] ${msg}\n`
+  const line = `[${nowLocal()}] [${level}] [watchdog] ${msg}\n`
   const runId = currentRunId
   if (runId) {
     try {
@@ -517,7 +518,7 @@ async function checkOrchestratorCrash(): Promise<void> {
  */
 async function sampleContext(): Promise<void> {
   if (!currentRunId) return
-  const ts = new Date().toISOString()
+  const ts = nowLocal()
   const lines: string[] = []
   for (const [sid, e] of sessionMap) {
     if (e.runId !== currentRunId) continue  // 仅采当前 run 的 session，避残留 entry 混入

@@ -1,6 +1,6 @@
 # translate skeleton Worker 任务{{shardLabelSuffix}}
 
-执行 **translate / skeleton** 子阶段：为本分片单个过程函数（unit）创建未实现的 Java 文件 + 方法签名桩 + `// TODO:` 占位。方法论见 agent 指南（translate-skeleton.md）。
+执行 **translate / skeleton** 子阶段：为本分片单个过程函数（unit）创建未实现的 Java 文件 + 方法签名桩 + `// TODO:` 占位 + **FSD 设计稿**（约束下游 translate-core/test-gen）。方法论见 agent 指南（translate-skeleton.md）。
 
 ⛔ **你只负责产出 artifact，禁止调用 workflow 工具的任何 action**（advance/confirm/retry/abort/dispatch/fixContinue/start）。
 
@@ -12,10 +12,12 @@
 - **写段清单 sidecar** `translations/{pkg}/{ref}.segments.json`（`{segments:[{segId,plsqlLineRange,summary,status:"pending"}]}`，≥1 段）——translate-core 据此分次填段。
 - 包级常量只读引用 scaffold 的 `{Pkg}Constant`（`constant/`，静态访问）、包级变量只读引用 `{Pkg}StateDTO`（`dto/`，注入 bean getter/setter）（不重建/不修改）。
 - **不翻译方法体**（translate-core 的事）；**不写 per-unit `translations/{pkg}/{ref}.json`**（compile 封口）——段清单写独立 sidecar（上），不碰封口 json。
+- **产 FSD 设计稿** `fsd/{pkg}/{ref}.md`：读 `shard-inputs/{pkg}/{ref}/source.sql` + 依赖签名块，按 6 板块模板填空（概览 / 表结构映射 / 依赖分析 / 业务规则 / 控制流与异常 / 特殊语法转化规约 + `### 6.3 需手动审查的构造` 收尾）。第 6 板块填**计划的** PL/SQL→Java 映射（从 source.sql 推导，翻译未发生无 decisions）。模板细则见注入的 skeleton project-spec「FSD 设计稿生成」段。设计稿约束下游：translate-core 遵循第 6 板块转化规约、test-gen 遵循第 4 板块业务规则、summary 据此做偏差对照。
 
 ## 输出（稳定）
 
 - per-proc Java 文件 + Mapper XML：`write` 到 `projectRoot` 目录。每个 unit 的类文件各占一文件、互不共享（无 read-or-create）。跨包同名过程由 `procClassNames` 去重（数字后缀）保证文件名不冲突——必须用 `procClassNames.className` 派生文件名，不得自拼过程名。
+- **FSD 设计稿**：`write` 到 `{{artifactsDir}}/fsd/{pkg}/{ref}.md`（路径见下方「本 unit 文件清单」）。
 - ⛔ **不写 `status/translate.json`**——那是 translator master 的 advance 完成门控文件，仅 master 在 6 sub-stage 全过后写一次；slave 写会 clobber 门控、触发误 advance。你只在最后一段文本回 `TASK_STATUS` 给 master。
 
 ## 硬约束（稳定）

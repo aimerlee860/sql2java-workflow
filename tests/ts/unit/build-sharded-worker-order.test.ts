@@ -112,7 +112,26 @@ describe("buildShardedWorkerOrder — translate", () => {
     expect(wo).not.toContain("mapper/GetItemMapper.java")
     // 反 glob 硬约束
     expect(wo).toContain("禁止 glob/ls/find/Grep 扫描")
-    // 无残留占位符
+    // FSD 设计稿（skeleton 本 sub-stage 产）：路径注入清单供 write
+    expect(wo).toContain("FSD 设计稿（**本 sub-stage 产**，写）")
+    expect(wo).toContain(`fsd/MFG_ERP.F_ITEM/get_item.md`)
+    expect(wo).not.toContain("{{")
+  })
+
+  it("渲染 translate slave workOrder（subStageOverride=summary）：注入设计稿只读 + 总结稿输出路径", () => {
+    const run = makeRun("test-wo-translate", "translate", {
+      targetUnits: ["MFG_ERP.F_ITEM.get_item"], shardIndex: 0, totalShards: 13,
+    })
+    ;(run.metadata as Record<string, unknown>).artifactId = "testapp"
+    const currentEntry = (run as any).phaseHistory[0]
+    const wo = buildShardedWorkerOrder(run, currentEntry, art, null, "summary")
+    expect(wo).toContain("translate summary Worker 任务")
+    // 设计稿只读（skeleton 产，对照基准）
+    expect(wo).toContain("FSD 设计稿（只读，skeleton 产）")
+    expect(wo).toContain(`fsd/MFG_ERP.F_ITEM/get_item.md`)
+    // 总结稿输出路径（summary 本 sub-stage 产）
+    expect(wo).toContain("翻译总结稿（**本 sub-stage 产**，写）")
+    expect(wo).toContain(`summary/MFG_ERP.F_ITEM/get_item.md`)
     expect(wo).not.toContain("{{")
   })
 

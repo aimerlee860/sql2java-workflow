@@ -240,7 +240,7 @@ describe("shardOrderForPhase（analyze/translate 保留 SCC，review 拍平）",
 
 describe("shardOrderForPhase（analyze PROCEDURE 级：保留 SCC）", () => {
   // analyze 下沉到 PROCEDURE 级后，dispatch 传入 procedureOrder（unit id `PKG.refName`）。
-  // analyze 与 translate 同策略：SCC 组内 unit 共处同一分片（artifact 仍 per-unit：fsd/{pkg}/{ref}.md）。
+  // analyze 与 translate 同策略：SCC 组内 unit 共处同一分片（artifact 仍 per-unit：fsd/{pkg}/{ref}.md 设计稿 / summary/{pkg}/{ref}.md 总结稿）。
   const unitOrder = [
     ["PKG_A.p1"],
     ["PKG_A.p2", "PKG_A.p3"], // 同包 SCC 组（互递归 unit）

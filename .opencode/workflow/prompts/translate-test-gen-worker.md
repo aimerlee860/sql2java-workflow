@@ -8,6 +8,7 @@
 
 - 读 translate-core 产出的本 unit `{Proc}ServiceImpl.java`。**测试壳已由 engine 确定性预生成**（`{className}ServiceImplTest.java`，含 `@Mock`/`@InjectMocks` + `// @TEST_METHODS_HERE` 标记）——你用 `edit` 把该标记替换为 @Test 方法体，**不重写整文件、不改 @Mock/@InjectMocks**。
 - **按注入的 `testCases[]` 清单逐条填 @Test**（清单见 workOrder「test 用例清单」块，由 engine 从 PL/SQL 结构确定性枚举），不自行发明用例。每条 = 一个 @Test：按 `setupHint` 配 mock、按 `expectKind` 断言（return-value 或 `assertThrows(BusinessException.class)`+错误码）。
+- **参考 FSD 设计稿 `fsd/{pkg}/{ref}.md` 第 4 板块「业务规则」**（路径见「本 unit 文件清单」，skeleton 产）设计断言与边界值——设计稿列出的校验规则/计算逻辑/边界条件映射为 @Test 的预期值与异常路径，与 `testCases[]` 互补（清单管覆盖面、设计稿管断言语义）。
 - 壳未生成（ServiceImpl 未落盘等降级）时自行创建完整测试类。
 - 不改翻译产物（只读 Java，写测试）。
 
@@ -20,7 +21,7 @@
 
 - ⛔ 完整任务已在本卡系统提示中。禁止 Read `.workOrder.md` / `dispatch-logs/`。
 - ⛔ 只处理本分片 targetUnits，禁止越界。
-- ⛔ 只读本 unit Java 文件 + 测试骨架，不读其他 unit 产物。
+- ⛔ 只读本 unit Java 文件 + 测试骨架 + 设计稿 `fsd/{pkg}/{ref}.md`（只读第 4 板块业务规则），不读其他 unit 产物。
 - ⛔ **禁止 glob/ls/find/Grep 扫描 `src/`、`translations/`、`generated/` 目录**（数百文件平铺，一扫即爆上下文）；只 read/write 下方「本 unit 文件清单」列出的绝对路径。
 
 ## Runtime Context + 本 unit 数据

@@ -19,6 +19,7 @@
 import { readFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync } from "node:fs"
 import { safeWriteFile } from "./cross-platform"
 import { join } from "node:path"
+import { nowLocal } from "./timestamp"
 import { z } from "zod"
 import { parseQualified, pkgOf, refOf } from "./refname"
 import { buildDependencyGraph } from "./dependency-graph"
@@ -276,7 +277,7 @@ export class WorkflowEngine {
     const firstPhase = def.phases[0]
     if (!firstPhase) throw new WorkflowEngineError(`Workflow "${defId}" has no phases`, "INVALID_DEFINITION")
 
-    const now = new Date().toISOString()
+    const now = nowLocal()
     const run: WorkflowRun = {
       runId,
       definitionId: defId,
@@ -302,7 +303,7 @@ export class WorkflowEngine {
     this.artifactCache.clear()  // 每次 advance 开始时清除缓存
     const run = this.getRun(runId)
     const def = this.getDefinition(run.definitionId)
-    const now = new Date().toISOString()
+    const now = nowLocal()
     let crossSchemaWarnings: string[] | undefined
 
     // ── Step 1: 验证 status === "running" ──
@@ -332,7 +333,7 @@ export class WorkflowEngine {
     // ── Step 2: 查找当前阶段配置 ──
     const currentPhaseConfig = def.phases.find(p => p.name === run.currentPhase)
 
-    // 注：translate sub-stage（skeleton→…→fsd）现由 translator master 子 agent 内部经 Task 工具
+    // 注：translate sub-stage（skeleton→…→summary）现由 translator master 子 agent 内部经 Task 工具
     // 串行调度 6 个 slave，引擎不再逐 sub-stage 推进。advance 直走下方 Step 3a 起的全套校验 + shard advance。
     // currentSubStage/currentBatch/totalBatches 字段保留 optional 仅为旧 run.json resume 兼容，不再写入。
 
@@ -610,7 +611,7 @@ export class WorkflowEngine {
     if (!currentEntry) {
       throw new WorkflowEngineError("No current phase entry found", "INVALID_STATE")
     }
-    const now = new Date().toISOString()
+    const now = nowLocal()
     currentEntry.status = "in_progress"
     run.status = "running"
     run.updatedAt = now
@@ -647,8 +648,8 @@ export class WorkflowEngine {
         run.status = "completed_with_issues"
         run.currentPhase = null
         currentEntry.status = "failed"
-        currentEntry.completedAt = new Date().toISOString()
-        run.updatedAt = new Date().toISOString()
+        currentEntry.completedAt = nowLocal()
+        run.updatedAt = nowLocal()
         this.persist(run)
         this.appendEvent(runId, "FAIL", "", "fix retry exhausted → completed_with_issues")
         return {
@@ -661,9 +662,9 @@ export class WorkflowEngine {
       // 非 fix 阶段 exhausted：标记 entry 为 failed + run 为 aborted
       // 避免僵尸状态（run.status="running" 但无 in_progress entry 可操作）
       currentEntry.status = "failed"
-      currentEntry.completedAt = new Date().toISOString()
+      currentEntry.completedAt = nowLocal()
       run.status = "aborted"
-      run.updatedAt = new Date().toISOString()
+      run.updatedAt = nowLocal()
       this.persist(run)
       this.appendEvent(runId, "FAIL", run.currentPhase!, "retry exhausted → aborted")
       return {
@@ -673,7 +674,7 @@ export class WorkflowEngine {
       }
     }
 
-    run.updatedAt = new Date().toISOString()
+    run.updatedAt = nowLocal()
     this.persist(run)
     this.appendEvent(runId, "RETRY", run.currentPhase!, `retry #${currentEntry.retryCount}`)
     return {
@@ -685,7 +686,7 @@ export class WorkflowEngine {
 
   abort(runId: string): WorkflowRun {
     const run = this.getRun(runId)
-    const now = new Date().toISOString()
+    const now = nowLocal()
     const currentEntry = this.findCurrentEntry(run)
     if (currentEntry) {
       currentEntry.status = "failed"
@@ -1005,8 +1006,8 @@ export class WorkflowEngine {
               })
             }
             // sub-stage 产物完整性（warning，不阻断）：master 主从架构下 6 sub-stage 靠 master 自觉派 slave，
-            // 此处仅观测是否漏跑——lint.json（static-check）/ fsd {ref}.md（fsd sub-stage）缺失记 warning 放行。
-            // 不设 blocking：避免 advance 验收时因 master 偷懒跳过而反复重派卡死（lint 下游有 review 静态扫描兜底，fsd 是文档非正确性关键）。
+            // 此处仅观测是否漏跑——lint.json（static-check）/ fsd 设计稿（skeleton）/ summary 总结稿（summary）缺失记 warning 放行。
+            // 不设 blocking：避免 advance 验收时因 master 偷懒跳过而反复重派卡死（lint 下游有 review 静态扫描兜底，文档非正确性关键）。
             if (!existsSync(join(artifactsDir, "translations", pkg, `${ref}.lint.json`))) {
               findings.push({
                 message: `${pkg}.${ref}: translations/${pkg}/${ref}.lint.json 缺失——static-check sub-stage 可能未跑（master 漏派 slave）。lint 下游由 review 静态扫描兜底，已放行`,
@@ -1015,7 +1016,13 @@ export class WorkflowEngine {
             }
             if (!existsSync(join(artifactsDir, "fsd", pkg, `${ref}.md`))) {
               findings.push({
-                message: `${pkg}.${ref}: fsd/${pkg}/${ref}.md 缺失——fsd sub-stage 可能未跑（master 漏派 slave）。FSD 为文档产物非正确性关键，已放行`,
+                message: `${pkg}.${ref}: fsd/${pkg}/${ref}.md 缺失——skeleton sub-stage 可能未产 FSD 设计稿（master 漏派/漏产）。设计稿为文档产物非正确性关键，已放行`,
+                severity: "warning",
+              })
+            }
+            if (!existsSync(join(artifactsDir, "summary", pkg, `${ref}.md`))) {
+              findings.push({
+                message: `${pkg}.${ref}: summary/${pkg}/${ref}.md 缺失——summary sub-stage 可能未跑（master 漏派 slave）。总结稿为文档产物非正确性关键，已放行`,
                 severity: "warning",
               })
             }
@@ -1170,7 +1177,7 @@ export class WorkflowEngine {
       throw new WorkflowEngineError("Cannot fixContinue: no fix entry found with branchedFrom", "INVALID_STATE")
     }
 
-    const now = new Date().toISOString()
+    const now = nowLocal()
 
     // 重置计数器：epoch 设为当前长度
     run.metadata.fixEpoch = run.phaseHistory.length
@@ -1284,7 +1291,7 @@ export class WorkflowEngine {
    * 不关心元素是包名还是 unit id。
    *
    * 为什么 translate 保留 SCC：SCC 互依赖组共处同一分片，分片只决定"一个 session 处理哪些 unit"，
-   * artifact 仍 per-unit（translations/{pkg}/{ref}.json、fsd/{pkg}/{ref}.md）。
+   * artifact 仍 per-unit（translations/{pkg}/{ref}.json、fsd/{pkg}/{ref}.md 设计稿、summary/{pkg}/{ref}.md 总结稿）。
    *
    * 为什么 review 仍拍平：review 是包级、每包审查独立，拆 SCC 包无副作用且并行度更高。
    */
@@ -1793,7 +1800,7 @@ export class WorkflowEngine {
       mkdirSync(logsDir, { recursive: true })
     }
     const logPath = join(logsDir, "_events.log")
-    const now = new Date().toISOString()
+    const now = nowLocal()
     const line = `[${now}] [${eventType}] [${runId}] [${phase}] ${message}\n`
     try { appendFileSync(logPath, line, "utf-8") } catch (e: any) { /* 日志写入失败不阻塞主流程 */ if (typeof process !== "undefined" && process.stderr) process.stderr.write(`[engine-core] appendEvent failed: ${e.message}\n`) }
   }

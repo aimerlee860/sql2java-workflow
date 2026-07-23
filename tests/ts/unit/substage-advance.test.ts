@@ -135,7 +135,7 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
     expect(nextEntry.incrementalContext?.currentSubStage).toBeUndefined()
   })
 
-  it("lint.json / fsd.md 缺失只记 warning 不阻断（master 漏派 slave 观测兜底）", () => {
+  it("lint.json / fsd 设计稿 / summary 总结稿 缺失只记 warning 不阻断（master 漏派 slave 观测兜底）", () => {
     const rid = "test-substage-lintfsd-warning"
     const artifactsDir = join(dir, rid)
     mkdirSync(artifactsDir, { recursive: true })
@@ -149,7 +149,7 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
     entry.incrementalContext = { targetUnits: ["MFG_ERP.F_ITEM.get_item"], shardIndex: 0, totalShards: 1 }
     engine.persist(run)
 
-    // per-unit JSON completed，但缺 lint.json + fsd .md（master 漏派 static-check/fsd）
+    // per-unit JSON completed，但缺 lint.json + fsd 设计稿 + summary 总结稿（master 漏派 static-check/skeleton/summary）
     mkdirSync(join(artifactsDir, "translations", "MFG_ERP.F_ITEM"), { recursive: true })
     writeFileSync(join(artifactsDir, "translations", "MFG_ERP.F_ITEM", "get_item.json"), JSON.stringify({
       unitRefName: "get_item", packageName: "MFG_ERP.F_ITEM", status: "completed",
@@ -160,12 +160,13 @@ describe("translate 主从架构 advance（无 sub-stage 短路）", () => {
     if (adv.rejected && (adv as any).warningPending) {
       adv = engine.advance(rid, { result: "passed", acceptWarnings: true } as any)
     }
-    // 缺 lint/fsd 只 warning → 不阻断，advance 通过（1 shard → transition dedup）
-    expect(adv.rejected, `缺 lint/fsd 应 warning 放行不阻断: ${adv.rejectionReason}`).toBe(false)
+    // 缺 lint/fsd/summary 只 warning → 不阻断，advance 通过（1 shard → transition dedup）
+    expect(adv.rejected, `缺 lint/fsd/summary 应 warning 放行不阻断: ${adv.rejectionReason}`).toBe(false)
     expect(adv.run.currentPhase).toBe("dedup")
     // warning 可见
     const warns = (adv as any).crossSchemaWarnings as string[] | undefined
     expect(warns?.some(w => w.includes("lint.json 缺失"))).toBe(true)
-    expect(warns?.some(w => w.includes("fsd") && w.includes(".md 缺失"))).toBe(true)
+    expect(warns?.some(w => w.includes("fsd") && w.includes("设计稿"))).toBe(true)
+    expect(warns?.some(w => w.includes("summary") && w.includes("总结稿"))).toBe(true)
   })
 })

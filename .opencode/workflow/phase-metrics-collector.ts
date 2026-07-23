@@ -20,6 +20,7 @@ import { join } from "node:path"
 import { safeWriteFile } from "./cross-platform"
 import type { PhaseHistoryEntry, WorkflowRun } from "./engine-core"
 import { getLogger } from "./workflow-logger"
+import { nowLocal } from "./timestamp"
 
 // ── Type Definitions ──────────────────────────────────────────────────────────
 
@@ -228,7 +229,7 @@ class PhaseMetricsCollector {
       phase,
       runId,
       fixIndex,
-      startedAt: new Date().toISOString(),
+      startedAt: nowLocal(),
       apiCallCount: 0,
       apiCalls: [],
       totalCost: 0,
@@ -360,7 +361,7 @@ class PhaseMetricsCollector {
    */
   persistAsIncomplete(): void {
     this.metrics.incomplete = true
-    const now = new Date().toISOString()
+    const now = nowLocal()
     this.metrics.completedAt = now
     if (this.metrics.startedAt) {
       this.metrics.wallDurationMs =

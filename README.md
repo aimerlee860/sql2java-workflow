@@ -129,7 +129,8 @@ nohup opencode run "/sql2java resume" --dangerously-skip-permissions --format js
 ├── analysis-packages/        # 逐包子程序结构
 ├── dependency-graph.json     # callGraph + topology + complexity
 ├── scaffold.json / dedup.json / fix.json   # scaffold.json 含 targetProject + packageMappings（原 plan.json 已合并）
-├── fsd/{package}/{subprogram}.md        # FSD 文档（translate 末尾 fsd sub-stage 产物）
+├── fsd/{package}/{subprogram}.md        # FSD 设计稿（translate skeleton sub-stage 产物，约束下游 translate-core/test-gen）
+├── summary/{package}/{subprogram}.md    # 翻译总结稿（translate summary sub-stage 产物，含设计 vs 实施偏差对照）
 ├── translations/{package}/              # translation.json / review.json / verify.json
 ├── review-summary.json / verify-summary.json
 └── logs/                    # workflow.log / watchdog.log / _events.log
