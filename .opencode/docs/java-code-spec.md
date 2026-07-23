@@ -89,8 +89,7 @@ public class XxxServiceImpl implements XxxService {
 1. 【强制】ServiceImpl 标注 `@Service`，实现对应 Service 接口。
 2. 【强制】依赖用 `@RequiredArgsConstructor` + `final` 字段构造器注入（Lombok 生成构造器），禁止 `@Autowired` 字段注入。
 3. 【强制】类上标注 `@Slf4j`，直接用 `log.info(...)`/`log.error(msg, e)` 记录日志，禁止手写 `LoggerFactory.getLogger`。
-4. 【强制】写操作方法标注 `@Transactional(rollbackFor = Exception.class)`；Service 接口方法不标事务。
-5. 【强制】所有覆写方法标 `@Override`。
+4. 【强制】所有覆写方法标 `@Override`。
 
 ## 三、存储过程转换映射规则
 
@@ -137,7 +136,7 @@ scaffold 生成 XxxDO 字段、translate 转译过程参数/返回值时，**统
 | IF-THEN-ELSE 校验 | `{Proc}ServiceImpl` 内校验 + 抛 `ValidationException` | 业务校验 |
 | 跨包调用 | 被调方 `{Proc}Service` 接口 | 外部服务（按 `service.{ResolvedBase}Service` 派生） |
 | 公共函数 | `Util` | 全局工具类 |
-| `COMMIT/ROLLBACK` | `@Transactional` | 事务管理 |
+| `COMMIT/ROLLBACK` | 方法内自处理（异常 catch + `flag` 标志，不外抛、不标 `@Transactional`） | 事务语义按 PL/SQL 原逻辑保留，事务边界管理待统一方案（见 §9.1） |
 | DML/查询/存储过程调用 | `{Proc}Mapper` + `{Proc}Mapper.xml` | per-proc Mapper（`mapper/` + `resources/mapper/`） |
 
 ### 3.3 异常处理规范
@@ -378,6 +377,12 @@ public class OrderServiceImpl implements OrderService {
 
 ### 9.1 事务管理
 
+> **不使用 `@Transactional`**。ServiceImpl 方法**不标注** `@Transactional(rollbackFor = Exception.class)`（也不标 `readOnly`）。
+>
+> 原因：本工作流异常模型为"方法内 try-catch 自处理、不外抛"（见 translate-core §七）——异常被 catch 后置 `flag/msg` 正常返回，`@Transactional(rollbackFor=Exception.class)` 的回滚**永不触发**，是死注解且会造成"出错部分写库仍被提交"的错误假象。故一律不加。
+>
+> PL/SQL 的 `COMMIT`/`ROLLBACK` 语义暂按原逻辑在方法体内保留（异常 catch + `flag` 标志位体现成功/失败），多 DML 原子性/回滚的统一方案待定（与异常模型一并设计）。
+
 ```java
 @Service
 @Slf4j
@@ -387,13 +392,11 @@ public class OrderServiceImpl implements OrderService {
     private final OrderMapper orderMapper;
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public void saveOrder(OrderDO order) {
-        // 业务逻辑
+        // 业务逻辑（不标 @Transactional）
     }
 
     @Override
-    @Transactional(readOnly = true)
     public OrderDO queryOrder(Long id) {
         return orderMapper.selectById(id);
     }
@@ -401,10 +404,9 @@ public class OrderServiceImpl implements OrderService {
 ```
 
 **规约要点：**
-1. 【强制】涉及数据修改的 ServiceImpl 方法必须标注 `@Transactional(rollbackFor = Exception.class)`。
-2. 【强制】使用 `rollbackFor = Exception.class` 确保所有异常都回滚。
-3. 【强制】事务标注在 ServiceImpl 方法上（Service 接口不标事务）。
-4. 【推荐】只读查询方法可加 `@Transactional(readOnly = true)`。
+1. 【强制】ServiceImpl 方法**不得标注** `@Transactional`（含 `rollbackFor` / `readOnly` 等任何形式）。
+2. 【强制】事务语义按 PL/SQL 原逻辑保留：成功路径正常返回、失败路径 catch 内置 `flag=1/msg`（见 translate-core §七），不靠注解回滚。
+3. 【强制】Service 接口方法也不标事务。
 
 ### 9.2 批量处理
 
@@ -474,7 +476,6 @@ public interface OrderMapper {
 2. 【强制】即使类属性名与数据库字段一一对应，也必须定义 `resultMap`，不得用 `resultClass`/`resultType` 自动映射。
 3. 【强制】SQL 参数使用 `#{}`，禁止使用 `${}`（SQL 注入风险）。
 4. 【强制】存储过程调用使用 `statementType="CALLABLE"`，OUT 参数标注 `mode=OUT` 与 `jdbcType`。
-5. 【推荐】`@Transactional` 不要滥用，事务处需考虑各方面回滚方案。
 
 ## 十二、转换检查清单
 
@@ -489,11 +490,11 @@ public interface OrderMapper {
 5. **`{Proc}Service`**：为该过程入口声明公共方法签名（`service/`）。
 6. **`{Proc}ServiceImpl`**：将核心业务逻辑、变量初始化、校验、事务、异常处理落到 per-proc ServiceImpl 方法（`service.impl/`）；包常量经 `{Pkg}Constant.字段` 静态访问，包变量读写经注入 `{Pkg}StateDTO` bean 访问。
 7. **跨包调用**：将跨包调用封装为被调方 `{Proc}Service` 接口注入（FQN `service.{ResolvedBase}Service`）。
-8. **测试**：编写 `{Proc}ServiceImpl` 单元测试（`service.impl/`）验证等价性 + `{Proc}Mapper` 集成测试（`mapper/`）。
+8. **测试**：编写 `{Proc}ServiceImpl` 单元测试（`service.impl/`）验证等价性。
 
 ## 十三、常见陷阱与注意事项
 
-1. 【强制】事务边界：`@Transactional` 标在 ServiceImpl 写方法上，rollbackFor = Exception.class。
+1. 【强制】事务：ServiceImpl 方法**不标 `@Transactional`**（异常方法内自处理不外抛，注解回滚不生效，见 §9.1）；事务语义按 PL/SQL 原逻辑在方法体保留。
 2. 【强制】异常体系：统一用 `exception` 包下的 `BusinessException` 体系，禁止 `new RuntimeException()`/`Exception`/`Throwable`。
 3. 【强制】依赖注入：构造器注入（`@RequiredArgsConstructor` + `final`），禁止 `@Autowired` 字段注入。
 4. 【强制】日志：`@Slf4j` + `log.xxx`，禁止自定义日志门面、禁止手写 LoggerFactory。
