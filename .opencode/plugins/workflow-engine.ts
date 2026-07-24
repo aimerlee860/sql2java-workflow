@@ -1285,6 +1285,60 @@ function buildUnitFilesBlock(
   return lines.join("\n")
 }
 
+/**
+ * 构造「本 unit 涉及表的 schema 归属」块（仅 translate-core slave 注入）。
+ *
+ * 规约 §四规则 2 早已要求 mapper SQL 表名用 `schema.tableName`，但 scaffold-input 已瘦身为
+ * packages-only、tables 不进 LLM 上下文，translate-core 无从得知表归属哪个 schema → 裸表名漏标。
+ * 本块从 inventory.json 的 tableNames[]（schema-qualified，如 `gmo.acct_trade_mapping`）建
+ * basename→schema 映射，扫描本 unit source.sql 出现的表名，仅注入命中表的归属，供 LLM 标 schema 前缀。
+ *
+ * - basename 词边界匹配（`acct_trade_mapping` 不误命中 `acct_trade_mapping_folder`：后随 `_` 属 word char 不构成边界）
+ * - basename 跨 schema 同名（歧义）→ 列全部候选并标 ⚠️，交 LLM 按 source.sql 上下文选
+ * - source.sql 缺失 / 无命中 → 返回 ""（不注入空块）
+ * - synonym / 未扫到 DDL 的表无归属，规约要求保留原样并在 notes 注明
+ */
+function buildTableSchemaBlock(artifactsDir: string, pkg: string, ref: string): string {
+  const inv = readJsonOrNull(join(artifactsDir, "inventory.json"))
+  const tableNames: string[] = Array.isArray(inv?.tableNames) ? inv.tableNames : []
+  if (tableNames.length === 0) return ""
+
+  // basename(lower) → 完整 schema-qualified 名列表
+  const byBase = new Map<string, string[]>()
+  for (const tn of tableNames) {
+    if (typeof tn !== "string" || !tn) continue
+    const base = tn.includes(".") ? tn.split(".").slice(1).join(".") : tn
+    const key = base.toLowerCase()
+    if (!byBase.has(key)) byBase.set(key, [])
+    byBase.get(key)!.push(tn)
+  }
+
+  let source = ""
+  try { source = readFileSync(join(artifactsDir, "shard-inputs", pkg, ref, "source.sql"), "utf-8") } catch { /* unit source.sql 缺失 → 不注入 */ }
+  if (!source) return ""
+  const lower = source.toLowerCase()
+
+  const hits: string[] = []
+  for (const [base, names] of byBase) {
+    // 词边界：前导非 word/行首 + base + 后随非 word/行尾；base 仅 [A-Za-z0-9_] 无需 escape
+    const re = new RegExp(`(^|[^A-Za-z0-9_])${base}([^A-Za-z0-9_]|$)`, "i")
+    if (!re.test(lower)) continue
+    if (names.length === 1) {
+      hits.push(`- \`${names[0]}\``)
+    } else {
+      hits.push(`- ⚠️ \`${base}\` 跨 schema 同名歧义，候选：${names.map(n => `\`${n}\``).join(" / ")}（按 source.sql 上下文选其一的 \`schema.table\` 形式）`)
+    }
+  }
+  if (hits.length === 0) return ""
+  return [
+    "",
+    "## 本 unit 涉及表的 schema 归属（mapper SQL 表名须带 schema 前缀，规约 §四规则 2）",
+    "- 下方为本 unit source.sql 中出现的表及其 DDL 归属 schema；mapper XML 的 FROM/JOIN/UPDATE/INTO/DELETE FROM/MERGE INTO 表引用须用 `schema.tableName` 形式（已在 source.sql 带 schema 的保持原样，勿重复加前缀）。",
+    "- 未列出的表（synonym / 未扫到 DDL）无法确定归属，保留原样并在 notes 注明。",
+    ...hits.sort(),
+  ].join("\n")
+}
+
 /** sidecar 文件路径：承载 segments[]（skeleton 写/core 更新）+ testCases[]（engine 写），独立于 compile 封口的 per-unit json。 */
 function segmentsSidecarPath(artifactsDir: string, pkg: string, ref: string): string {
   return join(artifactsDir, "translations", pkg, `${ref}.segments.json`)
@@ -1550,6 +1604,7 @@ export function buildShardedWorkerOrder(
     // 多段切分 + test-gen 确定性前置：core 注入下一 pending 段；test-gen 枚举用例+生成壳+注入清单。
     if (subStageOverride === "translate-core") {
       unitFilesBlock += buildCoreSegmentBlock(artDir, projectRoot, unitPkg, unitRef)
+      unitFilesBlock += buildTableSchemaBlock(artDir, unitPkg, unitRef)
     } else if (subStageOverride === "test-gen" && projectRoot) {
       unitFilesBlock += buildTestGenBlock(artDir, projectRoot, unitPkg, unitRef)
     }

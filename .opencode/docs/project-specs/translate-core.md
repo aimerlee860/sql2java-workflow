@@ -38,7 +38,7 @@
 ## 四、Mapper XML 规范
 
 1. **禁止 `SELECT *`**——必须明确列出所有字段。
-2. **表名用 `schema.tableName`** 格式（schema 从 inventory/scaffold 取，禁凭空猜测）。
+2. **表名用 `schema.tableName`** 格式（schema 取自 workOrder「本 unit 涉及表的 schema 归属」块——引擎据 inventory DDL 归属注入本 unit source.sql 命中表；禁凭空猜测。已在 source.sql 带 schema 的保持原样，勿重复加前缀；未列入该块的表/synonym 无法确定归属，保留原样并在 notes 注明）。
 3. **比较符号 XML 转义或 CDATA**：`<`→`&lt;`（或 `<![CDATA[<]]>`）、`>`→`&gt;`（或 `<![CDATA[>]]>`）、`<=`→`&lt;=`（或 `<![CDATA[<=]]>`）、`>=`→`&gt;=`（或 `<![CDATA[>=]]>`）、`&`→`&amp;`。两者皆可，整段复杂条件推荐 CDATA。
 4. **占位符用 `#{}`**（禁 `${}`），namespace 对应 Mapper 接口全限定名。
 5. **禁止 Mapper XML 调用存储过程**（去存储过程化目标）：XML 只查原始字段；存储过程调用改为 Java Service 层调已转换的 Service 方法，结果 set 回 DTO。

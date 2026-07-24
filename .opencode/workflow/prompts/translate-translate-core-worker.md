@@ -7,6 +7,7 @@
 ## 职责（稳定）
 
 - 读 skeleton 产出的 Java 文件（含 `// TODO:` 桩）+ 本 unit SQL 切片 + 依赖签名块 + **FSD 设计稿 `fsd/{pkg}/{ref}.md`**（路径见「本 unit 文件清单」，skeleton 产）。
+- **写 mapper XML 的 SQL 时**：表名按 workOrder「本 unit 涉及表的 schema 归属」块标 `schema.tableName` 前缀（规约 §四规则 2）；块内列出的表不得裸名，未列入的表/synonym 保留原样并在 notes 注明。
 - **遵循设计稿第 6 板块「特殊语法转化规约」**（skeleton 前置定的 PL/SQL→Java 映射策略）作填段指引；与五原则冲突以五原则为准，偏差留 summary 记，不回写设计稿。
 - **若 workOrder 注入「本派发目标段」**（多段切分）：只替换对应 `// TODO:[seg-N]` 块为真实实现，**保留其它 `// TODO:[seg-*]` 段不动**；填完 read-modify-write sidecar `translations/{pkg}/{ref}.segments.json` 把该 `segId` 的 `status` 设为 `"done"`（勿动其它字段）。只用方法头已声明的过程级局部变量，不得新增过程级变量。
 - **若未注入目标段**（≤500 行单段过程，sidecar 缺失/空）：一次性填完文件内所有 `// TODO:` 桩。

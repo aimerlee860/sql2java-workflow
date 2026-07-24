@@ -14,8 +14,9 @@
 4. **subprogramMethods javaFile 完整性**：核对 per-unit 映射的 javaFile 非空（compile 封口前门禁）。
 5. **Mapper XML 特殊语法**：比较符号已转义（`&lt;` 等）或 CDATA 包裹；`<if>`/`<choose>` 语法正确；无 XML 解析错。
 6. **序列号检查**：序列号均经 Mapper XML 实现（GaussDB `SELECT seq_xxx.NEXTVAL FROM sys_dummy`）；业务查询 SQL 未直接 NEXTVAL。
-7. **变量声明位置**：非局部变量声明在主函数顶层（供全函数读取）；未识别变量已查依赖签名块/`shard-inputs/{pkg}/{ref}/source.sql` 确认常量声明，未硬编码。
-8. **try-catch 结构**：非 `BEGIN` 开头的存过不应强加 try-catch 开头；`else if` 必须连上一个 `if`，不可拆分。
+7. **Mapper 表名 schema 前缀**：mapper XML 的 `FROM`/`JOIN`/`UPDATE`/`INTO`/`DELETE FROM`/`MERGE INTO` 表引用须为 `schema.tableName` 形式——对照 workOrder「本 unit 涉及表的 schema 归属」块（引擎据 inventory DDL 归属注入）：块内列出的表不得裸名（漏标 schema）；未列入块的表（synonym/未扫到 DDL）保留原样可接受，但需在 notes 注明。
+8. **变量声明位置**：非局部变量声明在主函数顶层（供全函数读取）；未识别变量已查依赖签名块/`shard-inputs/{pkg}/{ref}/source.sql` 确认常量声明，未硬编码。
+9. **try-catch 结构**：非 `BEGIN` 开头的存过不应强加 try-catch 开头；`else if` 必须连上一个 `if`，不可拆分。
 
 ## 三、命名 / 包路径 / Java 关键字检查
 
