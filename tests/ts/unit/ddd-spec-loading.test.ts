@@ -52,7 +52,7 @@ describe("DDD 架构模型解析", () => {
     const m = parseArchitectureModel(archModel)!
     expect(m).not.toBeNull()
     expect(m.layout).toBe("rooted-module")
-    expect(m.packageBase).toBe("com.example.mfgerp")
+    expect(m.packageBase).toBe("{packageBase}")
     // 角色含 DDD 分层
     const roles = m.roles.map(r => r.role)
     expect(roles).toContain("access")
@@ -68,7 +68,7 @@ describe("DDD 架构模型解析", () => {
     expect(m.entity.suffix).toBe("Bean")
     expect(m.entity.annotations).toEqual(["@Component"])
     expect(m.exception.baseClass).toBe("TranFailException")
-    // 跨包调用 FQN 走 access 层
-    expect(m.crossPackageCall.fqnPattern).toBe("com.example.mfgerp.{module}.access.{className}AccessIntf")
+    // 跨包调用 FQN 走 access 层（{packageBase} 运行时占位，由 loadArchitectureModel 注入）
+    expect(m.crossPackageCall.fqnPattern).toBe("{packageBase}.{module}.access.{className}AccessIntf")
   })
 })

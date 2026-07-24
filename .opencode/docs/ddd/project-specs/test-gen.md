@@ -11,7 +11,7 @@
 
 ## 二、测试文件位置与命名
 
-- 目录与类名按架构模型段实现层角色（processor）的 `testDir`/`testSuffix`：`{projectRoot}/src/test/java/com/example/mfgerp/{module}/processor/` + `{className}ProcessorTest`。
+- 目录与类名按架构模型段实现层角色（processor）的 `testDir`/`testSuffix`：`{projectRoot}/src/test/java/{packageBase}/{module}/processor/` + `{className}ProcessorTest`。
 - `className` 查 `scaffold.json.generated.procClassNames`（如 `GetTrdDtl` → `GetTrdDtlProcessorTest`）。
 - **只生成 ProcessorTest，不生成 MapperIntegrationTest**。
 

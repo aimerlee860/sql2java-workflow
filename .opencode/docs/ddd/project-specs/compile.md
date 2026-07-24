@@ -30,9 +30,9 @@
 | 子程序 refName | inventory 算好的 refName（重载带 `__序号`） | `r_fxsp_imp` |
 | SQL 完整路径 | `schema.pkg.funcName` 格式 | `gmo.p_gmo_fx_trade_import.r_fxsp_imp` |
 | Java 方法 | `className.methodName()` 格式（className 含角色后缀） | `FxspImpProcessor.fxspImp()` |
-| Java 文件相对路径 | 从 projectRoot 起的相对路径（按架构模型段入口角色 `dir`） | `src/main/java/com/example/mfgerp/fxsp/processor/FxspImpProcessor.java` |
+| Java 文件相对路径 | 从 projectRoot 起的相对路径（按架构模型段入口角色 `dir`） | `src/main/java/{packageBase}/fxsp/processor/FxspImpProcessor.java` |
 
-> 入口角色类全限定名（`javaClass`）按架构模型段 `crossPackageCall.fqnPattern` 派生（DDD = `com.example.mfgerp.{module}.access.{className}AccessIntf`，入口角色 = access）。
+> 入口角色类全限定名（`javaClass`）按架构模型段 `crossPackageCall.fqnPattern` 派生（DDD = `{packageBase}.{module}.access.{className}AccessIntf`，入口角色 = access）。
 
 - 序号递增、路径可定位到文件、命名可追溯（过程名↔方法名）。
 - **维护要求**：完成后立即登记（不延后）、路径准确可定位、翻译逻辑与原始 PL/SQL 定义一致。

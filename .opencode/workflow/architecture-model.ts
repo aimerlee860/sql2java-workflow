@@ -276,10 +276,30 @@ export function findImplRole(model: ArchitectureModel): RoleSpec | undefined {
  *  rooted-module 布局每包一模块。pkg 可能是 schema-qualified（如 `MFG_ERP.F_ORDER`，pkgOf 后带点），
  *  取末段（`F_ORDER`）小写得 module —— 与 scaffold/skeleton 用 `plsqlPackage`（不含 schema）小写一致，
  *  避免把 schema 的 `.` 带进路径/包名（路径里 `.` 非法、与 LLM 建的目录不一致）。
- *  flat-no-root 路径无 `{module}` 占位，原样返回。`{packageBase}` 已在模型里展开为具体值，不留占位。 */
+ *  flat-no-root 路径无 `{module}` 占位，原样返回。
+ *  `{packageBase}` 为项目级运行时占位，由 loadArchitectureModel 读 scaffold.json 后展开成具体值，
+ *  到 resolveModelPath 消费时已落定，此处不再处理。 */
 export function resolveModelPath(p: string, pkg: string): string {
   const moduleSeg = pkg.slice(pkg.lastIndexOf(".") + 1).toLowerCase()
   return p.replace(/\{module\}/g, moduleSeg)
+}
+
+/** 把模型里所有 `{packageBase}` / `{packageBaseDir}` 占位替换成具体根包（项目级，scaffold 决策）。
+ *  `{packageBase}` → 点式（com.example.mfgerp），用于 package/FQN/扫描包等 Java 包名字段；
+ *  `{packageBaseDir}` → 斜杠式（com/example/mfgerp），用于 dir/testDir 等文件系统路径字段。
+ *  packageBase 缺失（无根包模型 / scaffold.json 尚未生成）时原样返回占位版。
+ *  用 JSON 序列化整体替换，一次性覆盖所有字符串字段，避免逐字段枚举漏改。
+ *  先替换 `{packageBaseDir}`（更长 token），再替换 `{packageBase}`。 */
+function resolvePackageBasePlaceholders(model: ArchitectureModel, packageBase: string | undefined): ArchitectureModel {
+  const serialized = JSON.stringify(model)
+  if (!packageBase || !serialized.includes("{packageBase")) return model
+  const pbDir = packageBase.replace(/\./g, "/")
+  const replaced = serialized
+    .replaceAll("{packageBaseDir}", pbDir)
+    .replaceAll("{packageBase}", packageBase)
+  const next = JSON.parse(replaced) as ArchitectureModel
+  next.packageBase = packageBase
+  return next
 }
 
 /** 校验 architecture-model.json 形状完整（各子对象/必填字段非空），残缺返回 false */
@@ -299,18 +319,39 @@ function isValidModel(raw: any): boolean {
   return true
 }
 
-/** 读 <artifactsDir>/architecture-model.json；缺失/解析失败/形状残缺回退默认并 warn */
+/** 读 <artifactsDir>/architecture-model.json；缺失/解析失败/形状残缺回退默认并 warn。
+ *  读后从同目录 scaffold.json 取 targetProject.packageBase（兜底 groupId），把模型里所有
+ *  `{packageBase}` 占位替换成具体值——arch-model.json 在 start 落盘时 packageBase 尚未决策
+ *  （scaffold 阶段才定），故在此懒注入。scaffold.json 缺失（pre-scaffold，仅 scaffold agent 自身）
+ *  时占位保留。 */
 export function loadArchitectureModel(artifactsDir: string): ArchitectureModel {
   const p = join(artifactsDir, "architecture-model.json")
   if (!existsSync(p)) return DEFAULT_ARCHITECTURE_MODEL
+  let model: ArchitectureModel
   try {
     const raw = JSON.parse(readFileSync(p, "utf-8"))
-    if (isValidModel(raw)) return raw as ArchitectureModel
-    getLogger().warn("[architecture-model]", `architecture-model.json 形状不完整，回退默认模型: ${p}`)
+    if (!isValidModel(raw)) {
+      getLogger().warn("[architecture-model]", `architecture-model.json 形状不完整，回退默认模型: ${p}`)
+      return DEFAULT_ARCHITECTURE_MODEL
+    }
+    model = raw as ArchitectureModel
   } catch {
     getLogger().warn("[architecture-model]", `architecture-model.json 解析失败，回退默认模型: ${p}`)
+    return DEFAULT_ARCHITECTURE_MODEL
   }
-  return DEFAULT_ARCHITECTURE_MODEL
+  // {packageBase} 占位懒注入：读同目录 scaffold.json 的 targetProject.packageBase（兜底 groupId）
+  const scaffoldPath = join(artifactsDir, "scaffold.json")
+  if (existsSync(scaffoldPath)) {
+    try {
+      const sc = JSON.parse(readFileSync(scaffoldPath, "utf-8"))
+      const tp = sc?.targetProject ?? {}
+      const pb = (typeof tp.packageBase === "string" && tp.packageBase) || (typeof tp.groupId === "string" && tp.groupId) || undefined
+      model = resolvePackageBasePlaceholders(model, pb)
+    } catch {
+      // scaffold.json 解析失败不阻断——保留占位版，下游 builder 多在 scaffold 完成后跑届时已可读
+    }
+  }
+  return model
 }
 
 /** 格式化成紧凑 markdown 摘要（runtimeContext 注入用） */

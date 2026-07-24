@@ -237,11 +237,15 @@ export const InventoryIndexSchema = z.object({
 // ============================================================================
 
 /** targetProject（artifactId 不在此——由 run-context.json 提供，引擎据此算 projectRoot）。
- *  无根包模型：不设 packageBase，分层目录即顶层 package（规约 §工程结构）。 */
+ *  packageBase：有根包模型（rooted-module，如 DDD）必填——scaffold 决策，默认取 groupId；
+ *  无根包模型（flat-no-root）不设（留空），分层目录即顶层 package（规约 §工程结构）。
+ *  loadArchitectureModel 读取此字段把架构模型里的 `{packageBase}` 占位替换成具体值。 */
 export const TargetProjectSchema = z.object({
   groupId: z.string(),
   javaVersion: z.string(),
   springBootVersion: z.string(),
+  /** Java 根包（有根包模型必填，默认 = groupId；无根包模型留空） */
+  packageBase: z.string().optional(),
 })
 
 /** PL/SQL Package → per-proc 角色集映射（架构无关：components[] 由注入的 Java 代码规约

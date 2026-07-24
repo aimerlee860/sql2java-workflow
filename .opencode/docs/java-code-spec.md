@@ -601,7 +601,7 @@ public final class SplitListUtil {
 
 - **Java 版本**: 1.8（JDK 8）
 - **Spring Boot 版本**: 2.7.x（最后一个支持 Java 8 的版本，禁止使用 3.x）
-- **MyBatis starter**: mybatis-spring-boot-starter 2.x（禁止使用 mybatis-plus-spring-boot3-starter）
+- **MyBatis starter**: mybatis-plus-boot-starter 3.5.5（MyBatis-Plus 超集，支持 `@TableName` 注解 + XML mapper；禁止使用 mybatis-plus-spring-boot3-starter。测试依赖 `mybatis-spring-boot-starter-test` 不受此限）
 
 ### 依赖命名空间
 

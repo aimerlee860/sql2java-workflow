@@ -69,41 +69,41 @@ const DDD_BODY = `
 rooted-module
 
 ### packageBase
-com.example.mfgerp
+{packageBase}
 
 ### 角色
 | role | suffix | package | dir | testDir | testSuffix | implRole |
 |---|---|---|---|---|---|---|
-| access | AccessIntf | com.example.mfgerp.{module}.access | src/main/java/com/example/mfgerp/{module}/access | | | |
-| processor | Processor | com.example.mfgerp.{module}.processor | src/main/java/com/example/mfgerp/{module}/processor | src/test/java/com/example/mfgerp/{module}/processor | ProcessorTest | true |
-| aggregate | Aggregate | com.example.mfgerp.{module}.domain.aggregate | src/main/java/com/example/mfgerp/{module}/domain/aggregate | | | |
+| access | AccessIntf | {packageBase}.{module}.access | src/main/java/{packageBaseDir}/{module}/access | | | |
+| processor | Processor | {packageBase}.{module}.processor | src/main/java/{packageBaseDir}/{module}/processor | src/test/java/{packageBaseDir}/{module}/processor | ProcessorTest | true |
+| aggregate | Aggregate | {packageBase}.{module}.domain.aggregate | src/main/java/{packageBaseDir}/{module}/domain/aggregate | | | |
 
 ### 包级产物
 | artifact | suffix | dir |
 |---|---|---|
-| constant | Constant | src/main/java/com/example/mfgerp/{module}/common/utils |
-| stateDto | StateDTO | src/main/java/com/example/mfgerp/{module}/common/utils |
+| constant | Constant | src/main/java/{packageBaseDir}/{module}/common/utils |
+| stateDto | StateDTO | src/main/java/{packageBaseDir}/{module}/common/utils |
 
 ### 实体
 - 后缀: Bean
-- 目录: src/main/java/com/example/mfgerp/beans
-- 包: com.example.mfgerp.beans
+- 目录: src/main/java/{packageBaseDir}/beans
+- 包: {packageBase}.beans
 - 注解: @Component
 - imports: org.springframework.stereotype.Component
 
 ### 异常
 - 基类: TranFailException
-- 包: com.example.mfgerp.common.infrastructure
+- 包: {packageBase}.common.infrastructure
 - 子类: TranFailException
 
 ### 跨包调用
-- FQN 模式: com.example.mfgerp.{module}.access.{className}AccessIntf
+- FQN 模式: {packageBase}.{module}.access.{className}AccessIntf
 
 ### 覆盖率排除
 common/infrastructure/, beans/, mapper/
 
 ### 主类扫描包
-com.example.mfgerp
+{packageBase}
 `
 
 describe("DEFAULT_ARCHITECTURE_MODEL（4 文件回归基线）", () => {
@@ -158,7 +158,7 @@ describe("parseArchitectureModel — DDD 实例", () => {
   it("有根包、processor 为实现层、实体 Bean 无 Lombok、TranFailException", () => {
     const m = parseArchitectureModel(DDD_BODY)!
     expect(m.layout).toBe("rooted-module")
-    expect(m.packageBase).toBe("com.example.mfgerp")
+    expect(m.packageBase).toBe("{packageBase}")
     expect(m.roles.map(r => r.role)).toEqual(["access", "processor", "aggregate"])
     const proc = m.roles.find(r => r.role === "processor")!
     expect(proc.implRole).toBe(true)
@@ -167,7 +167,7 @@ describe("parseArchitectureModel — DDD 实例", () => {
     expect(m.entity.annotations).toEqual(["@Component"])
     expect(m.entity.imports).toEqual(["org.springframework.stereotype.Component"])
     expect(m.exception.baseClass).toBe("TranFailException")
-    expect(m.crossPackageCall.fqnPattern).toBe("com.example.mfgerp.{module}.access.{className}AccessIntf")
+    expect(m.crossPackageCall.fqnPattern).toBe("{packageBase}.{module}.access.{className}AccessIntf")
     expect(m.coverageExcludes).toContain("common/infrastructure/")
   })
 })
@@ -242,6 +242,41 @@ describe("loadArchitectureModel", () => {
     writeFileSync(join(dir, "architecture-model.json"), "{not json")
     const m = loadArchitectureModel(dir)
     expect(m.layout).toBe("flat-no-root")
+  })
+  it("scaffold.json targetProject.packageBase → {packageBase} 占位全替换", () => {
+    const dir = mkdtempSync(join(tmpdir(), "am-"))
+    const ddd = parseArchitectureModel(DDD_BODY)!
+    writeFileSync(join(dir, "architecture-model.json"), JSON.stringify(ddd))
+    writeFileSync(join(dir, "scaffold.json"), JSON.stringify({
+      targetProject: { groupId: "com.other", packageBase: "com.example.mfgerp", javaVersion: "1.8", springBootVersion: "2.7.x" },
+    }))
+    const m = loadArchitectureModel(dir)
+    expect(m.packageBase).toBe("com.example.mfgerp")
+    const proc = m.roles.find(r => r.role === "processor")!
+    expect(proc.package).toBe("com.example.mfgerp.{module}.processor")
+    expect(proc.dir).toBe("src/main/java/com/example/mfgerp/{module}/processor")
+    expect(m.entity.dir).toBe("src/main/java/com/example/mfgerp/beans")
+    expect(m.crossPackageCall.fqnPattern).toBe("com.example.mfgerp.{module}.access.{className}AccessIntf")
+    expect(m.scanBasePackages).toEqual(["com.example.mfgerp"])
+  })
+  it("scaffold.json 无 packageBase → 兜底用 groupId", () => {
+    const dir = mkdtempSync(join(tmpdir(), "am-"))
+    const ddd = parseArchitectureModel(DDD_BODY)!
+    writeFileSync(join(dir, "architecture-model.json"), JSON.stringify(ddd))
+    writeFileSync(join(dir, "scaffold.json"), JSON.stringify({
+      targetProject: { groupId: "com.icbc.fmhm", javaVersion: "1.8", springBootVersion: "2.7.x" },
+    }))
+    const m = loadArchitectureModel(dir)
+    expect(m.packageBase).toBe("com.icbc.fmhm")
+    expect(m.roles.find(r => r.role === "access")!.package).toBe("com.icbc.fmhm.{module}.access")
+  })
+  it("scaffold.json 缺失（pre-scaffold）→ {packageBase} 占位保留", () => {
+    const dir = mkdtempSync(join(tmpdir(), "am-"))
+    const ddd = parseArchitectureModel(DDD_BODY)!
+    writeFileSync(join(dir, "architecture-model.json"), JSON.stringify(ddd))
+    const m = loadArchitectureModel(dir)
+    expect(m.packageBase).toBe("{packageBase}")
+    expect(m.roles.find(r => r.role === "processor")!.package).toBe("{packageBase}.{module}.processor")
   })
 })
 

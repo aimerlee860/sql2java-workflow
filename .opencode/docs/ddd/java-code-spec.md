@@ -23,7 +23,7 @@
 
 > **架构决策以 `## 架构模型` 段为唯一事实源**（由 `@include ./arch-model.md` 内联）：角色集合（access/access-impl/processor/aggregate/builder/validator/outservice/mapper）、角色→目录/后缀映射、实体后缀（Bean）+注解、异常基类（TranFailException）、跨包调用 FQN 模式、覆盖率排除、主类扫描包一律以该段为准。下方各章示例（com.icbc.fmhm / kfzx-zhangc 等）仅为说明，与架构模型段冲突时以架构模型段为准。
 
-> **包根项目特定**：规约中出现的 `com.icbc.fmhm` 仅为举例，实际包根由 plan 阶段按目标项目推导（架构模型段 `packageBase`，如 `com.example.mfgerp`、`com.icbc.fmhm` 等）。工程结构路径用 `{packageBase}`（项目根包）与 `{module}`（模块名）占位符表达。
+> **包根项目特定**：架构模型段 `### packageBase` 为 `{packageBase}` 运行时占位，实际包根由 **scaffold 阶段**从 `targetProject.packageBase`（默认取 groupId）决策，引擎 `loadArchitectureModel` 读取时把模型里所有 `{packageBase}`（点式，包名字段）/ `{packageBaseDir}`（斜杠式，路径字段）替换成具体值（如 `com.example.mfgerp`、`com.icbc.fmhm`）。arch-model.md 只定义架构形状、不写死根包，故本 DDD 规约可复用到任意工程。工程结构路径用 `{packageBase}`（项目根包）与 `{module}`（模块名）占位符表达。
 
 > **工程结构章节**：下方 `## 工程结构` 为单模块的 DDD 分层目录布局模板。`{packageBase}` = 架构模型段 packageBase；`{module}` = **`plsqlPackage` 小写**（引擎与 scaffold/skeleton 一致派生，见架构模型段 `{module}` 占位契约）。scaffold 按每个 PL/SQL 包对应的模块复制此布局（基础设施层为项目级共享，按 packageBase 只建一次）。该章节正文仅含可解析路径（行内 `#` 注释由引擎剥离），供 scaffold 消费。
 
@@ -314,7 +314,7 @@ public void saveDeal(XxxBean bean) throws TranFailException {
 4. 【强制】命名不得以下划线或美元符号开始或结束；严禁拼音与英文混合，禁止直接使用中文。
 5. 【强制】抽象类用 `Abstract`/`Base` 开头；异常类用 `Exception` 结尾；测试类以被测类名开头、`Test` 结尾。
 6. 【推荐】Service/DAO 层方法前缀：`get` 取单个、`list` 取多个、`count` 取统计、`save/insert` 插入、`remove/delete` 删除、`update` 修改。
-7. 【参考】类名前缀（如示例中的 `Int`/`Cfc` 等）为**项目特定的命名约定**，由 plan 阶段按目标项目推导，非强制；非该约定项目不得照抄此前缀。
+7. 【参考】类名前缀（如示例中的 `Int`/`Cfc` 等）为**项目特定的命名约定**，由 scaffold 阶段按目标项目推导，非强制；非该约定项目不得照抄此前缀。
 
 ### 4.2 注释规范
 
@@ -339,7 +339,7 @@ public class IrsCcsDealProcessor {
 **规约要点：**
 1. 【强制】所有注释必须使用中文（Javadoc、行内注释、TODO 标记等），专有名词与 Java 关键字保持英文原文。
 2. 【强制】类、类属性、类方法的注释使用 Javadoc 规范（`/** 内容 */`），不得使用 `// xxx`。
-3. 【强制】类注释必须包含：职责描述、主要流程、`@author`、`@version`、`@since`。`@author` 为**项目特定的开发者标识**，由 plan 阶段按目标项目推导，非该项目不得照抄。
+3. 【强制】类注释必须包含：职责描述、主要流程、`@author`、`@version`、`@since`。`@author` 为**项目特定的开发者标识**，由 scaffold 阶段按目标项目推导，非该项目不得照抄。
 4. 【强制】方法注释必须包含：功能描述、参数说明、返回值、异常说明。
 5. 【推荐】复杂逻辑使用 `<ol>`/`<ul>` 列表说明步骤。
 
@@ -565,7 +565,7 @@ public interface IntCfcIrsDealMapper {
 
 - **Java 版本**: 1.8（JDK 8）
 - **Spring Boot 版本**: 2.7.x（最后一个支持 Java 8 的版本，禁止使用 3.x）
-- **MyBatis starter**: mybatis-spring-boot-starter 2.x（禁止使用 mybatis-plus-spring-boot3-starter）
+- **MyBatis starter**: mybatis-plus-boot-starter 3.5.5（MyBatis-Plus 超集，支持 `@TableName` 注解 + XML mapper；禁止使用 mybatis-plus-spring-boot3-starter。测试依赖 `mybatis-spring-boot-starter-test` 不受此限）
 
 ### 依赖命名空间
 

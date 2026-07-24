@@ -984,8 +984,16 @@ function buildRuntimeContext(run: WorkflowRun): string {
     for (const dir of ps) lines.push(`  - ${dir}`)
   }
 
-  // architectureModel: 架构决策唯一事实源摘要（角色/实体/异常/FQN），所有 agent 可见的 canonical 值
-  const am = (run.metadata as Record<string, unknown>).architectureModel as ArchitectureModel | undefined
+  // architectureModel: 架构决策唯一事实源摘要（角色/实体/异常/FQN），所有 agent 可见的 canonical 值。
+  // 走 loadArchitectureModel(artifactsDir) 磁盘读 + {packageBase} 懒注入（scaffold 决策后落定），
+  // 而非 start 时缓存的 metadata.architectureModel（那份在 packageBase 决策前落盘，含占位）。
+  // 读异常兜底回 metadata，保证至少有占位版可见。
+  let am: ArchitectureModel | undefined
+  try {
+    am = loadArchitectureModel(join(ARTIFACT_DIR, run.runId))
+  } catch {
+    am = (run.metadata as Record<string, unknown>).architectureModel as ArchitectureModel | undefined
+  }
   if (am && typeof am === "object" && Array.isArray(am.roles)) {
     lines.push(`architectureModel:`)
     for (const ln of formatArchitectureModel(am).split("\n")) lines.push(`  ${ln}`)

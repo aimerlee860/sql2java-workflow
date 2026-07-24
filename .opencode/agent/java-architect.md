@@ -84,7 +84,8 @@ permission:
 **0.1 读取上游 + 翻译闭包 scope**：读 `scaffold-input.json`（`packageNames` + `packages[]`）。若 workOrder 注入 `## 翻译闭包 scope` 段：只处理 `scopePackages`；`mainEntry` 为过程级 `subdir/PKG.refName`。无 scope 段 = 全量翻译。
 
 **0.2 决策 targetProject**（不含 artifactId）：
-- `groupId` — 基于源码项目名（maven groupId；无根包模型下不设 `packageBase`）
+- `groupId` — 基于源码项目名（maven groupId）
+- `packageBase` — **架构模型段 `### packageBase` 决定是否设**：有根包模型（`rooted-module`，段内为 `{packageBase}` 占位）**必填**，默认取 `groupId`（如 groupId `com.example.mfgerp` → packageBase `com.example.mfgerp`），可按目标项目调整；无根包模型（`flat-no-root`，段内留空）**不设**。引擎 `loadArchitectureModel` 据此把架构模型里所有 `{packageBase}` 占位替换成具体值。
 - `javaVersion` / `springBootVersion` — **必须严格使用规约"Java 版本与框架配置"段落的值**
 
 **0.3 决策 packageMappings**（写入 `packageMappings[]`，每项含 `plsqlSchema`/`plsqlPackage`/`components[]`，**无 `javaPackage`**）：按规约分层架构/工程结构章节定义的 per-proc 角色集，为每个期望包填 `components[]`（每项仅 `{role}`——角色集模板，per-proc 类名由 `procClassNames` 去重基名 + 角色后缀派生，**不逐类枚举 className**）。角色→顶层包由规约固定（service→`service`、service-impl→`service.impl`、mapper→`mapper`、constant→`constant`、state-dto→`dto`），scaffold 不再派生 javaPackage：
@@ -107,11 +108,11 @@ permission:
 
 #### Step 2: 生成 pom.xml
 
-依赖：spring-boot-starter、spring-boot-starter-web、**mybatis-plus-boot-starter（3.5.5，MyBatis-Plus 超集，支持 XML mapper + `@TableName`）**、lombok、spring-boot-starter-test（含 JUnit 5 + Mockito）、mybatis-spring-boot-starter-test、h2。
+依赖：spring-boot-starter、spring-boot-starter-web、**MyBatis starter（artifact 与版本一律取规约【强制】Java 版本与框架配置段，不得在本提示词自选；该段默认指定 mybatis-plus-boot-starter 3.5.5，MyBatis-Plus 超集，支持 XML mapper + `@TableName`）**、lombok、spring-boot-starter-test（含 JUnit 5 + Mockito）、mybatis-spring-boot-starter-test、h2。
 
 > ⛔ **禁止单独引入 `spring-boot-test-autoconfigure` 或 `spring-boot-test`**——`spring-boot-starter-test` 已传递包含。测试注解只需 `spring-boot-starter-test` + `mybatis-spring-boot-starter-test`。
 >
-> ⚠️ **用 `mybatis-plus-boot-starter` 替代 `mybatis-spring-boot-starter`**——DO 实体用 `@TableName`（MyBatis-Plus 注解），vanilla mybatis 无此注解会编译失败。mybatis-plus 是 mybatis 超集，translate 的 XML mapper + `@MapperScan("mapper")` 仍工作；测试配置键用 `mybatis-plus.*`（见 Step 7）。
+> ⚠️ **MyBatis starter 一律取规约【强制】Java 版本与框架配置段指定的 artifact 与版本，不得在本提示词自选或覆盖**。若该段指定 mybatis-plus 系 starter：实体注解含 `@TableName`（MyBatis-Plus 注解）时必须用 mybatis-plus（vanilla mybatis 无此注解会编译失败）；mybatis-plus 是 mybatis 超集，translate 的 XML mapper + `@MapperScan` 仍工作，测试配置键用 `mybatis-plus.*`（见 Step 7）。若该段指定 vanilla `mybatis-spring-boot-starter`，则实体不得用 `@TableName`、配置键用 `mybatis.*`。
 
 > **pom.xml 的 `<java.version>`/`<source>`/`<target>`/Spring Boot parent/MyBatis starter 版本必须与规约"Java 版本与框架配置"段落完全一致**，命名空间（javax/jakarta）也须一致。
 
@@ -148,7 +149,7 @@ scaffold 生成**确定的、可直接完成**的公共模块（其余由 dedup 
 DO 实体由引擎在 scaffold 完成后确定性生成（`.opencode/workflow/do-schema-builder.ts`，读 `tables/*.json` + `inventory.json`），scaffold LLM **不生成 DO、不读表数据**：
 - 类名：表名去 schema 前缀 + 去 `T_` 前缀 → PascalCase + `DO`（§4.1，如 `MFG_ERP.T_BOM_LINE` → `BomLineDO`）
 - 字段：列名 snake→camelCase，类型按 §3.1（NUMBER 整数→Long、小数/无精度→BigDecimal、VARCHAR2/CHAR/CLOB→String、DATE→LocalDate、TIMESTAMP→LocalDateTime、BLOB/RAW→byte[]…）；POJO 包装类型、不设默认值；UDT/未识别类型列跳过+注释
-- 注解：`@Data`（Lombok）+ `@TableName("{原表名}")`（MyBatis-Plus，故 pom 用 mybatis-plus-boot-starter）
+- 注解：取架构模型段 `entity.annotations`/`entity.imports`（默认 4 文件模型为 `@Data`+`@TableName("{原表名}")`；DDD 模型为 `@Component`）——由引擎 `do-schema-builder` 读模型生成，scaffold LLM 不参与。starter 须与实体注解兼容（注解含 `@TableName` 则须 mybatis-plus 系，见 Step 2）
 - 落 `entity/{Pascal}DO.java`；清单 `generated.entities`（`{file, tableName}`）+ `generated.h2SchemaFile` 由引擎 patch 进 scaffold.json
 
 > scaffold LLM 只需确保 Step 1 创建了 `entity/` 目录（DO 文件由引擎写入）。
