@@ -23,9 +23,11 @@ function readJsonOrNull(path: string): any {
   try { return JSON.parse(readFileSync(path, "utf-8")) } catch { return null }
 }
 
-/** 过程名 → PascalCase（下划线分段首字母大写）。镜像 workflow-engine.procNameToPascal fallback。 */
+/** 过程名 → PascalCase：去 `__序号` 重载后缀 → 去 PL/SQL 无意义前缀 F_/P_/R_ → 下划线分段首字母大写。
+ *  镜像 workflow-engine.procNameToPascal fallback，须与之同源。 */
 function procNameToPascal(name: string): string {
-  return name.toLowerCase().split(/[_\s]+/).filter(Boolean)
+  const base = name.replace(/__\d+$/, "").replace(/^[FPR]_/i, "")
+  return base.toLowerCase().split(/[_\s]+/).filter(Boolean)
     .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join("")
 }
 

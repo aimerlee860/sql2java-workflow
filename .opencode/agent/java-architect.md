@@ -95,7 +95,7 @@ permission:
 - **纯常量包（const-only，procedures 与 functions 均空）**：仅填规约定义的常量持有角色 `constant`（有变量再加 `state-dto`；无业务角色/mapper），常量类/变量 DTO 由 Step 5 生成
 - **scope 下 unit 不在 scopeUnits 的包**：有子程序者只映射角色集（per-proc 类壳由 skeleton 建，不译方法体）；纯常量包只映射常量持有角色
 
-**0.4 全局去重产 `procClassNames`**（无根包模型核心契约）：枚举 `scaffold-input.json` 所有包的所有 subprogram 名（仅 `packages[].procedures`/`functions` 名数组，**不读 subprograms 详情**），每个过程名转 PascalCase 得基名 `{ProcPascal}`，按稳定顺序（`packageNames` 顺序 → 包内 procedures/functions 数组原序）全局分组：
+**0.4 全局去重产 `procClassNames`**（无根包模型核心契约）：枚举 `scaffold-input.json` 所有包的所有 subprogram 名（仅 `packages[].procedures`/`functions` 名数组，**不读 subprograms 详情**），每个过程名转 PascalCase 得基名 `{ProcPascal}`（**先剥 PL/SQL 无意义前缀 `F_`/`P_`/`R_`**——单字母+下划线，如 `F_GET_BO_TRADE_ID` → `GetBoTradeId`、`R_PRE_CHECK_DATE` → `PreCheckDate`；`FIND_ITEM`/`REMOVE_ITEM` 等首段非单字母前缀不剥——再去 `__序号` 重载后缀、下划线分段首字母大写，规约 §4.1），按稳定顺序（`packageNames` 顺序 → 包内 procedures/functions 数组原序）全局分组：
 - 首现保持 `{ProcPascal}`，跨包同名碰撞者加数字后缀 `{ProcPascal}2`/`{ProcPascal}3`（无特殊字符，仅追加数字）
 - 产出 `generated.procClassNames: [{plsqlSchema, plsqlPackage, refName, className}]`，`className` = 去重后基名（不含角色后缀）
 - translate-core/skeleton 据此 + 角色后缀派生类名与文件名（`{className}{RoleSuffix}`，RoleSuffix 按规约 §4.1 由 role 派生），跨包调用按 `service.{className}Service` 派生；verify 据此归因测试类→包
@@ -164,8 +164,9 @@ DO 实体由引擎在 scaffold 完成后确定性生成（`.opencode/workflow/do
 - 记入 `generated.constants`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
 
 为每个有包级变量的 PL/SQL 包生成 `{Pkg}StateDTO` 变量 DTO，位于 `dto/{PkgPascal}StateDTO.java`：
-- 读 `scaffold-input.json` 的 `packages[].variables`；**若该包 `variables` 为空数组**，读该包 `packages[].sourcePath` 指向的 source.sql 抽取包级变量兜底。生成 session 作用域 bean 实例字段 + getter/setter（`@Component @Scope("session")`），`defaultValue` 转字段初始化；PL/SQL 类型→Java 类型按规约 §3.1
-- 类名 `{PkgPascal}StateDTO`；`@Component @Scope("session")` 普通类
+- 读 `scaffold-input.json` 的 `packages[].variables`；**若该包 `variables` 为空数组**，读该包 `packages[].sourcePath` 指向的 source.sql 抽取包级变量兜底。生成 session 作用域 bean 实例字段 + Lombok `@Getter`/`@Setter`（类注解，`@Component @Scope("session")`），**禁止手写 getter/setter**、不用 `@Data`（可变 session 状态不需 equals/hashCode）；`defaultValue` 转字段初始化；PL/SQL 类型→Java 类型按规约 §3.1
+- **字段名先剥 PL/SQL 全局变量前缀 `g`/`g_`**（如 `g_log_type` → `logType`、`gCurrBizDate` → `currBizDate`，规约 §3.5 要点 4），不得生成 `getGLogType()`/`setGCurrBizDate()` 形态；`g` 后跟小写字母属单词本体（`gold_price`）不剥
+- 类名 `{PkgPascal}StateDTO`；`@Component @Scope("session") @Getter @Setter` 普通类，`import lombok.Getter; import lombok.Setter;`
 - 记入 `generated.stateDtos`（`{file, plsqlSchema, plsqlPackage}`）。translate 只读引用，不修改此类
 
 > 无子程序且无包级常量/变量的包不生成任何持有类。纯常量包（无子程序）的 `{Pkg}Constant` 即其唯一 Java 产物。仅有常量无变量的包不生成 StateDTO；仅有变量无常量的包不生成 Constant。

@@ -1181,9 +1181,10 @@ function readJsonOrNull(path: string): any {
   try { return JSON.parse(readFileSync(path, "utf-8")) } catch { return null }
 }
 
-/** 过程名 → PascalCase 基名：去 `__序号` 重载后缀 + 下划线分段首字母大写（如 `get_item__1` → `GetItem`）。 */
+/** 过程名 → PascalCase 基名：去 `__序号` 重载后缀 → 去 PL/SQL 无意义前缀 F_/P_/R_ → 下划线分段首字母大写
+ * （如 `f_get_item__1` → `GetItem`、`R_PRE_CHECK_DATE` → `PreCheckDate`）。与 java-architect §0.4 / 规约 §4.1 同源。 */
 function procNameToPascal(ref: string): string {
-  const base = ref.replace(/__\d+$/, "")
+  const base = ref.replace(/__\d+$/, "").replace(/^[FPR]_/i, "")
   return base.split(/[_\s]+/).filter(Boolean).map(s => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()).join("")
 }
 

@@ -293,7 +293,8 @@ export const ScaffoldSchema = z.object({
     })).optional(),
     /**
      * per-proc 去重类名映射（无根包模型的核心契约，规约 §4.1）。
-     * scaffold 枚举 inventory 所有 subprogram，按 PascalCase 基名全局去重：首现保持 {ProcPascal}，
+     * scaffold 枚举 inventory 所有 subprogram，按 PascalCase 基名全局去重（先剥 PL/SQL 无意义前缀 F_/P_/R_、
+     * 去 __序号 重载后缀，规约 §4.1）：首现保持 {ProcPascal}，
      * 跨包同名碰撞者按 inventory 稳定顺序加数字后缀（CreateOrder2/CreateOrder3）。
      * className = 去重后基名（不含角色后缀）。translate-core/skeleton 据此 + 角色后缀派生类名与文件名，
      * 跨包调用按 service.{className}Service 派生；verify testBelongsToPkg 据此归因测试类→包。
@@ -315,7 +316,7 @@ export const ScaffoldSchema = z.object({
       plsqlPackage: z.string(),
     })),
     /**
-     * per-package 包级变量 DTO {Pkg}StateDTO（规约 §3.5，放 dto/ 目录，可变实例字段 + getter/setter）。
+     * per-package 包级变量 DTO {Pkg}StateDTO（规约 §3.5，放 dto/ 目录，可变实例字段 + Lombok @Getter/@Setter）。
      * scaffold 从 inventory packages/{pkg}.json 的 variables 生成，仅有变量的包才生成。translate 只读引用。
      */
     stateDtos: z.array(z.object({
