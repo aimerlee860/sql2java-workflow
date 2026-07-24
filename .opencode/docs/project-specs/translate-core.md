@@ -42,7 +42,7 @@
 3. **比较符号 XML 转义或 CDATA**：`<`→`&lt;`（或 `<![CDATA[<]]>`）、`>`→`&gt;`（或 `<![CDATA[>]]>`）、`<=`→`&lt;=`（或 `<![CDATA[<=]]>`）、`>=`→`&gt;=`（或 `<![CDATA[>=]]>`）、`&`→`&amp;`。两者皆可，整段复杂条件推荐 CDATA。
 4. **占位符用 `#{}`**（禁 `${}`），namespace 对应 Mapper 接口全限定名。
 5. **禁止 Mapper XML 调用存储过程**（去存储过程化目标）：XML 只查原始字段；存储过程调用改为 Java Service 层调已转换的 Service 方法，结果 set 回 DTO。
-6. **SQL 与函数定义一致**：Mapper XML 中 SQL 必须与 `shard-inputs/{pkg}/{ref}/source.sql` 函数定义逐行一致，禁私自优化/简化/改写（WHERE 条件、子查询结构、固定值）。
+6. **SQL 与函数定义一致**：Mapper XML 中 SQL 必须与 `shard-inputs/{pkg}/{ref}/source.sql` 函数定义逐行一致，禁私自优化/简化/改写（WHERE 条件、子查询结构、固定值）。**例外（GaussDB 方言适配，不算改写）**：`FROM DUAL` → `FROM sys_dummy`（见 §五）、表名补 schema 前缀（见 §四规则 2）、XML 比较符号转义/CDATA（规则 3）。
 
 ```xml
 <!-- ❌ 错：XML 中调存储过程 -->
@@ -56,7 +56,20 @@ t1.{col} AS {col}
 | 场景 | 处理 |
 |---|---|
 | INSERT | VALUES 中直接用 `seq_xxx.NEXTVAL` |
-| SELECT 查序列 | 单独 `selectNextval()` 方法查询，禁在业务查询 SQL 中直接 NEXTVAL（浪费序列号）；GaussDB 虚拟表写 `SELECT seq_xxx.NEXTVAL FROM sys_dummy` |
+| SELECT 查序列 | 单独 `selectNext...()` 方法查询（如 `selectNextSeqBoTradeId`），禁在业务查询 SQL 中直接 NEXTVAL（浪费序列号） |
+
+**【强制·GaussDB 方言】虚拟表用 `sys_dummy`，禁 `DUAL`**：GaussDB 无 Oracle 的 `DUAL` 虚拟表。PL/SQL 源码里的 `FROM DUAL` 在 mapper SQL 中**必须改成 `FROM sys_dummy`**——这是 §四规则 6「SQL 与 source.sql 逐行一致」的**明确例外**（方言适配，非私自改写）。`DUAL` 大小写不限均需替换。
+
+```xml
+<!-- ❌ 错：照抄源码 DUAL，GaussDB 无此虚拟表 -->
+<select id="getNextBoTradeId" resultType="java.lang.Long">
+    SELECT SEQ_BO_TRADE_ID.NEXTVAL FROM DUAL
+</select>
+<!-- ✅ 对：虚拟表改 sys_dummy，序列名单独方法 selectNext... -->
+<select id="selectNextSeqBoTradeId" resultType="java.lang.Long">
+    SELECT seq_bo_trade_id.nextval FROM sys_dummy
+</select>
+```
 
 ## 六、BigDecimal 除法（硬规则）
 
@@ -126,7 +139,7 @@ public Response myMethod(Request request) {
 - [ ] 所有 BigDecimal 除法带 `(, 10, RoundingMode.DOWN)`
 - [ ] 无 `throw`/`throws`，异常方法内自处理；no_data_found 用 Validate.notNull
 - [ ] 日志用注入 `log`，无静态 LogUtil
-- [ ] 序列号 SELECT 用单独方法（GaussDB `FROM sys_dummy`）
+- [ ] 序列号 SELECT 用单独方法（`selectNext...`），虚拟表 `sys_dummy` 禁 `DUAL`（grep mapper XML 无 `FROM DUAL`）
 - [ ] 未擅自加提前 return（对照 SQL）
 - [ ] 未识别变量已查来源，未硬编码
 - [ ] 翻译忠实 SQL（nvl/decode/分支/循环），if-else-if 链式
