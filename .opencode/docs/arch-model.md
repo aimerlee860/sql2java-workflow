@@ -17,6 +17,10 @@ flat-no-root
 | service | Service | service | src/main/java/service | | | | |
 | service-impl | ServiceImpl | service.impl | src/main/java/service/impl | src/test/java/service/impl | ServiceImplTest | | true |
 | mapper | Mapper | mapper | src/main/java/mapper | | | src/main/resources/mapper | |
+| request | Request | service.dto.request | src/main/java/service/dto/request | | | | |
+| response | Response | service.dto.response | src/main/java/service/dto/response | | | | |
+
+> `request`/`response` 为**条件角色**：仅当过程 IN 参数 >1 时生成 `{className}Request`、OUT 参数 >1 时生成 `{className}Response`（skeleton 据 source.sql 参数数判断，1 参数直传不建）。纯数据持有类（`@Data`），非实现层、无测试。
 
 ### 包级产物
 | artifact | suffix | dir |
@@ -40,7 +44,7 @@ flat-no-root
 - FQN 模式: service.{className}Service
 
 ### 覆盖率排除
-config/, entity/, exception/, util/, constant/, dto/
+config/, entity/, exception/, util/, constant/, dto/, service/dto/
 
 ### 主类扫描包
 config, service, service.impl, mapper, constant, dto, entity, exception, util

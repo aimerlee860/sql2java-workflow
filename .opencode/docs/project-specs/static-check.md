@@ -15,8 +15,9 @@
 5. **Mapper XML 特殊语法**：比较符号已转义（`&lt;` 等）或 CDATA 包裹；`<if>`/`<choose>` 语法正确；无 XML 解析错。
 6. **序列号检查**：序列号均经 Mapper XML 实现（GaussDB `SELECT seq_xxx.NEXTVAL FROM sys_dummy`）；业务查询 SQL 未直接 NEXTVAL。**grep mapper XML 的 `FROM DUAL`（大小写不限）= 硬失败**——GaussDB 无 Oracle `DUAL` 虚拟表，必须 `FROM sys_dummy`（规约 §五）。
 7. **Mapper 表名 schema 前缀**：mapper XML 的 `FROM`/`JOIN`/`UPDATE`/`INTO`/`DELETE FROM`/`MERGE INTO` 表引用须为 `schema.tableName` 形式——对照 workOrder「本 unit 涉及表的 schema 归属」块（引擎据 inventory DDL 归属注入）：块内列出的表不得裸名（漏标 schema）；未列入块的表（synonym/未扫到 DDL）保留原样可接受，但需在 notes 注明。
-8. **变量声明位置**：非局部变量声明在主函数顶层（供全函数读取）；未识别变量已查依赖签名块/`shard-inputs/{pkg}/{ref}/source.sql` 确认常量声明，未硬编码。
-9. **try-catch 结构**：非 `BEGIN` 开头的存过不应强加 try-catch 开头；`else if` 必须连上一个 `if`，不可拆分。
+8. **禁 Map 传参**：mapper/service 接口与实现的方法签名**禁 `Map<String,Object>` 作入参/出参**（规约 §3.2.1）。>1 入参须用 `{className}Request`、>1 出参须用 `{className}Response`（skeleton 已建文件）；1 参数直传不算违规。grep Java 文件出现 `Map<String, Object>` / `new HashMap` 作方法参数或返回 = 硬失败。
+9. **变量声明位置**：非局部变量声明在主函数顶层（供全函数读取）；未识别变量已查依赖签名块/`shard-inputs/{pkg}/{ref}/source.sql` 确认常量声明，未硬编码。
+10. **try-catch 结构**：非 `BEGIN` 开头的存过不应强加 try-catch 开头；`else if` 必须连上一个 `if`，不可拆分。
 
 ## 三、命名 / 包路径 / Java 关键字检查
 
@@ -75,7 +76,7 @@
 **修复指引**（记入 findings 交 fix，lint 自身不修复）：
 - 核心原则：**旧程序不动，新程序适配旧程序**。原地恢复被删/被改的旧码，新逻辑以追加方式实现。
 - Mapper 操作：**创建新 Mapper 函数而非改旧函数**——保留原方法签名/返回值/参数与原 SQL 不动，末尾追加新方法（如 `selectByConditionWithExtra`）+ 新 SQL；新 Service 方法调新 Mapper 函数，原 Service 方法不变。
-- 实体类：恢复原 DO，**禁止为图方便改 DO**；新程序需额外字段则创建新 DTO 或用 Map 传递，自行负责 DO↔DTO/Map 转换。
+- 实体类：恢复原 DO，**禁止为图方便改 DO**；新程序需额外字段则创建新 `{Proc}Request`/`{Proc}Response`（禁 `Map<String,Object>` 传参，规约 §3.2.1），自行负责 DO↔Request/Response 转换。
 - 方法签名：保留旧方法，新建带额外参数的新方法。
 
 ## 七、输出

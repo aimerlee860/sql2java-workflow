@@ -74,6 +74,9 @@ export const DEFAULT_ARCHITECTURE_MODEL: ArchitectureModel = {
       testSuffix: "ServiceImplTest", implRole: true,
     },
     { role: "mapper", suffix: "Mapper", package: "mapper", dir: "src/main/java/mapper", xmlDir: "src/main/resources/mapper" },
+    // 条件角色：仅 >1 入参/出参时 skeleton 生成 {className}Request/{className}Response（@Data 数据类，无 impl/test）
+    { role: "request", suffix: "Request", package: "service.dto.request", dir: "src/main/java/service/dto/request" },
+    { role: "response", suffix: "Response", package: "service.dto.response", dir: "src/main/java/service/dto/response" },
   ],
   packageArtifacts: {
     constant: { suffix: "Constant", dir: "src/main/java/constant" },
@@ -89,7 +92,7 @@ export const DEFAULT_ARCHITECTURE_MODEL: ArchitectureModel = {
     subclasses: ["DataNotFoundException", "ValidationException"],
   },
   crossPackageCall: { fqnPattern: "service.{className}Service" },
-  coverageExcludes: ["config/", "entity/", "exception/", "util/", "constant/", "dto/"],
+  coverageExcludes: ["config/", "entity/", "exception/", "util/", "constant/", "dto/", "service/dto/"],
   scanBasePackages: ["config", "service", "service.impl", "mapper", "constant", "dto", "entity", "exception", "util"],
 }
 

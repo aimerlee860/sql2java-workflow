@@ -33,7 +33,9 @@
 | 标准实体 | 单表查询（`SELECT *` 或部分字段），无联表无计算 | 复用 scaffold 全局实体（DDL 字段固定，Java 中只用需要的字段即可，无需新建） |
 
 - 实体字段必须与 inventory/schema 一致，**禁止编造**；发现不一致立即修复或标 TODO。
-- **禁止为图新程序方便而修改已有实体**——新程序通过新 DTO 或 Map 适配。
+- **禁止为图新程序方便而修改已有实体**——新程序通过新 `{Proc}Request`/`{Proc}Response` 适配。
+
+**【强制·禁 Map 传参】** mapper 与 service 方法**禁用 `Map<String,Object>` 作入参/出参**——按 skeleton 已定的签名：>1 入参用 `{className}Request`、>1 出参用 `{className}Response`（skeleton 已建文件，你填方法体时经其 getter/setter 访问字段），1 参数直传。**禁止 `new HashMap`/`Map<String,Object>` 凑参**（无类型、维护代价大）。Mapper XML 的 `#{}` 占位符从 Request 字段取值（`#{fmBranchId}` 对应 `request.fmBranchId`）。
 
 ## 四、Mapper XML 规范
 
@@ -93,7 +95,7 @@ BigDecimal r = amount.multiply(price).divide(new BigDecimal("100"), 10, Rounding
 5. **LogUtil 必须注入非静态**：日志统一用注入的 `log`（`log.error(...)`），禁止静态 `LogUtil` 调用、禁止私自 new 静态 LogUtil。
 
 ```java
-// ✅ 正确：仅记日志返回错误
+// ✅ 正确：仅记日志返回错误（Request/Response = {className}Request/{className}Response，>1 入参/出参时用；非 Map）
 public Response myMethod(Request request) {
     Response response = new Response();
     response.setFlag(0);

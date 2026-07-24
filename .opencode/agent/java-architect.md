@@ -91,7 +91,7 @@ permission:
 **0.3 决策 packageMappings**（写入 `packageMappings[]`，每项含 `plsqlSchema`/`plsqlPackage`/`components[]`，**无 `javaPackage`**）：按规约分层架构/工程结构章节定义的 per-proc 角色集，为每个期望包填 `components[]`（每项仅 `{role}`——角色集模板，per-proc 类名由 `procClassNames` 去重基名 + 角色后缀派生，**不逐类枚举 className**）。角色→顶层包由规约固定（service→`service`、service-impl→`service.impl`、mapper→`mapper`、constant→`constant`、state-dto→`dto`），scaffold 不再派生 javaPackage：
 - `plsqlSchema`：inventory `packageName` 拆首个 `.` 的前段（大写）；无 schema 前缀的包填空串
 - `plsqlPackage`：包名（与 inventory 包标识同形，用于下游包匹配）
-- **有子程序的包**：填规约定义的 per-proc 业务角色集（业务接口 + 业务实现 + mapper 角色）
+- **有子程序的包**：填规约定义的 per-proc 业务角色集（业务接口 + 业务实现 + mapper 角色），并加**条件参数角色** `request`/`response`（仅占位登记入 components；是否真正生成文件由 skeleton 按 >1 入参/出参 判断，规约 §3.2）
 - **纯常量包（const-only，procedures 与 functions 均空）**：仅填规约定义的常量持有角色 `constant`（有变量再加 `state-dto`；无业务角色/mapper），常量类/变量 DTO 由 Step 5 生成
 - **scope 下 unit 不在 scopeUnits 的包**：有子程序者只映射角色集（per-proc 类壳由 skeleton 建，不译方法体）；纯常量包只映射常量持有角色
 

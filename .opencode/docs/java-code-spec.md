@@ -34,6 +34,8 @@ src/main/java/config                            # Spring/MyBatis 配置 + Applic
 src/main/java/mapper                            # per-proc Mapper 接口（{Proc}Mapper.java）
 src/main/java/service                           # per-proc Service 接口（{Proc}Service.java）
 src/main/java/service/impl                      # per-proc Service 实现（{Proc}ServiceImpl.java）
+src/main/java/service/dto/request               # per-proc 入参 DTO（{Proc}Request.java，>1 入参时，@Data）
+src/main/java/service/dto/response              # per-proc 出参 DTO（{Proc}Response.java，>1 出参时，@Data）
 src/main/java/constant                          # per-package 包级常量类（{Pkg}Constant.java，纯 static final）
 src/main/java/dto                               # per-package 包级变量 DTO（{Pkg}StateDTO.java，可变实例字段）
 src/main/java/entity                            # 数据对象 XxxDO（与数据库表一一对应，全局共享，scaffold 生成）
@@ -53,7 +55,7 @@ src/test/resources                              # schema-h2.sql + application-te
 | **Mapper** | `mapper`（per-proc） | MyBatis 接口，SQL 执行 | DML/查询 |
 | **Service** | `service`（per-proc） | 业务接口，对外暴露公共方法 | 存储过程入口/包规范 |
 | **ServiceImpl** | `service.impl`（per-proc） | 业务实现，流程编排 + 事务 + 异常 | 主存储过程调用链 |
-| **DTO** | `dto`（per-package，按需） | 包级变量 DTO `{Pkg}StateDTO`；过程参数 DTO 亦落此 | 包级变量/过程参数 |
+| **DTO** | `dto`（per-package，按需）+ `service/dto/request`、`service/dto/response`（per-proc，按需） | 包级变量 DTO `{Pkg}StateDTO`；过程入参/出参 DTO `{Proc}Request`/`{Proc}Response` 落 `service/dto/request`、`service/dto/response` | 包级变量/过程入参出参 |
 | **Exception** | `exception`（全局） | 业务异常体系 | EXCEPTION 块 |
 | **Constant** | `constant`（per-package） | 包级常量持有类 `{Pkg}Constant`（纯 static final） | 包级常量 |
 | **Util** | `util`（全局） | 通用工具方法 | 公共函数库 |
@@ -146,12 +148,21 @@ scaffold 生成 XxxDO 字段、translate 转译过程参数/返回值时，**统
 | 变量声明/初始化 | `{Proc}ServiceImpl` 方法内局部变量 | 默认值填充（局部变量） |
 | 包级常量 | `{Pkg}Constant` 常量类 | per-package，`constant/`，见 §3.4 |
 | 包级变量 | `{Pkg}StateDTO` | per-package，`dto/`，见 §3.5 |
-| 参数组装 | `{Proc}DTO` / `Map<String,Object>` | per-proc 参数构建（DTO 落 `dto/`） |
+| 参数组装 | `{Proc}Request`（>1 入参）/ `{Proc}Response`（>1 出参） | per-proc 参数 DTO（`service/dto/request`、`service/dto/response`）；1 参数直传，**禁 `Map<String,Object>`**（见 §3.2.1） |
 | IF-THEN-ELSE 校验 | `{Proc}ServiceImpl` 内校验 + 抛 `ValidationException` | 业务校验 |
 | 跨包调用 | 被调方 `{Proc}Service` 接口 | 外部服务（按 `service.{ResolvedBase}Service` 派生） |
 | 公共函数 | `Util` | 全局工具类 |
 | `COMMIT/ROLLBACK` | 方法内自处理（异常 catch + `flag` 标志，不外抛、不标 `@Transactional`） | 事务语义按 PL/SQL 原逻辑保留，事务边界管理待统一方案（见 §9.1） |
 | DML/查询/存储过程调用 | `{Proc}Mapper` + `{Proc}Mapper.xml` | per-proc Mapper（`mapper/` + `resources/mapper/`） |
+
+### 3.2.1 过程参数 DTO（`{Proc}Request`/`{Proc}Response`，禁 Map）
+
+mapper 与 service 方法传参**按参数数量派生，禁 `Map<String,Object>`**（无类型、维护代价大）：
+
+- IN 参数 >1 → `{className}Request`（`service/dto/request/`，`@Data`），方法入参用它；IN =1 → 直传该参数；IN =0 → 无入参。
+- OUT 参数 >1 → `{className}Response`（`service/dto/response/`，`@Data`），方法返回用它；OUT =1 → 直返该类型；OUT =0 → `void`。
+- Request/Response 字段名/类型与 `source.sql` 的 IN/OUT 参数一致，禁编造；由 skeleton 按参数数条件生成（1 参数不建），translate-core 只读引用、不重建。
+- mapper XML 的 `#{}` 占位符直接对应 Request 字段（`#{fmBranchId}` ← `request.getFmBranchId()`）；禁止 `new HashMap`/`Map<String,Object>` 凑参。
 
 ### 3.3 异常处理规范
 
@@ -233,7 +244,8 @@ public class FOrderStateDTO {
 | 类型 | 命名规则 | 示例 |
 |------|----------|------|
 | Entity（数据对象） | `{Table}DO` | `OrderDO` |
-| 过程参数 DTO | `{Proc}DTO` | `CreateOrderDTO` |
+| 过程入参 DTO | `{Proc}Request`（>1 入参时用，落 `service/dto/request`） | `CreateOrderRequest` |
+| 过程出参 DTO | `{Proc}Response`（>1 出参时用，落 `service/dto/response`） | `CreateOrderResponse` |
 | 包级变量 DTO | `{Pkg}StateDTO` | `FOrderStateDTO` |
 | Mapper 接口 | `{Proc}Mapper` | `CreateOrderMapper` |
 | Service 接口 | `{Proc}Service` | `CreateOrderService` |
@@ -247,7 +259,7 @@ public class FOrderStateDTO {
 
 **规约要点：**
 1. 【强制】类名 UpperCamelCase；方法名、参数名、成员变量、局部变量 lowerCamelCase；常量全大写下划线分隔；包名全小写。
-2. 【强制】数据对象（与数据库表一一对应）统一使用 `{Table}DO` 后缀；跨层数据传输用 `{Proc}DTO` 后缀；禁止 `XxxPOJO`。
+2. 【强制】数据对象（与数据库表一一对应）统一使用 `{Table}DO` 后缀；过程入参/出参 DTO 用 `{Proc}Request`/`{Proc}Response` 后缀（>1 入参/出参时，见 §3.2.1）；禁止 `XxxPOJO`、禁止 `Map<String,Object>` 传参。
 3. 【强制】POJO 类布尔属性不加 `is` 前缀；数据库布尔字段必须加 `is_`，在 resultMap 中映射。
 4. 【强制】命名不得以下划线或美元符号开始或结束；严禁拼音与英文混合，禁止直接使用中文。
 5. 【强制】抽象类用 `Abstract`/`Base` 开头；异常类用 `Exception` 结尾；测试类以被测类名开头、`Test` 结尾。
@@ -500,7 +512,7 @@ public interface OrderMapper {
 转换 PL/SQL 存储过程时，按以下顺序执行：
 
 1. **Inventory**：扫描存储过程，识别输入/输出参数、业务逻辑、依赖对象。
-2. **Entity/DTO**：识别过程参数与返回值对应的数据对象（复用全局 DO 或新建 per-proc `{Proc}DTO`，落 `dto/`）。
+2. **Entity/DTO**：识别过程参数与返回值对应的数据对象（复用全局 DO；>1 入参/出参时新建 per-proc `{Proc}Request`/`{Proc}Response`，落 `service/dto/request`、`service/dto/response`，禁 `Map<String,Object>`，见 §3.2.1）。
 3. **`{Pkg}Constant`/`{Pkg}StateDTO`**：确认包级常量/变量已在 scaffold 生成的 `constant/{Pkg}Constant` 与 `dto/{Pkg}StateDTO` 中（只读引用，不重建）。
 4. **`{Proc}Mapper`**：识别 DML/查询/存储过程调用，落到 per-proc Mapper 接口方法（`mapper/`）+ XML（`resources/mapper/`）。
 5. **`{Proc}Service`**：为该过程入口声明公共方法签名（`service/`）。

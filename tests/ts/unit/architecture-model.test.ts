@@ -35,6 +35,10 @@ flat-no-root
 | service | Service | service | src/main/java/service | | | | |
 | service-impl | ServiceImpl | service.impl | src/main/java/service/impl | src/test/java/service/impl | ServiceImplTest | | true |
 | mapper | Mapper | mapper | src/main/java/mapper | | | src/main/resources/mapper | |
+| request | Request | service.dto.request | src/main/java/service/dto/request | | | | |
+| response | Response | service.dto.response | src/main/java/service/dto/response | | | | |
+
+> request/response 为条件角色（仅 >1 入参/出参时生成），非实现层、无测试。
 
 ### 包级产物
 | artifact | suffix | dir |
@@ -58,7 +62,7 @@ flat-no-root
 - FQN 模式: service.{className}Service
 
 ### 覆盖率排除
-config/, entity/, exception/, util/, constant/, dto/
+config/, entity/, exception/, util/, constant/, dto/, service/dto/
 
 ### 主类扫描包
 config, service, service.impl, mapper, constant, dto, entity, exception, util
@@ -107,10 +111,20 @@ common/infrastructure/, beans/, mapper/
 `
 
 describe("DEFAULT_ARCHITECTURE_MODEL（4 文件回归基线）", () => {
-  it("layout 无根包、含 service/service-impl/mapper 三角色", () => {
+  it("layout 无根包、含 service/service-impl/mapper + 条件 request/response 角色", () => {
     expect(DEFAULT_ARCHITECTURE_MODEL.layout).toBe("flat-no-root")
     expect(DEFAULT_ARCHITECTURE_MODEL.packageBase).toBeUndefined()
-    expect(DEFAULT_ARCHITECTURE_MODEL.roles.map(r => r.role)).toEqual(["service", "service-impl", "mapper"])
+    expect(DEFAULT_ARCHITECTURE_MODEL.roles.map(r => r.role)).toEqual(["service", "service-impl", "mapper", "request", "response"])
+  })
+  it("request/response 为条件数据类角色（无 implRole/testDir）", () => {
+    const req = DEFAULT_ARCHITECTURE_MODEL.roles.find(r => r.role === "request")!
+    const res = DEFAULT_ARCHITECTURE_MODEL.roles.find(r => r.role === "response")!
+    expect(req.suffix).toBe("Request")
+    expect(req.dir).toBe("src/main/java/service/dto/request")
+    expect(req.implRole).toBeUndefined()
+    expect(res.suffix).toBe("Response")
+    expect(res.dir).toBe("src/main/java/service/dto/response")
+    expect(res.implRole).toBeUndefined()
   })
   it("service-impl 为实现层且带 testDir/testSuffix", () => {
     const impl = DEFAULT_ARCHITECTURE_MODEL.roles.find(r => r.role === "service-impl")!
@@ -136,20 +150,23 @@ describe("parseArchitectureModel — 4 文件实例", () => {
     expect(m).not.toBeNull()
     expect(m.layout).toBe("flat-no-root")
     expect(m.packageBase).toBeUndefined()
-    expect(m.roles.map(r => r.role)).toEqual(["service", "service-impl", "mapper"])
+    expect(m.roles.map(r => r.role)).toEqual(["service", "service-impl", "mapper", "request", "response"])
     const impl = m.roles.find(r => r.role === "service-impl")!
     expect(impl.implRole).toBe(true)
     expect(impl.testDir).toBe("src/test/java/service/impl")
-    // 空单元格 → undefined
+    // 空单元格 → undefined；条件角色 request/response 无 implRole/testDir
     const svc = m.roles.find(r => r.role === "service")!
     expect(svc.testDir).toBeUndefined()
     expect(svc.xmlDir).toBeUndefined()
     expect(svc.implRole).toBeUndefined()
+    const req = m.roles.find(r => r.role === "request")!
+    expect(req.dir).toBe("src/main/java/service/dto/request")
+    expect(req.implRole).toBeUndefined()
     expect(m.entity.suffix).toBe("DO")
     expect(m.entity.annotations).toEqual(["@Data", "@TableName(\"{table}\")"])
     expect(m.exception.baseClass).toBe("BusinessException")
     expect(m.crossPackageCall.fqnPattern).toBe("service.{className}Service")
-    expect(m.coverageExcludes).toEqual(["config/", "entity/", "exception/", "util/", "constant/", "dto/"])
+    expect(m.coverageExcludes).toEqual(["config/", "entity/", "exception/", "util/", "constant/", "dto/", "service/dto/"])
     expect(m.scanBasePackages).toContain("service.impl")
   })
 })
