@@ -2,20 +2,20 @@
 
 > 本规约由工作流引擎自动注入到写 Java 的 agent（java-architect / translator / reviewer /
 > translate-skeleton / translate-core / translate-test）的 system prompt 中（DDD 架构）。
-> 用户通过 `--spec .opencode/docs/ddd/java-code-spec.md` 切换到本 DDD 规约。
+> 用户通过 `--spec .opencode/specs/ddd/java-code-spec.md` 切换到本 DDD 规约。
 >
 > **`@include` 引用**：`@include <path>` 内联子规约进通用正文、`@include <path> -> <agent>` 路由子规约为
-> 该 agent 专属段。下方路由把 `ddd/project-specs/` 下 DDD 子规约分发到对应 translate agent；
+> 该 agent 专属段。下方路由把 `ddd/translation-specs/` 下 DDD 子规约分发到对应 translate agent；
 > `@include ./arch-model.md` 内联 DDD 架构模型段（引擎解析成 `ArchitectureModel` 驱动确定性 builder）。
 
 @include ./arch-model.md
-@include ./project-specs/skeleton.md -> translate-skeleton
-@include ./project-specs/translate-core.md -> translate-core
-@include ./project-specs/test-gen.md -> translate-test
-@include ./project-specs/static-check.md -> translate-lint
-@include ./project-specs/compile.md -> translate-compile
-@include ./project-specs/summary.md -> translate-summary
-@include ./project-specs/translator.md -> translator
+@include ./translation-specs/skeleton.md -> translate-skeleton
+@include ./translation-specs/translate-core.md -> translate-core
+@include ./translation-specs/test-gen.md -> translate-test
+@include ./translation-specs/static-check.md -> translate-lint
+@include ./translation-specs/compile.md -> translate-compile
+@include ./translation-specs/summary.md -> translate-summary
+@include ./translation-specs/translator.md -> translator
 
 ## 适用范围
 

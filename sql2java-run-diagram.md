@@ -102,7 +102,7 @@ date -u +%Y%m%d-%H%M%S
 1. **读取 agent 文件**：`.opencode/agent/sql-analyst.md`
 2. **提取通用部分**（`extractCommonPart`）：文件开头到第一个 `## Phase:` 之前的内容 — 包含角色定义、绝对规则、Runtime Context 说明、Artifact 写入规则、PL/SQL 构造识别参考等
 3. **提取当前阶段内容**（`extractPhaseSection`）：`## Phase: inventory` 整个 section — 包含目标、输入输出、工作步骤、质量检查
-4. **Java 代码规约注入**（D19）：如果当前 agent 是 java-architect / translator / reviewer，读取 `docs/java-code-spec.md`，替换 agent .md 中的 `<!-- Java 代码规约由引擎从 docs/java-code-spec.md 自动注入 -->` 注释位置
+4. **Java 代码规约注入**（D19）：如果当前 agent 是 java-architect / translator / reviewer，读取 `specs/java-code-spec.md`，替换 agent .md 中的 `<!-- Java 代码规约由引擎从 specs/java-code-spec.md 自动注入 -->` 注释位置
 5. **构建 Runtime Context**（`buildRuntimeContext`）：
    ```
    currentPhase: inventory
@@ -473,7 +473,7 @@ workflow({ action: "start", runId, sourcePath, dbConf })
 | D16 | fix retry 清理 | retry 时清理残留 fix.json，重置 entry status + completedAt |
 | D17 | artifact 缓存 | loadArtifactJson 单次 advance 内缓存，advance 结束后清除 |
 | D18 | Schema 预获取 | 有 db.xml 时自动连接 PL/SQL 拉取 DDL，纯 JS thin mode，不侵入 phase 链 |
-| D19 | Java 代码规约注入 | docs/java-code-spec.md 自动注入 java-architect / translator / reviewer |
+| D19 | Java 代码规约注入 | specs/java-code-spec.md 自动注入 java-architect / translator / reviewer |
 | D20 | refName 重载规范 | 重载子程序用 `{name}__{序号}` 唯一标识，统一 callGraph/FSD/subprogramMethods |
 | D21 | L3 质量门控 | 确定性数值门控：G1 翻译完成率≥0.8 / G3 review 分数≥70 / G6 测试通过率≥0.7 |
 | D22 | rejection guidance | 每阶段的拒绝引导，鼓励重做而非修补 JSON |

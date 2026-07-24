@@ -41,11 +41,11 @@ describe("resolveIncludes — 内联", () => {
 describe("resolveIncludes — 路由", () => {
   it("@include -> agent 登记到 agentSpecs 且不内联", () => {
     const dir = setup()
-    mkdirSync(join(dir, "project-specs"), { recursive: true })
-    writeFileSync(join(dir, "project-specs", "skeleton.md"), "skeleton 专属规则")
+    mkdirSync(join(dir, "translation-specs"), { recursive: true })
+    writeFileSync(join(dir, "translation-specs", "skeleton.md"), "skeleton 专属规则")
     const agentSpecs = new Map<string, string>()
     const out = resolveIncludes(
-      "通用\n@include ./project-specs/skeleton.md -> translate-skeleton\n尾部", dir, agentSpecs,
+      "通用\n@include ./translation-specs/skeleton.md -> translate-skeleton\n尾部", dir, agentSpecs,
     )
     expect(out).toBe("通用\n尾部")  // 路由行被移除
     expect(agentSpecs.get("translate-skeleton")).toBe("skeleton 专属规则")

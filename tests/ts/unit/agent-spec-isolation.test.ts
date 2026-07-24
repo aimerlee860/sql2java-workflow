@@ -1,7 +1,7 @@
 /**
  * agent-spec-isolation.test.ts — 规约单一来源回归门禁
  *
- * 设计意图：Java 代码规约的单一来源是 docs/java-code-spec.md（或 --spec 指定的用户文件），
+ * 设计意图：Java 代码规约的单一来源是 specs/java-code-spec.md（或 --spec 指定的用户文件），
  * 由引擎 JAVA_SPEC_AGENTS 白名单 + system.transform hook 注入子 agent 系统提示。
  * 子 agent 的 .md 提示词不得内联具体规约条款——否则内联版本比注入的 spec 更具指令性，
  * LLM 优先遵循内联，导致 --spec 自定义失效（详见 plan: logical-rolling-quiche.md）。

@@ -485,7 +485,7 @@ function maxMtime(paths: string[]): number {
 
 /** 加载默认 java-code-spec.md（走 @include 解析） */
 export function loadDefaultSpecBundle(): SpecBundle {
-  const specPath = join(findOpencodeDir(), "docs", "java-code-spec.md")
+  const specPath = join(findOpencodeDir(), "specs", "java-code-spec.md")
   try {
     // 缓存命中判断：主文件 + 上次收集的 @include 子文件 mtime 聚合（仅 stat 不读内容）
     const aggMtime = maxMtime([specPath, ..._cachedDefaultBundleIncluded])
@@ -1708,7 +1708,7 @@ function buildFullSystemPrompt(
   let javaCodeSpec: string
   if (needsJavaSpec) {
     javaCodeSpec = bundle.general
-      || "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/docs/java-code-spec.md**\n"
+      || "\n> ⚠️ **[workflow-engine] Java 代码规约文件缺失或不可读，请检查 .opencode/specs/java-code-spec.md**\n"
   } else {
     javaCodeSpec = ""
   }

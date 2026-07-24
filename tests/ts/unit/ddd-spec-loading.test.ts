@@ -1,13 +1,13 @@
 /**
  * ddd-spec-loading.test.ts — DDD 完整规约体系加载测试
  *
- * 验证 `docs/ddd/java-code-spec.md` 作为 `--spec` 主规约时：
+ * 验证 `specs/ddd/java-code-spec.md` 作为 `--spec` 主规约时：
  *   - @include ./arch-model.md 内联并解析出 DDD 架构模型（rooted-module / processor implRole /
  *     Bean 实体 / TranFailException）
- *   - 7 条 @include ./project-specs/*.md -> agent 路由登记到 agentSpecs，内容为 DDD 子规约
+ *   - 7 条 @include ./translation-specs/*.md -> agent 路由登记到 agentSpecs，内容为 DDD 子规约
  *   - 路由型子规约不内联进 general 正文
  *
- * 证明 `--spec .opencode/docs/ddd/java-code-spec.md` 能正确驱动 DDD 全套规约注入。
+ * 证明 `--spec .opencode/specs/ddd/java-code-spec.md` 能正确驱动 DDD 全套规约注入。
  */
 
 import { describe, it, expect } from "vitest"
@@ -16,7 +16,7 @@ import { resolve, join } from "node:path"
 import { resolveIncludes } from "@plugins/workflow-engine"
 import { parseArchitectureModel } from "@workflow/architecture-model"
 
-const DDD_SPEC_DIR = resolve(import.meta.dirname, "../../../.opencode/docs/ddd")
+const DDD_SPEC_DIR = resolve(import.meta.dirname, "../../../.opencode/specs/ddd")
 const DDD_MAIN = readFileSync(join(DDD_SPEC_DIR, "java-code-spec.md"), "utf-8")
 
 describe("DDD 主规约 @include 路由", () => {
@@ -33,7 +33,7 @@ describe("DDD 主规约 @include 路由", () => {
   })
 
   it("路由型 DDD 子规约不内联进 general 正文", () => {
-    expect(inlined).not.toContain("@include ./project-specs/skeleton.md -> translate-skeleton")
+    expect(inlined).not.toContain("@include ./translation-specs/skeleton.md -> translate-skeleton")
     // general 应含 DDD 模型段（@include ./arch-model.md 内联）
     expect(inlined).toContain("## 架构模型")
     expect(inlined).toContain("### 角色")
@@ -47,7 +47,7 @@ describe("DDD 主规约 @include 路由", () => {
 })
 
 describe("DDD 架构模型解析", () => {
-  it("docs/ddd/arch-model.md 解析为 DDD 模型", () => {
+  it("specs/ddd/arch-model.md 解析为 DDD 模型", () => {
     const archModel = readFileSync(join(DDD_SPEC_DIR, "arch-model.md"), "utf-8")
     const m = parseArchitectureModel(archModel)!
     expect(m).not.toBeNull()

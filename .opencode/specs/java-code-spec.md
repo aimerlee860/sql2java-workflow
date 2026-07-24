@@ -4,15 +4,15 @@
 > 修改此文件即可全局生效，无需同步修改多个 agent 文件。
 > 用户可通过 `--spec` 参数提供自定义规约文件——指定后**整体替换**本默认规约（用户文件即唯一规约，不再与默认合并）；纯目录结构文件仅覆盖工程结构，规约仍用本默认。
 >
-> **`@include` 引用**：本主规约用 `@include <path>` 内联子规约进通用正文、用 `@include <path> -> <agent>` 把子规约路由为该 agent 专属段。下方 7 条路由把 `project-specs/` 下子规约分发到对应 translate agent；用户 `--spec` 可重写路由。路径相对本文件目录 resolve，递归 include，缺失文件 warn 保留原行。
+> **`@include` 引用**：本主规约用 `@include <path>` 内联子规约进通用正文、用 `@include <path> -> <agent>` 把子规约路由为该 agent 专属段。下方 7 条路由把 `translation-specs/` 下子规约分发到对应 translate agent；用户 `--spec` 可重写路由。路径相对本文件目录 resolve，递归 include，缺失文件 warn 保留原行。
 
-@include ./project-specs/skeleton.md -> translate-skeleton
-@include ./project-specs/translate-core.md -> translate-core
-@include ./project-specs/test-gen.md -> translate-test
-@include ./project-specs/static-check.md -> translate-lint
-@include ./project-specs/compile.md -> translate-compile
-@include ./project-specs/summary.md -> translate-summary
-@include ./project-specs/translator.md -> translator
+@include ./translation-specs/skeleton.md -> translate-skeleton
+@include ./translation-specs/translate-core.md -> translate-core
+@include ./translation-specs/test-gen.md -> translate-test
+@include ./translation-specs/static-check.md -> translate-lint
+@include ./translation-specs/compile.md -> translate-compile
+@include ./translation-specs/summary.md -> translate-summary
+@include ./translation-specs/translator.md -> translator
 
 @include ./arch-model.md
 
@@ -20,7 +20,7 @@
 
 适用于 PL/SQL 存储过程 → 基于 **4 文件分层架构**（Entity/Mapper/Service/ServiceImpl）的 Spring Boot + MyBatis 工程翻译场景。规约主体为分层架构与存储过程→Java 组件映射规约；版本与框架配置见末尾【强制】段落。
 
-> **架构决策以 `## 架构模型` 段为唯一事实源**：角色集合、角色→目录/后缀映射、实体后缀/注解、异常基类、跨包调用 FQN 模式、覆盖率排除、主类扫描包一律以本规约 `## 架构模型` 段（由 `@include ./arch-model.md` 内联）为准。下方 §一/§3.2/§4.1/§十四 等章节的 4 文件示例仅作说明，与架构模型段冲突时以架构模型段为准。引擎确定性 builder（DO/test-shell/verify/test-case）直接读架构模型，不读本节示例文字。用户 `--spec` 整体替换本规约即可切换架构模型（如换 DDD 规约则 `--spec .opencode/docs/ddd/java-code-spec.md` 按 DDD 跑）。
+> **架构决策以 `## 架构模型` 段为唯一事实源**：角色集合、角色→目录/后缀映射、实体后缀/注解、异常基类、跨包调用 FQN 模式、覆盖率排除、主类扫描包一律以本规约 `## 架构模型` 段（由 `@include ./arch-model.md` 内联）为准。下方 §一/§3.2/§4.1/§十四 等章节的 4 文件示例仅作说明，与架构模型段冲突时以架构模型段为准。引擎确定性 builder（DO/test-shell/verify/test-case）直接读架构模型，不读本节示例文字。用户 `--spec` 整体替换本规约即可切换架构模型（如换 DDD 规约则 `--spec .opencode/specs/ddd/java-code-spec.md` 按 DDD 跑）。
 
 > **结构模型由本规约驱动（架构无关 workflow）**：分层架构、组件角色、层路径、入口角色、测试目标、非业务目录一律以本规约 `## 架构模型` 段为准——workflow 引擎与 agent 提示词不写死任何具体模型，scaffold 据架构模型填 `packageMappings.components[]` 与 `coverageExcludes`，translate/review/verify 据此建壳/翻译/审查/归因。用户 `--spec` 整体替换本规约即可切换架构模型（如换 DDD 规约则按 DDD 跑）。
 

@@ -346,7 +346,7 @@ scanner 逐文件 `readFileSync` 全部源码到内存做 AST/regex 解析。虽
 | 引擎级读取白名单 | ❌ 通配符 | 只注入当前批次需要的文件路径 |
 | 大输出截断 | ✅ 已实现 | `truncateStringsDeep` 递归截断 >10KB 字符串 |
 | Schema 预获取 | ✅ 已实现 | `schema-fetcher.ts` 前置拉取 DDL，减少 inventory.json 构建负担 |
-| Java 代码规约注入 | ✅ 已实现 | `docs/java-code-spec.md` 自动注入，减少 agent .md 文件体积 |
+| Java 代码规约注入 | ✅ 已实现 | `specs/java-code-spec.md` 自动注入，减少 agent .md 文件体积 |
 | L3 质量门控 | ✅ 已实现 | 确定性数值阈值（G1/G3/G6），门控不通过直接 rejected |
 | refName 重载规范 | ✅ 已实现 | 重载子程序用 `{name}__{序号}` 消除歧义 |
 | 跨 Schema 分级校验 | ✅ 已实现 | blocking（必须修正）/ warning（显式确认），避免误报卡流程 |

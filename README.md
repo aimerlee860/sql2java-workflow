@@ -155,7 +155,7 @@ nohup opencode run "/sql2java resume" --dangerously-skip-permissions --format js
 
 ## Java 代码规约
 
-`.opencode/docs/java-code-spec.md` 统一规约自动注入 java-architect / translator / reviewer 三个 agent（命名/格式/OOP/集合异常/中文注释/ORM 映射/工程结构）。违反【强制】→ major/critical，出现英文注释标记为 major。`--spec <file>` 按 `##` 章节覆盖同名章节、独有章节追加，`## 工程结构` 章节自动提取目录结构；文件发现优先级：`--spec` → `<sourcePath>/project-spec.md`。
+`.opencode/specs/java-code-spec.md` 统一规约自动注入 java-architect / translator / reviewer 三个 agent（命名/格式/OOP/集合异常/中文注释/ORM 映射/工程结构）。违反【强制】→ major/critical，出现英文注释标记为 major。`--spec <file>` 按 `##` 章节覆盖同名章节、独有章节追加，`## 工程结构` 章节自动提取目录结构；文件发现优先级：`--spec` → `<sourcePath>/project-spec.md`。
 
 ## 技术栈
 
